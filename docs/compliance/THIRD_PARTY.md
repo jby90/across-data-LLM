@@ -22,6 +22,9 @@
 | pillow | HPND | A | 图像处理(OCR 渲染页面) | 依赖 | 否 | — |
 | pytesseract | Apache-2.0 | A | Tesseract 命令行封装 | 依赖 | 否 | — |
 | Tesseract OCR 5.5(外部程序) | Apache-2.0 | A | 扫描件 OCR,以独立进程调用,不链接进产品 | 独立进程 | 否 | — |
+| LibreOffice Writer 7.4(`libreoffice-writer-nogui`,外部程序) | MPL-2.0(含 LGPL/Apache-2.0 组件,见 Debian copyright) | B | 官方申报表/合同 Word 转 PDF(`soffice --headless --convert-to pdf`),以独立子进程调用,不静态或动态链接进应用代码,无源码修改 | 独立进程 | 否 | 工程已登记 |
+| Liberation Fonts(`fonts-liberation`) | OFL-1.1 | A | 容器内 LibreOffice 西文字体替换(Times New Roman / Arial 度量兼容) | 字体文件 | 否 | — |
+| DejaVu Fonts(`fonts-dejavu-core`) | Bitstream Vera / Arev 宽松许可(Public Domain 增补) | A | 容器内 LibreOffice 复选框与符号字形(`☐` U+2610 / `☑` U+2611)渲染 | 字体文件 | 否 | — |
 | Tesseract 语言包 eng/ara/fra(tessdata_fast) | Apache-2.0 | A | OCR 语言模型,来源 github.com/tesseract-ocr/tessdata_fast;SHA-256:eng `7D4322BD…170B2`、ara `E3206D3D…3E729`、fra `CED03756…445CA` | 数据文件 | 否 | — |
 | Tesseract 阿语语言包 ara(tessdata_best) | Apache-2.0 | A | 仅作隔离 OCR 候选探测，未替换线上语言包；[官方仓库](https://github.com/tesseract-ocr/tessdata_best)，SHA-256 `ab9d157d8e38ca00e7e39c7d5363a5239e053f5b0dbdb3167dde9d8124335896`；来源与探测记录见 `docs/reviews/s5-sources-20261025-ocr-provenance.json` | 数据文件 | 否 | — |
 
@@ -62,7 +65,7 @@ S12 新增：WeasyPrint 70.0（BSD-3-Clause）、pydyf/cssselect2/tinycss2/weben
 
 Pyphen 0.18.1 的 Python 代码由上游明确三选一授权，本发行选择 MPL-1.1，保留代码、许可证和来源 https://github.com/Kozea/Pyphen；生产镜像删除全部未使用的 dictionaries，避免分发独立授权的字典，报告禁用自动断字。未修改源码，可从对应版本源码取得；工程登记不等于人工法务审批。
 
-Pango/GLib/FriBidi 等原生动态库使用 Debian 原包（LGPL），HarfBuzz 为 MIT、FreeType 采用 FTL。保留 `/usr/share/doc/*/copyright`，不静态链接、不修改，可以自行替换动态库；对应源码通过 Debian Sources/包管理器按部署记录的版本获得。Windows MSYS2 包仅用于本机 QA，不进入产品镜像。镜像最终 [164 个 Debian 包、源包版本、原始许可标签及版权文件哈希](native-linux-runtime.json) 已实采，164 个版权文件均存在。清单也包含基础系统工具，其未标准化的许可标签不表示应用依赖自动准入或法务批准；279 条应用依赖扫描的范围与操作系统清单不同。
+Pango/GLib/FriBidi 等原生动态库使用 Debian 原包（LGPL），HarfBuzz 为 MIT、FreeType 采用 FTL；LibreOffice Writer（`libreoffice-writer-nogui`）作为未修改独立命令行进程调用（MPL-2.0），与 `fonts-liberation`、`fonts-dejavu-core` 一并保留系统包 `/usr/share/doc/*/copyright`，不静态链接、不修改，可以自行替换系统包；对应源码通过 Debian Sources/包管理器按部署记录的版本获得。Windows MSYS2 / GTK3 运行库仅用于本机 QA，不进入产品镜像。镜像最终 [242 个 Debian 包、源包版本、原始许可标签及版权文件哈希](native-linux-runtime.json) 已实采，242 个版权文件均存在。清单也包含基础系统工具，其未标准化的许可标签不表示应用依赖自动准入或法务批准；283 条应用依赖扫描的范围与操作系统清单不同。
 
 字体使用 Fontsource WOFF2 和固定提交的 Google Fonts TTF，OFL-1.1，来源、SHA-256、RFN 和子集策略见 [FONTS.md](FONTS.md)。nginx 为 BSD-2-Clause，Node/uv 仅构建使用（MIT / MIT OR Apache-2.0）。
 

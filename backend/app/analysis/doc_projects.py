@@ -1583,7 +1583,9 @@ async def _official_rendered(session: AsyncSession, task: AnalysisTask, form_cod
     return data, form["name_zh"].split("：", 1)[-1], form
 
 
-async def _docx_form_to_pdf(docx_bytes: bytes, title_part: str) -> bytes:
+async def _docx_form_to_pdf(
+    docx_bytes: bytes, title_part: str, *, foreign: bool = False, table_style: str = "formal_black"
+) -> bytes:
     from app.analysis import official_docx as od
     from app.analysis.document_templates import _render_pdf
     from app.analysis.docx_pdf import PdfEngineUnavailable, docx_to_pdf, engine
@@ -1594,7 +1596,9 @@ async def _docx_form_to_pdf(docx_bytes: bytes, title_part: str) -> bytes:
         except PdfEngineUnavailable:
             pass
     blocks = await asyncio.to_thread(od.docx_preview_blocks, docx_bytes)
-    return await asyncio.to_thread(_render_pdf, Rendered(blocks=blocks), title_part)
+    return await asyncio.to_thread(
+        _render_pdf, Rendered(blocks=blocks), title_part, table_style=table_style, foreign=foreign
+    )
 
 
 async def _official_pdf(
@@ -2748,7 +2752,16 @@ async def export_all(
         ):
             try:
                 edpb_bytes, edpb_label = await D.edpb_en_docx(session, task, draft=False, actor_user_id=user.user_id)
-                made.append((f"{i:02d}b_{named(task_title, edpb_label, ext='docx')}", edpb_bytes))
+                if via_word or fmt == "docx":
+                    made.append((f"{i:02d}b_{named(task_title, edpb_label, ext='docx')}", edpb_bytes))
+                elif fmt == "pdf":
+                    builtin_docx_forms.append(
+                        (
+                            f"{i:02d}b_{named(task_title, edpb_label, ext='pdf')}",
+                            edpb_bytes,
+                            "EDPB DPIA Template 2026 (Official EN)",
+                        )
+                    )
             except Exception as exc:  # noqa: BLE001
                 log.warning("打包成稿生成欧盟标准英文范本略过：%s", exc)
     if not draft and overview_now.get("third_country_checklists"):
@@ -2760,7 +2773,18 @@ async def export_all(
     await session.close()
 
     for out_name, raw_docx, label_part in builtin_docx_forms:
-        originals.append((out_name, await _docx_form_to_pdf(raw_docx, label_part)))
+        is_edpb_en = label_part.startswith("EDPB ")
+        originals.append(
+            (
+                out_name,
+                await _docx_form_to_pdf(
+                    raw_docx,
+                    label_part,
+                    foreign=is_edpb_en,
+                    table_style="edpb" if is_edpb_en else "formal_black",
+                ),
+            )
+        )
 
     if via_word and made:
         try:

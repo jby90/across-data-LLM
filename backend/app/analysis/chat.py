@@ -277,6 +277,11 @@ async def add_message(
     options: list[str] | None = None,
     slot: str | None = None,
 ) -> AnalysisMessage:
+    # 锁定父任务行再读取最大序号，防止后台制度附件对照等异步任务与用户实时提问并发写入时发生 uq_analysis_msg_seq 序号冲突
+    with session.no_autoflush:
+        await session.execute(
+            select(AnalysisTask.id).where(AnalysisTask.id == task_id).with_for_update()
+        )
     last = (
         await session.execute(
             select(func.max(AnalysisMessage.seq_no)).where(AnalysisMessage.task_id == task_id)

@@ -1,7 +1,8 @@
 <?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
-  <!-- No system-font include: export only the three registered OFL families. -->
+  <!-- Registered OFL-1.1 / permissive open-source fonts for WeasyPrint & LibreOffice PDF export. -->
+  <dir>/usr/local/share/fonts/cyshuhe</dir>
   <dir prefix="relative">inter</dir>
   <dir prefix="relative">notosanssc</dir>
   <dir prefix="relative">notonaskharabic</dir>
@@ -13,6 +14,62 @@
   <alias>
     <family>Arial</family>
     <prefer><family>Liberation Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>Calibri</family>
+    <prefer><family>Liberation Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>Segoe UI Symbol</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>Wingdings</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>Wingdings 2</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>Symbol</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>仿宋_GB2312</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>仿宋</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>宋体</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>SimSun</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>楷体_GB2312</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>楷体</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>方正小标宋简体</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>黑体</family>
+    <prefer><family>Noto Sans SC</family></prefer>
+  </alias>
+  <alias>
+    <family>SimHei</family>
+    <prefer><family>Noto Sans SC</family></prefer>
   </alias>
   <cachedir prefix="xdg">fontconfig</cachedir>
 </fontconfig>

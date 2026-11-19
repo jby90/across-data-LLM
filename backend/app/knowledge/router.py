@@ -788,7 +788,7 @@ async def list_translations(
     review_status: str | None = None,
     document_id: uuid.UUID | None = None,
     limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=2147483647),
     include_history: bool = False,
     include_short: bool = Query(default=True),
 ) -> list[ClauseTranslationOut]:
@@ -1196,7 +1196,7 @@ async def knowledge_history(
     target_id: uuid.UUID,
     _: AdminSideDep,
     session: SessionDep,
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=2147483647),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     from app.knowledge.history import record_payload
@@ -1233,7 +1233,7 @@ async def graph_runs(
     _: PlatformAdminDep,
     session: SessionDep,
     country_code: str = Query(default="SG", min_length=2, max_length=2),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=2147483647),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[dict]:
     from app.knowledge.history import record_payload
@@ -2508,7 +2508,7 @@ async def get_reader_relations(
     _: UserDep,
     session: SessionDep,
     version_id: uuid.UUID | None = None,
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=2147483647),
     limit: int = Query(default=60, ge=1, le=120),
 ):
     return await reader_relations(session, document_id, version_id, offset, limit)
@@ -2519,7 +2519,7 @@ async def get_user_regulation_detail(
     document_id: uuid.UUID,
     _: UserDep,
     session: SessionDep,
-    clause_offset: int = Query(default=0, ge=0),
+    clause_offset: int = Query(default=0, ge=0, le=2147483647),
     clause_limit: int = Query(default=12, ge=1, le=100),
     keyword: str = Query(default="", max_length=200),
     focus_clause_id: uuid.UUID | None = None,
@@ -2741,7 +2741,7 @@ async def list_public_standards(
     kind: str | None = Query(None, max_length=24),
     q: str | None = Query(None, max_length=80),
     limit: int = Query(1000, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
 ) -> dict:
     """User-portal read-only automotive data & cybersecurity technical standards directory (in_force + upcoming)."""
     from app.analysis.workflow_engine import country_name_zh

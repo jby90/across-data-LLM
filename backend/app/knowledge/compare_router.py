@@ -124,10 +124,10 @@ async def compare_versions(
     document_id: uuid.UUID,
     _: UserDep,
     session: SessionDep,
-    base: int = Query(ge=1, description="较早的版本号"),
-    target: int = Query(ge=1, description="较新的版本号"),
+    base: int = Query(ge=1, le=2147483647, description="较早的版本号"),
+    target: int = Query(ge=1, le=2147483647, description="较新的版本号"),
     only_changes: bool = True,
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
 ) -> dict:
     doc = await _document(session, document_id)
     if base == target:
@@ -176,9 +176,9 @@ async def admin_compare_versions(
     document_id: uuid.UUID,
     user: AdminSideDep,
     session: SessionDep,
-    base: int = Query(ge=1),
-    target: int = Query(ge=1),
+    base: int = Query(ge=1, le=2147483647),
+    target: int = Query(ge=1, le=2147483647),
     only_changes: bool = True,
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
 ) -> dict:
     return await compare_versions(document_id, user, session, base, target, only_changes, offset)

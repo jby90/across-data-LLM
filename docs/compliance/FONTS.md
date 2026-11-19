@@ -16,4 +16,4 @@ PDF 由 WeasyPrint 70 + Pango/HarfBuzz 进行阿拉伯文整形、从右到左�
 
 旧 SourceHanSansCN-Medium.ttf 的来源尚未重新确认，S12 渲染不再使用或随生产镜像分发，Git 历史保留。字体核验属于工程检查，人工法务确认仍待完成。
 
-Windows 开发验证需要官方 MSYS2 UCRT64 的 Pango 动态库，设置 WEASYPRINT_DLL_DIRECTORIES；Linux 容器安装 Debian 的 libpango-1.0-0、libpangoft2-1.0-0、libharfbuzz-subset0。原生库保持未修改、动态加载，许可证原件留在系统包 copyright 目录。
+Windows 开发验证需要官方 MSYS2 UCRT64 的 Pango 动态库，设置 WEASYPRINT_DLL_DIRECTORIES；Linux 容器安装 Debian 的 libpango-1.0-0、libpangoft2-1.0-0、libharfbuzz-subset0，以及供 LibreOffice 无头转换官方申报表格使用的 fonts-liberation（OFL-1.1）与 fonts-dejavu-core（Bitstream Vera / Arev 宽松许可，覆盖 U+2610/U+2611 复选框字形），并在镜像构建阶段由上述已校验 `NotoSansSC[wght].ttf` 生成静态 Regular(400)/Bold(700) 实例（保留 `Noto Sans SC` 字族名与 OFL.txt 原文，不改动 `backend/app/analysis/fonts/` 原文件字节）。原生库保持未修改、动态加载，许可证原件留在系统包 copyright 目录。

@@ -47,6 +47,8 @@ _PUA_CHAR_MAP = {
     "\uf02a": "\u2610",
 }
 _PUA_RE = re.compile(r"[\ue000-\uf8ff]")
+_BOX_SPLIT_RE = re.compile(r"([\u2610\u2611\u2612\u2713\u25a0\u25a1\u25aa\u2022]+)")
+_XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 _LOCK = threading.Lock()
 _CACHE: OrderedDict[str, bytes] = OrderedDict()
@@ -124,10 +126,14 @@ def _set_rfonts(rpr: ET.Element, font_name: str) -> None:
     rf.attrib.pop(_W + "hint", None)
 
 
-def _rewrite_ooxml_symbols(original_xml: bytes, font_name: str) -> bytes | None:
+def _rewrite_ooxml_symbols(original_xml: bytes, font_name: str, *, for_libreoffice: bool = False) -> bytes | None:
     xml_text = original_xml.decode("utf-8", errors="ignore")
-    if ":sym" not in xml_text and not _PUA_RE.search(xml_text):
+    has_sym = ":sym" in xml_text or bool(_PUA_RE.search(xml_text)) or bool(_BOX_SPLIT_RE.search(xml_text))
+    has_lo_fix = for_libreoffice and (":docGrid" in xml_text or ":u " in xml_text or ":u>" in xml_text)
+    if not has_sym and not has_lo_fix:
         return None
+    import copy
+
     for prefix, uri in re.findall(rb'xmlns:([A-Za-z0-9]+)="([^"]+)"', original_xml[:8000]):
         ET.register_namespace(prefix.decode(), uri.decode())
     root = ET.fromstring(original_xml)
@@ -165,20 +171,97 @@ def _rewrite_ooxml_symbols(original_xml: bytes, font_name: str) -> bytes | None:
             t_el.text = _map_pua_text(t_el.text or "")
             changed = True
 
+    # Ensure literal Unicode ballot/geometric box glyphs inside <w:t> also bind to DejaVu Sans / Segoe UI Symbol
+    # without altering the font/weight of adjacent CJK or Latin label text in mixed runs.
+    for parent in root.iter():
+        runs = [c for c in parent if c.tag == _W + "r"]
+        if not runs:
+            continue
+        idx = 0
+        children = list(parent)
+        while idx < len(children):
+            el = children[idx]
+            if el.tag != _W + "r":
+                idx += 1
+                continue
+            r_children = list(el)
+            t_nodes = [c for c in r_children if c.tag == _W + "t"]
+            if len(t_nodes) != 1 or not t_nodes[0].text or not _BOX_SPLIT_RE.search(t_nodes[0].text):
+                idx += 1
+                continue
+            rpr = el.find(_W + "rPr")
+            rf = rpr.find(_W + "rFonts") if rpr is not None else None
+            if rf is not None and rf.get(_W + "ascii") == font_name and rf.get(_W + "eastAsia") == font_name:
+                idx += 1
+                continue
+            raw_txt = t_nodes[0].text
+            other_non_rpr = [c for c in r_children if c.tag not in (_W + "rPr", _W + "t")]
+            parts = [p for p in _BOX_SPLIT_RE.split(raw_txt) if p]
+            if len(parts) == 1 and _BOX_SPLIT_RE.fullmatch(parts[0]) and not other_non_rpr:
+                if rpr is None:
+                    rpr = ET.Element(_W + "rPr")
+                    el.insert(0, rpr)
+                _set_rfonts(rpr, font_name)
+                changed = True
+                idx += 1
+                continue
+            if other_non_rpr:
+                idx += 1
+                continue
+            new_runs: list[ET.Element] = []
+            for seg in parts:
+                nr = ET.Element(_W + "r")
+                nr_rpr = copy.deepcopy(rpr) if rpr is not None else ET.Element(_W + "rPr")
+                if _BOX_SPLIT_RE.fullmatch(seg):
+                    _set_rfonts(nr_rpr, font_name)
+                if len(nr_rpr) or nr_rpr.attrib:
+                    nr.append(nr_rpr)
+                nt = ET.SubElement(nr, _W + "t")
+                nt.text = seg
+                if seg[:1].isspace() or seg[-1:].isspace():
+                    nt.set(_XML_SPACE, "preserve")
+                new_runs.append(nr)
+            parent.remove(el)
+            for offset_i, nr in enumerate(new_runs):
+                parent.insert(idx + offset_i, nr)
+            children = list(parent)
+            changed = True
+            idx += len(new_runs)
+
     for lvl in root.iter(_W + "lvl"):
         lvl_text = lvl.find(_W + "lvlText")
         if lvl_text is None:
             continue
         val = lvl_text.get(_W + "val") or ""
-        if not _PUA_RE.search(val):
+        if not _PUA_RE.search(val) and not _BOX_SPLIT_RE.search(val):
             continue
-        lvl_text.set(_W + "val", _map_pua_text(val))
+        if _PUA_RE.search(val):
+            lvl_text.set(_W + "val", _map_pua_text(val))
         rpr = lvl.find(_W + "rPr")
         if rpr is None:
             rpr = ET.Element(_W + "rPr")
             lvl.append(rpr)
         _set_rfonts(rpr, font_name)
         changed = True
+
+    if for_libreoffice:
+        # LibreOffice Writer snaps table paragraphs with exact line=320 onto 2x docGrid(linePitch=317)=634 twips
+        # when w:docGrid w:type="lines" is active; relaxing type to "default" preserves exact 4-page CAC table layout.
+        for dg in root.iter(_W + "docGrid"):
+            if dg.get(_W + "type") in ("lines", "linesAndChars"):
+                dg.set(_W + "type", "default")
+                changed = True
+        # LibreOffice suppresses underline rendering on trailing ASCII space-only runs (e.g. "其他________").
+        for r in root.iter(_W + "r"):
+            rpr = r.find(_W + "rPr")
+            u_el = rpr.find(_W + "u") if rpr is not None else None
+            if u_el is None or (u_el.get(_W + "val") or "none") == "none":
+                continue
+            for t_el in r.findall(_W + "t"):
+                txt = t_el.text or ""
+                if txt and " " in txt and txt.strip(" ") == "":
+                    t_el.text = txt.replace(" ", "\u00a0") + "\u200c"
+                    changed = True
 
     if not changed:
         return None
@@ -190,7 +273,9 @@ def _rewrite_ooxml_symbols(original_xml: bytes, font_name: str) -> bytes | None:
     return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' + out_xml
 
 
-def _materialize_sym_for_libreoffice(docx_bytes: bytes, *, font_name: str = "DejaVu Sans") -> bytes:
+def _materialize_sym_for_libreoffice(
+    docx_bytes: bytes, *, font_name: str = "DejaVu Sans", for_libreoffice: bool = False
+) -> bytes:
     """Replace proprietary Wingdings/Symbol ``<w:sym>`` checkboxes and PUA list bullets with standard
     Unicode glyphs (``☑`` U+2611, ``☐`` U+2610, ``•`` U+2022, ``▪`` U+25AA, ``✓`` U+2713) across
     document, numbering, styles, and header/footer XML parts so converted PDFs contain zero PUA codepoints."""
@@ -208,7 +293,7 @@ def _materialize_sym_for_libreoffice(docx_bytes: bytes, *, font_name: str = "Dej
             continue
         base = name.rsplit("/", 1)[-1]
         if base in ("document.xml", "numbering.xml", "styles.xml", "footnotes.xml", "endnotes.xml") or base.startswith(("header", "footer")):
-            rewritten = _rewrite_ooxml_symbols(zin.read(name), font_name)
+            rewritten = _rewrite_ooxml_symbols(zin.read(name), font_name, for_libreoffice=for_libreoffice)
             if rewritten is not None:
                 replacements[name] = rewritten
 
@@ -222,24 +307,27 @@ def _materialize_sym_for_libreoffice(docx_bytes: bytes, *, font_name: str = "Dej
 
 
 def _convert_dir(folder: Path, kind: str) -> None:
-    if kind == "libreoffice":
-        files = sorted(str(p) for p in folder.glob("*.docx"))
-        soffice_bin = _soffice() or "soffice"
-        for idx in range(0, len(files), 2):
-            batch = files[idx : idx + 2]
-            with tempfile.TemporaryDirectory(prefix="cysh-lo-prof-") as prof:
-                user_install = f"-env:UserInstallation={Path(prof).resolve().as_uri()}"
-                subprocess.run(
-                    [soffice_bin, user_install, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", str(folder), *batch],
-                    check=True, capture_output=True, timeout=TIMEOUT,
-                )
-        return
-    script = folder / "convert.ps1"
-    script.write_text(WORD_SCRIPT, encoding="utf-8")
-    subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Dir", str(folder)],
-        check=True, capture_output=True, timeout=TIMEOUT,
-    )
+    try:
+        if kind == "libreoffice":
+            files = sorted(str(p) for p in folder.glob("*.docx"))
+            soffice_bin = _soffice() or "soffice"
+            for idx in range(0, len(files), 2):
+                batch = files[idx : idx + 2]
+                with tempfile.TemporaryDirectory(prefix="cysh-lo-prof-") as prof:
+                    user_install = f"-env:UserInstallation={Path(prof).resolve().as_uri()}"
+                    subprocess.run(
+                        [soffice_bin, user_install, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", str(folder), *batch],
+                        check=True, capture_output=True, timeout=TIMEOUT,
+                    )
+            return
+        script = folder / "convert.ps1"
+        script.write_text(WORD_SCRIPT, encoding="utf-8")
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Dir", str(folder)],
+            check=True, capture_output=True, timeout=TIMEOUT,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise PdfEngineUnavailable("Word 转 PDF 失败") from exc
 
 
 def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
@@ -266,7 +354,9 @@ def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
             with tempfile.TemporaryDirectory(prefix="cysh-pdf-") as tmp:
                 folder = Path(tmp)
                 for i, (_, data) in enumerate(todo):
-                    payload = _materialize_sym_for_libreoffice(data, font_name=sym_font)
+                    payload = _materialize_sym_for_libreoffice(
+                        data, font_name=sym_font, for_libreoffice=(kind == "libreoffice")
+                    )
                     (folder / f"{i:03d}.docx").write_bytes(payload)
                 _convert_dir(folder, kind)
                 for i, (key, _) in enumerate(todo):

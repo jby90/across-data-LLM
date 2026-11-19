@@ -62,7 +62,7 @@ async def items(
     status: str | None = Query(None, max_length=16),
     q: str | None = Query(None, max_length=60),
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
 ) -> list[dict]:
     stmt = select(StandardEntry).order_by(
         StandardEntry.published_on.desc().nulls_last(), StandardEntry.number

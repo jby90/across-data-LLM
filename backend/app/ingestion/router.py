@@ -4,7 +4,18 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
+from fastapi import (
+    Path as ApiPath,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,7 +164,7 @@ async def list_documents(
     country_code: str | None = None,
     site_id: uuid.UUID | None = None,
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
     _: Principal = Depends(require_admin_side),
     session: AsyncSession = Depends(get_session),
 ):
@@ -691,7 +702,7 @@ async def settle_check_item(
 @router.post("/versions/{version_id}/pages/{page}/reread", summary="重新识别扫描件的某一页")
 async def reread_page(
     version_id: uuid.UUID,
-    page: int,
+    page: int = ApiPath(..., ge=-2147483648, le=2147483647),
     _: Principal = Depends(require_platform_admin),
     session: AsyncSession = Depends(get_session),
 ):
@@ -707,7 +718,7 @@ async def reread_page(
 @router.get("/versions/{version_id}/pages/{page}.png", summary="原文某一页的图")
 async def page_image(
     version_id: uuid.UUID,
-    page: int,
+    page: int = ApiPath(..., ge=-2147483648, le=2147483647),
     _: Principal = Depends(require_admin_side),
     session: AsyncSession = Depends(get_session),
 ):
@@ -752,7 +763,7 @@ async def check_version(
 async def list_clauses(
     version_id: uuid.UUID,
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
     _: Principal = Depends(require_admin_side),
     session: AsyncSession = Depends(get_session),
 ):

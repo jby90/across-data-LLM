@@ -322,3 +322,169 @@ def test_p0_docx_to_pdf_many_exceeds_cache_size_without_keyerror(monkeypatch):
     assert res2[-1] == b"%PDF-1.4-new-4"
 
 
+def test_round2_pdf_fallback_subprocess_wrap_and_ooxml_checkboxes(monkeypatch, tmp_path):
+    """Round-2: _convert_dir wraps subprocess errors into PdfEngineUnavailable; OOXML symbol rewrite isolates literal ☐/☑ & relaxes docGrid; builtin fallback emits 0 dict headers, 0 '列1', and 0 CJK in EDPB EN."""
+    import subprocess
+
+    from app.analysis import docx_pdf
+    from app.analysis import official_docx as od
+    from app.analysis.document_templates import Rendered, build_pdf
+    from app.analysis.official_eu_edpb_dpia import render_edpb_2026_docx
+
+    # P2-④: subprocess TimeoutExpired and CalledProcessError must raise PdfEngineUnavailable
+    (tmp_path / "000.docx").write_bytes(b"PK\x03\x04")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd="soffice", timeout=5)),
+    )
+    with pytest.raises(docx_pdf.PdfEngineUnavailable):
+        docx_pdf._convert_dir(tmp_path, "libreoffice")
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: (_ for _ in ()).throw(subprocess.CalledProcessError(1, "soffice")),
+    )
+    with pytest.raises(docx_pdf.PdfEngineUnavailable):
+        docx_pdf._convert_dir(tmp_path, "libreoffice")
+
+    # P1-②: _rewrite_ooxml_symbols splits mixed literal ☐/☑ + CJK runs, relaxes docGrid, and preserves underlined spaces
+    sample_xml = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        b"<w:body><w:p>"
+        b'<w:r><w:rPr><w:rFonts w:eastAsia="\xe4\xbb\xbf\xe5\xae\x8b_GB2312"/><w:b/></w:rPr>'
+        b"<w:t>\xe2\x98\x90\xe6\x94\xbf\xe5\xba\x9c\xe9\x83\xa8\xe9\x97\xa8 \xe2\x98\x91\xe4\xbc\x81\xe4\xb8\x9a</w:t></w:r>"
+        b'<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">      </w:t></w:r>'
+        b"</w:p>"
+        b'<w:sectPr><w:docGrid w:type="lines" w:linePitch="317"/></w:sectPr>'
+        b"</w:body></w:document>"
+    )
+    rewritten = docx_pdf._rewrite_ooxml_symbols(sample_xml, "DejaVu Sans", for_libreoffice=True)
+    assert rewritten is not None
+    rw_txt = rewritten.decode("utf-8")
+    assert "DejaVu Sans" in rw_txt
+    assert "仿宋_GB2312" in rw_txt
+    assert 'w:type="default"' in rw_txt
+    assert "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0" in rw_txt
+
+    # P2-③: CYSH_PDF_ENGINE=builtin fallback produces zero dict headers, zero '列1', and zero CJK in EDPB EN
+    monkeypatch.setenv("CYSH_PDF_ENGINE", "builtin")
+    decl_docx = od.cn_declaration({"company_name": "启衡智行汽车科技（上海）有限公司"}).data
+    decl_blocks = od.docx_preview_blocks(decl_docx)
+    assert not any("列1" in str(h) for b in decl_blocks if b.get("type") == "table" for h in b.get("head", []))
+    decl_pdf = build_pdf(Rendered(blocks=decl_blocks), "汽车数据出境评估申报表", table_style="formal_black")
+    pdf_doc = pdfium.PdfDocument(decl_pdf)
+    try:
+        decl_pdf_txt = "\n".join(pdf_doc[i].get_textpage().get_text_bounded() for i in range(len(pdf_doc)))
+    finally:
+        pdf_doc.close()
+    assert "{'title'" not in decl_pdf_txt and "列1" not in decl_pdf_txt
+    assert "启衡智行" in decl_pdf_txt
+
+    edpb_docx = render_edpb_2026_docx(
+        {
+            "controller": {
+                "name_and_address": "Qiheng Smart Mobility GmbH, Friedrichstrasse 88, 10117 Berlin, Germany",
+                "contact_or_rep": "dpo@qiheng-mobility.eu",
+            },
+        },
+        "2026-11-19",
+    )
+    edpb_blocks = od.docx_preview_blocks(edpb_docx)
+    edpb_pdf = build_pdf(
+        Rendered(blocks=edpb_blocks),
+        "EDPB DPIA Template 2026 (Official EN)",
+        foreign=True,
+        table_style="edpb",
+    )
+    edpb_doc = pdfium.PdfDocument(edpb_pdf)
+    try:
+        edpb_txt = "\n".join(edpb_doc[i].get_textpage().get_text_bounded() for i in range(len(edpb_doc)))
+    finally:
+        edpb_doc.close()
+    assert "{'title'" not in edpb_txt
+    assert not re.search(r"[\u3400-\u9fff\u3000-\u303f\uff01-\uff60]", edpb_txt)
+    assert "Qiheng Smart Mobility GmbH" in edpb_txt
+
+
+async def test_round2_nul_guard_int32_bounds_and_concurrent_add_message(client, seed, session_factory):
+    """Round-2: P2-⑥ NUL byte -> 422 Chinese; P3-⑦ int32 overflow -> 422 Chinese; P2-⑤ concurrent add_message -> 0 UniqueViolationError."""
+    from sqlalchemy import select
+
+    from app.analysis.chat import add_message
+    from app.analysis.models import AnalysisMessage, AnalysisTask
+
+    member = bearer(await login(client, "user", "a-member@example.com"))
+    admin = bearer(await login(client, "admin", "admin@example.com"))
+
+    # P2-⑥: NUL byte in query string and JSON body -> 422 Chinese
+    for hdr, nul_url in (
+        (member, "/api/knowledge/clauses?keyword=abc%00def"),
+        (admin, "/api/admin/sites?country_code=%00"),
+        (admin, "/api/admin/audit-logs?q=%00"),
+    ):
+        r = await client.get(nul_url, headers=hdr)
+        assert r.status_code == 422, f"Expected 422 for {nul_url}, got {r.status_code}"
+        assert "非法空字符" in r.json()["detail"]
+
+    r_json = await client.post(
+        "/api/analysis/tasks",
+        headers=member,
+        json={"title": "测试\u0000标题", "kind": "advice", "country_code": "SG"},
+    )
+    assert r_json.status_code == 422
+    assert "非法空字符" in r_json.json()["detail"]
+
+    # P3-⑦: int32 overflow on query params -> 422 pure Chinese
+    for bad_int_url in (
+        "/api/admin/agent-studio/workflow?version_no=2147483648",
+        "/api/admin/agent-studio/workflow?version_no=-2147483649",
+        "/api/admin/agent-studio/workflow?version_no=999999999999",
+        "/api/admin/audit-logs?offset=2147483648",
+    ):
+        r_int = await client.get(bad_int_url, headers=admin)
+        assert r_int.status_code == 422, f"Expected 422 for {bad_int_url}, got {r_int.status_code}"
+        detail = r_int.json()["detail"]
+        assert isinstance(detail, str) and re.search(r"[\u4e00-\u9fff]", detail)
+        assert not re.search(r"overflow|int32|input should be|pydantic", detail, re.I)
+
+    # P2-⑤: 8 concurrent add_message writers on the same AnalysisTask must serialize cleanly with seq_no 1..8
+    async with session_factory() as s:
+        race_task = AnalysisTask(
+            org_id=seed["org_a"].id,
+            created_by=seed["a_member"].id,
+            title="并发消息序号核验会话",
+            kind="advice",
+            country_code="SG",
+            vehicle_model="E7",
+            scenario_type="ota_diagnostics",
+            status="completed",
+        )
+        s.add(race_task)
+        await s.commit()
+        race_tid = race_task.id
+
+    async def _writer(idx: int) -> int:
+        async with session_factory() as s:
+            msg = await add_message(s, race_tid, "user" if idx % 2 == 0 else "assistant", f"并发消息-{idx}")
+            await s.commit()
+            return msg.seq_no
+
+    seqs = await asyncio.gather(*(_writer(i) for i in range(8)))
+    assert sorted(seqs) == list(range(1, 9))
+    async with session_factory() as s:
+        stored_seqs = list(
+            (
+                await s.scalars(
+                    select(AnalysisMessage.seq_no)
+                    .where(AnalysisMessage.task_id == race_tid)
+                    .order_by(AnalysisMessage.seq_no)
+                )
+            ).all()
+        )
+        assert stored_seqs == list(range(1, 9))
+
+
+

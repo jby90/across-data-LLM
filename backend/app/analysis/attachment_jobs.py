@@ -129,6 +129,9 @@ async def _job(factory: async_sessionmaker, task_id: uuid.UUID, file_ids: list[u
             log.exception("文件对照失败")
             await session.rollback()
             why = str(exc) if isinstance(exc, NarrativeError) else "服务暂时不可用"
+            await session.execute(
+                select(AnalysisTask.id).where(AnalysisTask.id == task_id).with_for_update()
+            )
             for f in (await session.scalars(select(att.TaskAttachment).where(att.TaskAttachment.id.in_(file_ids)))).all():
                 f.review_state, f.review_error = "failed", why[:500]
             await add_message(
@@ -154,6 +157,9 @@ async def perform_review(session: AsyncSession, task: AnalysisTask, files: list[
         summary = {**review.counts, "dropped": len(review.dropped), "gaps": review.gaps}
         subject = f"《{files[0].filename}》"
         anchor = files[0]
+    await session.execute(
+        select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update()
+    )
     session.add(
         att.AttachmentReview(
             org_id=task.org_id, attachment_id=anchor.id, country_code=country,

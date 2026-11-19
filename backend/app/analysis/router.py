@@ -20,6 +20,9 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi import (
+    Path as ApiPath,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -850,7 +853,7 @@ async def get_citation_policy(_: AdminDep):
 async def get_admin_workflow(
     _: AdminDep,
     session: SessionDep,
-    version_no: int | None = Query(default=None),
+    version_no: int | None = Query(default=None, ge=1, le=2147483647),
 ) -> AgentWorkflowConfigOut:
     """查看当前激活(或指定版本)的多智能体编排拓扑、节点详情与上下游连接(只读锁定态)。"""
     await ensure_workflow_config(session)
@@ -930,7 +933,7 @@ async def activate_workflow_version(
 async def export_admin_workflow_dsl(
     _: AdminDep,
     session: SessionDep,
-    version_no: int | None = Query(default=None),
+    version_no: int | None = Query(default=None, ge=1, le=2147483647),
 ) -> dict:
     """导出多智能体编排配置包(JSON DSL),供长久维护、跨环境迁移与版本备份。"""
     await ensure_workflow_config(session)
@@ -1615,8 +1618,8 @@ async def diff_user_report_versions(
     task_id: uuid.UUID,
     user: UserDep,
     session: SessionDep,
-    from_version: int = Query(default=1, ge=1),
-    to_version: int = Query(default=2, ge=1),
+    from_version: int = Query(default=1, ge=1, le=2147483647),
+    to_version: int = Query(default=2, ge=1, le=2147483647),
 ) -> ReportDiffOut:
     task = await session.get(AnalysisTask, task_id)
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
@@ -1673,8 +1676,9 @@ async def diff_user_report_versions(
 @user_router.get("/tasks/{task_id}/reports/{version_no}/export.{ext}")
 async def export_user_report(
     task_id: uuid.UUID,
-    version_no: int,
-    ext: Literal["docx", "pdf", "zip"],
+    version_no: int = ApiPath(..., ge=-2147483648, le=2147483647),
+    ext: Literal["docx", "pdf", "zip"] = ApiPath(...),
+    *,
     user: UserDep,
     session: SessionDep,
     dimension: Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"] | None = None,

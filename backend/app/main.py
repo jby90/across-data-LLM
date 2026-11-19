@@ -74,8 +74,38 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
     )
 
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    def _contains_nul(val: object) -> bool:
+        if isinstance(val, str):
+            return "\x00" in val
+        if isinstance(val, dict):
+            return any(_contains_nul(k) or _contains_nul(v) for k, v in val.items())
+        if isinstance(val, list):
+            return any(_contains_nul(it) for it in val)
+        return False
+
+    _NUL_ERR = {"detail": "请求参数包含非法空字符，请修改后重试"}
+
     @app.middleware("http")
     async def isolate_model_egress_context(request, call_next):
+        raw_qs: bytes = request.scope.get("query_string") or b""
+        if b"\x00" in raw_qs or b"%00" in raw_qs.lower() or "\x00" in request.url.path:
+            return JSONResponse(status_code=422, content=_NUL_ERR)
+        ctype = (request.headers.get("content-type") or "").lower()
+        if ctype.startswith("application/json"):
+            raw_body = await request.body()
+            if b"\x00" in raw_body or b"\\u0000" in raw_body.lower():
+                import json as _json
+
+                try:
+                    parsed_json = _json.loads(raw_body)
+                except Exception:  # noqa: BLE001
+                    parsed_json = None
+                if b"\x00" in raw_body or _contains_nul(parsed_json):
+                    return JSONResponse(status_code=422, content=_NUL_ERR)
+
         from app.audit import describe as audit_describe
         from app.audit.service import record_request, wants_record
         from app.core.redaction import llm_scope
@@ -99,9 +129,6 @@ def create_app() -> FastAPI:
             # 管理端改了内容：后台重建用户端视图；测试里直接清空，下一次请求即重算
             clear_user_caches() if "PYTEST_CURRENT_TEST" in os.environ else after_admin_change()
         return response
-
-    from fastapi.exceptions import RequestValidationError
-    from fastapi.responses import JSONResponse
 
     @app.get("/api/health", tags=["system"])
     async def health(request: Request):
@@ -196,6 +223,9 @@ def create_app() -> FastAPI:
         "q": "检索词",
         "base": "基准版本号",
         "target": "对比版本号",
+        "version_no": "版本号",
+        "from_version": "起始版本号",
+        "to_version": "目标版本号",
         "block": "修订段落序号",
         "filename": "文件名称",
     }

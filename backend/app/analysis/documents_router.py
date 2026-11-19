@@ -1161,7 +1161,7 @@ async def export_document_pdf(
         if pdf_bytes is None:
             fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, official[0])
             pdf_bytes = await asyncio.to_thread(
-                build_pdf, Rendered(blocks=fb_blocks), {"title": official[1]}, table_style="formal_black"
+                build_pdf, Rendered(blocks=fb_blocks), official[1], table_style="formal_black"
             )
         return Response(
             pdf_bytes,
@@ -1253,7 +1253,11 @@ async def export_edpb_en_pdf(
     if pdf_bytes is None:
         fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, data)
         pdf_bytes = await asyncio.to_thread(
-            build_pdf, Rendered(blocks=fb_blocks), {"title": label}, table_style="edpb"
+            build_pdf,
+            Rendered(blocks=fb_blocks),
+            "EDPB DPIA Template 2026 (Official EN)",
+            foreign=True,
+            table_style="edpb",
         )
     return Response(
         pdf_bytes,

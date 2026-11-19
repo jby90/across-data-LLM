@@ -50,7 +50,7 @@
 
 服务器直连 Docker Hub 不稳定，本次从官方 registry 下载并校验平台 digest/归档哈希后 `docker load`；Python 生产 wheels 对照 `uv.lock` 哈希离线安装。基础为 Python 3.12-slim-bookworm、Nginx 1.28-alpine、pgvector:pg16；原始清单见私有构建归档，公开提交不含镜像二进制。
 
-构建参数使用固定 uv 0.13.5 的官方 PyPI Linux wheel生成本地工具镜像，`UV_IMAGE=cyshuhe-build-uv:0.13.5`、`UV_OFFLINE=1`。离线 `uv pip install --require-hashes --no-index --find-links` 安装从锁文件导出的 Linux requirements；不是使用未锁版本替代。APT 使用 HTTPS 镜像且保留 Debian 签名验证。
+构建参数默认使用标准联网模式（`UV_OFFLINE` 未设置，`docker compose up -d --build` 与 `deploy/install_and_start.*` 可直接在联网服务器一键构建）。仅在全离线内网环境构建时，需先将锁文件导出的 `requirements-linux.txt` 与对应 Linux `.whl` 文件放入 `backend/wheelhouse/`，再显式传入 `--build-arg UV_IMAGE=cyshuhe-build-uv:0.13.5 --build-arg UV_OFFLINE=1` 执行 `uv pip install --require-hashes --no-index --find-links`。APT 使用 HTTPS 镜像且保留 Debian 签名验证。
 
 前端本机执行锁定依赖安装、typecheck 和生产构建，再用 `deploy/Dockerfile.prebuilt` 制作静态镜像。准备包含该 Dockerfile、`static.conf` 和本次 `dist/` 的独立构建上下文，执行 `docker build -f Dockerfile.prebuilt -t <标签> .`，避免在 1.6 GiB 主机运行 Node 构建。标准多阶段文件已提供，但不声称本次在本机未启动的 Docker Desktop 上做过 Compose 全栈验收。
 

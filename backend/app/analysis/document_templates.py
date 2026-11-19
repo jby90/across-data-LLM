@@ -649,9 +649,27 @@ def _render_pdf(
                 blocks.append({"t": "p", "text": "• " + item})
         elif kind == "table":
             width = block.get("widths") or _infer_widths(block["head"], block["rows"])
-            blocks.append(
-                {"t": "table", "head": block["head"], "rows": block["rows"], "widths": width}
-            )
+            if block.get("no_head"):
+                spans = block.get("spans")
+                grid_rows: list[list[dict]] = []
+                for r_idx, row in enumerate(block["rows"]):
+                    g_row: list[dict] = []
+                    for c_idx, cell_text in enumerate(row):
+                        rs, cs = (
+                            spans[r_idx][c_idx]
+                            if spans and r_idx < len(spans) and c_idx < len(spans[r_idx])
+                            else [1, 1]
+                        )
+                        if rs == 0 or cs == 0:
+                            continue
+                        g_row.append({"text": cell_text, "rows": rs, "span": cs})
+                    if g_row:
+                        grid_rows.append(g_row)
+                blocks.append({"t": "grid", "rows": grid_rows, "widths": width})
+            else:
+                blocks.append(
+                    {"t": "table", "head": block["head"], "rows": block["rows"], "widths": width}
+                )
     task = SimpleNamespace(country_code="", vehicle_model="")
     rv = SimpleNamespace(consulting=None)
     return render_pdf(

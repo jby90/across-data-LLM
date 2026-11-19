@@ -1706,7 +1706,7 @@ def docx_preview_blocks(data: bytes) -> list[dict]:
                     tbl_block = {
                         "type": "table",
                         "no_head": True,
-                        "head": [f"列{i + 1}" for i in range(col_n)],
+                        "head": ["" for _ in range(col_n)],
                         "rows": grid_cells,
                     }
                     if any(s != [1, 1] for row_s in grid_spans for s in row_s):

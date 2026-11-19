@@ -43,7 +43,7 @@ _ORG_REFRESH_AT: dict[uuid.UUID, float] = {}
 async def list_notifications(
     user: UserDep,
     session: SessionDep,
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
     limit: int = Query(50, ge=1, le=100),
 ):
     from app.updates.notices import refresh
@@ -532,7 +532,7 @@ def discovery_items(rows, now):
 async def discoveries(
     _: AdminDep,
     session: SessionDep,
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
     limit: int = Query(50, ge=1, le=100),
     country: str | None = Query(None, min_length=1, max_length=8),
 ):
@@ -699,7 +699,7 @@ _DIM_KEYWORDS: tuple[tuple[str, re.Pattern], ...] = (
 async def changes(
     _: AdminDep,
     session: SessionDep,
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
     limit: int = Query(50, ge=1, le=100),
     country: str | None = Query(None, min_length=1, max_length=8),
 ):

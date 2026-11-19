@@ -129,7 +129,7 @@ async def search(
     admin: AdminDep,
     session: SessionDep,
     f: Annotated[Filters, Depends()],
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=2147483647),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict:
     total = (await session.execute(f.apply(select(func.count()).select_from(AuditLog)))).scalar_one()
