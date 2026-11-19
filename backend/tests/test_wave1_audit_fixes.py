@@ -450,6 +450,38 @@ async def test_round2_nul_guard_int32_bounds_and_concurrent_add_message(client, 
         assert isinstance(detail, str) and re.search(r"[\u4e00-\u9fff]", detail)
         assert not re.search(r"overflow|int32|input should be|pydantic", detail, re.I)
 
+    # Deleting a site with archived Document provenance returns clean 409 Chinese conflict instead of 500 FK error
+    from app.ingestion.models import Document
+    from app.sources.models import SourceSite
+
+    async with session_factory() as s:
+        st_with_doc = SourceSite(
+            country_code="TN",
+            publisher="INT",
+            language="fr",
+            document_type="REGULATION",
+            entry_url="https://www.intt.tn/test-provenance.pdf",
+            strategy="DIRECT",
+        )
+        s.add(st_with_doc)
+        await s.flush()
+        s.add(
+            Document(
+                site_id=st_with_doc.id,
+                country_code="TN",
+                source_url="https://www.intt.tn/test-provenance.pdf",
+                title="Décision INT",
+                language="fr",
+                document_type="REGULATION",
+            )
+        )
+        await s.commit()
+        sid_with_doc = str(st_with_doc.id)
+
+    r_del_site = await client.delete(f"/api/admin/sites/{sid_with_doc}", headers=admin)
+    assert r_del_site.status_code == 409
+    assert "停用站点" in r_del_site.json()["detail"]
+
     # P2-⑤: 8 concurrent add_message writers on the same AnalysisTask must serialize cleanly with seq_no 1..8
     async with session_factory() as s:
         race_task = AnalysisTask(

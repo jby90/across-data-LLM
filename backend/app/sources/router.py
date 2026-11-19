@@ -321,6 +321,12 @@ async def delete_site(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     site = await _get_site(session, site_id)
+    has_docs = await session.scalar(select(Document.id).where(Document.site_id == site_id).limit(1))
+    if has_docs is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "该站点下已有入库归档法规与采集存证记录，为保障法规溯源链完整，请停用站点而非直接删除",
+        )
     await session.delete(site)
     await session.commit()
     return {"deleted_site_id": str(site_id), "country_code": site.country_code}
