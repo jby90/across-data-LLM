@@ -9,7 +9,17 @@ from time import perf_counter
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select

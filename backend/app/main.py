@@ -196,6 +196,8 @@ def create_app() -> FastAPI:
         "q": "检索词",
         "base": "基准版本号",
         "target": "对比版本号",
+        "block": "修订段落序号",
+        "filename": "文件名称",
     }
 
     _BANNED_VALIDATION_JARGON = re.compile(
@@ -228,7 +230,8 @@ def create_app() -> FastAPI:
         # 自定义校验器抛出的中文业务提示原样保留（剥离英文前缀并拦截黑话）
         if etype in ("value_error", "assertion_error") or raw_msg.startswith("Value error,"):
             cleaned = re.sub(r"^(?:Value error|Assertion failed),\s*", "", raw_msg).strip()
-            if cleaned and re.search(r"[\u4e00-\u9fff]", cleaned) and not _BANNED_VALIDATION_JARGON.search(cleaned):
+            has_cjk = bool(re.search(r"[\u4e00-\u9fff]", cleaned))
+            if cleaned and has_cjk and not _BANNED_VALIDATION_JARGON.search(cleaned):
                 return cleaned
 
         if etype == "json_invalid":
@@ -238,7 +241,9 @@ def create_app() -> FastAPI:
         if etype == "list_type":
             return f"{label}格式不正确，请提交列表格式"
         if etype == "missing":
-            return "请求体不能为空，请补充必填内容" if list(loc) == ["body"] else f"缺少必填项：{label}"
+            if list(loc) == ["body"]:
+                return "请求体不能为空，请补充必填内容"
+            return f"缺少必填项：{label}"
         if etype.startswith("uuid"):
             return f"{label}格式无效，请确认所访问的资源链接是否正确"
         if etype.startswith(("int_", "integer")):

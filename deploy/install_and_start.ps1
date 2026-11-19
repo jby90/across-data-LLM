@@ -11,15 +11,18 @@ if (-not (Test-Path ".env")) {
     $bytes1 = New-Object byte[] 16; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes1)
     $bytes2 = New-Object byte[] 16; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes2)
     $bytes3 = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes3)
+    $bytes4 = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes4)
     $pgPwd = [BitConverter]::ToString($bytes1).Replace("-", "").ToLower()
     $rtPwd = [BitConverter]::ToString($bytes2).Replace("-", "").ToLower()
     $jwtSec = [BitConverter]::ToString($bytes3).Replace("-", "").ToLower()
+    $ssoSec = [BitConverter]::ToString($bytes4).Replace("-", "").ToLower()
     $raw = Get-Content ".env" -Raw
     $raw = $raw.Replace("CHANGE_ME_STRONG_PG_SUPER_PASSWORD", $pgPwd)
     $raw = $raw.Replace("CHANGE_ME_STRONG_PG_RUNTIME_PASSWORD", $rtPwd)
     $raw = $raw.Replace("CHANGE_ME_AT_LEAST_32_CHARS_RANDOM_HEX_SECRET", $jwtSec)
+    $raw = $raw.Replace("CHANGE_ME_AT_LEAST_32_CHARS_PORTAL_SSO_SECRET", $ssoSec)
     Set-Content ".env" -Value $raw -Encoding UTF8
-    Write-Host "已自动生成 deploy/.env 随机数据库与会话密钥（如需外部大模型请补充 CYSH_LLM_API_KEY）" -ForegroundColor Green
+    Write-Host "已自动生成 deploy/.env 随机数据库、会话与门户单点对接密钥（如需外部大模型请补充 CYSH_LLM_API_KEY）" -ForegroundColor Green
 }
 
 Write-Host "[3/4] 构建并启动全套私有化服务容器..." -ForegroundColor Cyan

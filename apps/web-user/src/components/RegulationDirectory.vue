@@ -63,7 +63,7 @@ watch([() => props.selectedId, levels], ([id]) => {
   <nav class="regulation-directory" aria-label="国家与文件层级目录" data-testid="regulation-directory">
     <div class="directory-heading">
       <strong>法规目录</strong>
-      <span>{{ showPeripheral ? '当前含外围配套法规' : '核心常用法规 · 阅读条文' }}</span>
+      <span v-if="showPeripheral !== undefined">{{ showPeripheral ? '当前含外围配套法规' : '核心常用法规 · 阅读条文' }}</span>
     </div>
     <section v-for="c in countries" :key="c.code" class="directory-country">
       <button class="directory-folder country-folder" :aria-expanded="expandedCountry === c.code"
@@ -98,10 +98,13 @@ watch([() => props.selectedId, levels], ([id]) => {
     </section>
     <p v-if="!countries.length" class="directory-hint">暂无可显示的国家与文件。</p>
     <p v-if="hidden" class="directory-hint">
-      {{ showPeripheral ? `已展开全部 ${hidden} 份配套文件 · ` : `另有 ${hidden} 份配套文件默认收起 · ` }}
-      <button type="button" class="toggle-peripheral" data-testid="directory-toggle-peripheral" @click="emit('toggle-peripheral')">
-        {{ showPeripheral ? '收起配套文件' : '展开全部收录' }}
-      </button>
+      <template v-if="showPeripheral !== undefined">
+        {{ showPeripheral ? `已展开全部 ${hidden} 份配套文件 · ` : `另有 ${hidden} 份配套文件默认收起 · ` }}
+        <button type="button" class="toggle-peripheral" data-testid="directory-toggle-peripheral" @click="emit('toggle-peripheral')">
+          {{ showPeripheral ? '收起配套文件' : '展开全部收录' }}
+        </button>
+      </template>
+      <template v-else>另有 {{ hidden }} 份配套文件默认收起，可通过名称检索查阅</template>
     </p>
   </nav>
 </template>

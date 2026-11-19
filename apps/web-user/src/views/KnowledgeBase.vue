@@ -1774,10 +1774,10 @@ summary {
     line-height: 28px !important;
     padding: 0 4px !important;
     margin: 0 1px !important;
-    font-size: 12px !important;
+    font-size: 13px !important;
   }
   .knowledge-page :deep(.el-pagination__total) {
-    font-size: 12px !important;
+    font-size: 13px !important;
     margin-left: 4px !important;
   }
 }

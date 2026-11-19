@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import uuid
 
 import pypdfium2 as pdfium
 import pytest
@@ -290,4 +289,36 @@ async def test_wave4_arabic_ocr_clean_and_deepseek_thinking_disabled(monkeypatch
     assert out.data == {"answer": "ok"}
     assert len(captured) == 1
     assert captured[0].get("thinking") == {"type": "disabled"}
+
+
+def test_p0_docx_to_pdf_many_exceeds_cache_size_without_keyerror(monkeypatch):
+    """P0 regression: docx_to_pdf_many must never raise KeyError when batch size exceeds CACHE_SIZE or evicts cached entries."""
+    from pathlib import Path
+
+    from app.analysis import docx_pdf
+
+    monkeypatch.setattr(docx_pdf, "CACHE_SIZE", 3)
+    monkeypatch.setattr(docx_pdf, "engine", lambda: "libreoffice")
+    docx_pdf._CACHE.clear()
+
+    def _fake_convert_dir(folder: Path, kind: str) -> None:
+        for docx_file in sorted(folder.glob("*.docx")):
+            docx_file.with_suffix(".pdf").write_bytes(b"%PDF-1.4-" + docx_file.read_bytes())
+
+    monkeypatch.setattr(docx_pdf, "_convert_dir", _fake_convert_dir)
+
+    # 10 distinct files (> CACHE_SIZE=3) + 1 duplicate inside the same batch
+    batch1 = [f"doc-{i}".encode() for i in range(10)] + [b"doc-0"]
+    res1 = docx_pdf.docx_to_pdf_many(batch1)
+    assert len(res1) == 11
+    assert res1[0] == b"%PDF-1.4-doc-0" and res1[10] == b"%PDF-1.4-doc-0"
+    assert res1[9] == b"%PDF-1.4-doc-9"
+
+    # Second batch mixing surviving cache entries ('doc-8', 'doc-9') with 5 brand-new files that evict 'doc-8'
+    batch2 = [b"doc-8", b"doc-9"] + [f"new-{j}".encode() for j in range(5)]
+    res2 = docx_pdf.docx_to_pdf_many(batch2)
+    assert len(res2) == 7
+    assert res2[0] == b"%PDF-1.4-doc-8"
+    assert res2[-1] == b"%PDF-1.4-new-4"
+
 

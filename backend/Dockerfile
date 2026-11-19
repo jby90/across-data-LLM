@@ -13,7 +13,7 @@ ARG APT_SECURITY_MIRROR=https://deb.debian.org/debian-security
 RUN sed -i "s|http://deb.debian.org/debian-security|${APT_SECURITY_MIRROR}|g; s|http://deb.debian.org/debian|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
-    fonts-liberation \
+    fonts-liberation libreoffice-writer-nogui \
     tesseract-ocr tesseract-ocr-eng tesseract-ocr-ara tesseract-ocr-fra \
     && rm -rf /var/lib/apt/lists/*
 

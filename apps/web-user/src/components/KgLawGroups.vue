@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { LawGroup } from '@cyshuhe/shared/src/graphGrouping'
+import { UNASSIGNED_GROUP, type LawGroup } from '@cyshuhe/shared/src/graphGrouping'
 
 const props = defineProps<{
   groups: LawGroup[]
@@ -24,6 +24,8 @@ const directoryPage = ref(1)
 const matched = computed(() => props.groups.filter(g => g.name.toLowerCase().includes(search.value.trim().toLowerCase())))
 const directoryPages = computed(() => Math.max(1, Math.ceil(matched.value.length / 12)))
 const directory = computed(() => matched.value.slice((directoryPage.value - 1) * 12, directoryPage.value * 12))
+const lawOnlyCount = computed(() => props.groups.filter(g => g.id !== UNASSIGNED_GROUP).length)
+const hasSystemGroup = computed(() => props.groups.some(g => g.id === UNASSIGNED_GROUP))
 const selected = computed(() => props.groups.find(g => g.id === props.selectedGroupId))
 watch([search, () => props.groups], () => { directoryPage.value = 1 })
 </script>
@@ -48,7 +50,7 @@ watch([search, () => props.groups], () => { directoryPage.value = 1 })
     </template>
     <template v-else-if="!selected">
       <div class="law-toolbar">
-        <div><strong>法规目录</strong><span class="law-muted">{{ groups.length }} 组 · 点击法规展开关系</span></div>
+        <div><strong>法规目录</strong><span class="law-muted">{{ lawOnlyCount }} 部法规<template v-if="hasSystemGroup"> · 另含 1 组国家与监管顶层关联</template> · 点击展开关系</span></div>
         <el-input v-model="search" clearable aria-label="搜索图谱法规" placeholder="搜索法规名称" style="width: 260px" />
       </div>
       <div class="law-grid" data-testid="kg-law-directory">

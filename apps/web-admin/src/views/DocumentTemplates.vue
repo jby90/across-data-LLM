@@ -1043,8 +1043,8 @@ onMounted(() => { load(); loadOfficial() })
 .outline-item { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; padding: 7px 8px; border-radius: 6px; text-align: left; cursor: pointer; color: #334155; font-size: 13px; }
 .outline-item:hover { background: #f8fafc; }
 .outline-item.active { background: #eff6ff; color: #1d4ed8; font-weight: 600; }
-.outline-sub-item { padding: 5px 8px 5px 18px; font-size: 12.5px; color: #475569; }
-.o-idx { flex: none; font-size: 12px; color: #64748b; background: #f1f5f9; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.outline-sub-item { padding: 5px 8px 5px 18px; font-size: 13px; color: #475569; }
+.o-idx { flex: none; font-size: 13px; color: #64748b; background: #f1f5f9; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 .o-idx-nar { color: #0f766e; background: #f0fdfa; border: 1px solid #99f6e4; }
 .o-idx-sub { color: #0f766e; background: #f8fafc; border: 1px solid #cbd5e1; }
 .outline-item.active .o-idx { background: #dbeafe; color: #1d4ed8; }

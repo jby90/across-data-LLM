@@ -50,7 +50,7 @@ _PUA_RE = re.compile(r"[\ue000-\uf8ff]")
 
 _LOCK = threading.Lock()
 _CACHE: OrderedDict[str, bytes] = OrderedDict()
-CACHE_SIZE = 8
+CACHE_SIZE = 32
 TIMEOUT = 180
 
 WORD_SCRIPT = r"""
@@ -244,13 +244,24 @@ def _convert_dir(folder: Path, kind: str) -> None:
 
 def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
     """The PDF of each Word file, in order (batched office-suite run for all that are not cached)."""
+    if not files:
+        return []
     kind = engine()
     if kind == "builtin":
         raise PdfEngineUnavailable("本机没有可把 Word 转成 PDF 的办公软件")
     keys = [hashlib.sha256(f).hexdigest() for f in files]
     sym_font = "DejaVu Sans" if kind == "libreoffice" else "Segoe UI Symbol"
     with _LOCK:
-        todo = [(k, f) for k, f in zip(keys, files, strict=True) if k not in _CACHE]
+        out: dict[str, bytes] = {}
+        todo: list[tuple[str, bytes]] = []
+        seen_todo: set[str] = set()
+        for k, f in zip(keys, files, strict=True):
+            if k in _CACHE:
+                _CACHE.move_to_end(k)
+                out[k] = _CACHE[k]
+            elif k not in seen_todo:
+                seen_todo.add(k)
+                todo.append((k, f))
         if todo:
             with tempfile.TemporaryDirectory(prefix="cysh-pdf-") as tmp:
                 folder = Path(tmp)
@@ -262,13 +273,16 @@ def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
                     pdf = folder / f"{i:03d}.pdf"
                     if not pdf.exists():
                         raise PdfEngineUnavailable("Word 转 PDF 失败")
-                    _CACHE[key] = pdf.read_bytes()
+                    pdf_bytes = pdf.read_bytes()
+                    out[key] = pdf_bytes
+                    _CACHE[key] = pdf_bytes
                     while len(_CACHE) > CACHE_SIZE:
                         _CACHE.popitem(last=False)
             gc.collect()
         for k in keys:
-            _CACHE.move_to_end(k)
-        return [_CACHE[k] for k in keys]
+            if k in _CACHE:
+                _CACHE.move_to_end(k)
+        return [out[k] for k in keys]
 
 
 def docx_to_pdf(data: bytes) -> bytes:

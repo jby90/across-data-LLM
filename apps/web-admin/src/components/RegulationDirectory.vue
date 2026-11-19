@@ -10,11 +10,13 @@ const props = defineProps<{
   level?: string
   loading?: boolean
   hidden?: number
+  showPeripheral?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'country', code: string): void
   (e: 'level', key: string): void
   (e: 'document', id: string): void
+  (e: 'toggle-peripheral'): void
 }>()
 const expandedCountry = ref(props.country)
 const expandedLevel = ref(props.level || '')
@@ -59,7 +61,10 @@ watch([() => props.selectedId, levels], ([id]) => {
 
 <template>
   <nav class="regulation-directory" aria-label="国家与文件层级目录" data-testid="regulation-directory">
-    <div class="directory-heading"><strong>法规目录</strong></div>
+    <div class="directory-heading">
+      <strong>法规目录</strong>
+      <span v-if="showPeripheral !== undefined">{{ showPeripheral ? '当前含外围配套法规' : '核心常用法规 · 阅读条文' }}</span>
+    </div>
     <section v-for="c in countries" :key="c.code" class="directory-country">
       <button class="directory-folder country-folder" :aria-expanded="expandedCountry === c.code"
         :disabled="loading" @click="toggleCountry(c.code)">
@@ -92,11 +97,21 @@ watch([() => props.selectedId, levels], ([id]) => {
       </div>
     </section>
     <p v-if="!countries.length" class="directory-hint">暂无可显示的国家与文件。</p>
-    <p v-if="hidden" class="directory-hint">另有 {{ hidden }} 份配套文件默认收起，可通过名称检索查阅</p>
+    <p v-if="hidden" class="directory-hint">
+      <template v-if="showPeripheral !== undefined">
+        {{ showPeripheral ? `已展开全部 ${hidden} 份配套文件 · ` : `另有 ${hidden} 份配套文件默认收起 · ` }}
+        <button type="button" class="toggle-peripheral" data-testid="directory-toggle-peripheral" @click="emit('toggle-peripheral')">
+          {{ showPeripheral ? '收起配套文件' : '展开全部收录' }}
+        </button>
+      </template>
+      <template v-else>另有 {{ hidden }} 份配套文件默认收起，可通过名称检索查阅</template>
+    </p>
   </nav>
 </template>
 
 <style scoped>
+.toggle-peripheral { color: #2563eb; font-size: 13px; padding: 0; text-decoration: none; }
+.toggle-peripheral:hover { text-decoration: underline; }
 .regulation-directory { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; min-width: 0; }
 .directory-heading { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
 .directory-heading strong { font-size: 16px; color: #263c4b; }

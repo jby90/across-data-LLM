@@ -46,6 +46,7 @@ export function graphSeries(
     categories: categories.map(c => ({ name: c.name, itemStyle: { color: c.color } })),
     data: nodes.map(n => {
       const selected = n.id === options.selectedId
+      const cleanedLabel = cleanGraphNodeLabel(n.name)
       return {
         id: n.id, name: n.name,
         category: categories.findIndex(c => c.type === n.type),
@@ -53,7 +54,7 @@ export function graphSeries(
         itemStyle: selected ? { borderColor: '#0f172a', borderWidth: 2 } : undefined,
         label: {
           show: selected || n.type === 'COUNTRY' || labelled.has(n.id),
-          formatter: cleanGraphNodeLabel(n.name),
+          formatter: cleanedLabel !== n.name ? cleanedLabel : undefined,
         },
       }
     }),

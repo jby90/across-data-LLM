@@ -732,7 +732,7 @@ h2 small { font-weight: 400; color: var(--el-text-color-secondary); font-size: 1
 .hist-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 14px; background: #f8fafc; margin-bottom: 10px; }
 .hist-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .hist-card-head strong { font-size: 14px; color: #1e293b; display: block; }
-.hist-time { font-size: 12.5px; color: #64748b; }
+.hist-time { font-size: 13px; color: #64748b; }
 .hist-diff-list { list-style: none; margin: 10px 0 0; padding: 8px 0 0; border-top: 1px dashed #cbd5e1; display: flex; flex-direction: column; gap: 8px; }
 .hist-diff-item { font-size: 13px; line-height: 1.6; }
 .hist-field { font-weight: 600; color: #334155; display: block; margin-bottom: 2px; }

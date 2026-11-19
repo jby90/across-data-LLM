@@ -70,7 +70,7 @@ export function groupByLaw<N extends DisplayNode, E extends DisplayEdge>(nodes: 
       const fromClause = e.evidence_clause_id ? clauseGroups.get(e.evidence_clause_id) : undefined
       const fromTitle = e.document_title ? titles.get(e.document_title) : undefined
       if (fromClause?.size) ids = fromClause
-      else if (fromTitle?.size) ids = fromTitle
+      else if (fromTitle?.size === 1) ids = fromTitle
     }
     if (!ids.size) {
       if (!groups.has(UNASSIGNED_GROUP)) groups.set(UNASSIGNED_GROUP, {

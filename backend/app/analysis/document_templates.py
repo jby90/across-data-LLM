@@ -318,7 +318,11 @@ _NO_TRANSLATION = ("", "(未提供译文)", "（未提供译文）")
 def _quote(citation: dict, limit: int = 300) -> str:
     """The Chinese rendering when there is one; otherwise the clause in its own language. A long
     clause is cut at the end of a sentence (never in the middle of one) and marked as cut."""
-    from app.analysis.clause_gate import _close_delims_before_ellipsis, clean_margin_numbers, strip_own_label
+    from app.analysis.clause_gate import (
+        _close_delims_before_ellipsis,
+        clean_margin_numbers,
+        strip_own_label,
+    )
 
     zh = strip_own_label(str(citation.get("clause_number") or ""), str(citation.get("quote_zh") or "")).strip()
     text = zh if zh not in _NO_TRANSLATION else clean_margin_numbers(str(citation.get("quote_original") or "")).strip()

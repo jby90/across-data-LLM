@@ -1117,7 +1117,7 @@ blockquote { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--el-b
   .item-row .row-actions, .row .row-actions { grid-column: 1 / -1; justify-content: flex-start; margin-top: 8px; }
   .entry-row { flex-wrap: wrap; align-items: flex-start; gap: 8px 12px; min-height: 0; padding: 14px 16px; }
   .entry-country { width: auto; }
-  .entry-meta { width: auto; font-size: 12px; }
+  .entry-meta { width: auto; font-size: 13px; }
   .entry-view { margin-left: auto; font-size: 13px; white-space: nowrap; }
   .entry-main { flex: 1 1 100%; order: 2; }
   .entry-row .entry-main > strong { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; }

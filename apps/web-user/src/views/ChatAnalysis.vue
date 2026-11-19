@@ -2063,7 +2063,7 @@ onUnmounted(() => {
 .ctx-menu li { padding: 7px 14px; cursor: pointer; color: #1e293b; }
 .ctx-menu li:hover { background: #f1f5f9; }
 .ctx-menu li.danger { color: #dc2626; }
-.s-delete { float: none; border: 0; background: transparent; color: #64748b; font-size: 12.5px; cursor: pointer; padding: 0 2px; }
+.s-delete { float: none; border: 0; background: transparent; color: #64748b; font-size: 13px; cursor: pointer; padding: 0 2px; }
 .s-tools .s-delete:first-child:hover { color: #2563eb; }
 .s-delete:hover { color: #dc2626; }
 .attachments { padding: 8px 18px 0; background: #fff; border-top: 1px solid #e2e8f0; }
@@ -2074,7 +2074,7 @@ onUnmounted(() => {
 .a-name small { color: var(--el-text-color-secondary); margin-left: 8px; font-size: 13px; }
 .a-actions { margin-left: auto; }
 .a-hint { margin: 4px 0 6px; color: var(--el-text-color-secondary); font-size: 13px; }
-.s-project { margin-right: 6px; font-size: 12.5px; color: #2563eb; white-space: nowrap; }
+.s-project { margin-right: 6px; font-size: 13px; color: #2563eb; white-space: nowrap; }
 .legacy-note { color: #64748b; font-size: 13px; margin: 6px 0 10px; }
 /* 左侧对话列表加宽到 288px，标题支持两行完整展示，已归档放在列表底部 */
 .sessions { width: 288px !important; display: flex; flex-direction: column; }

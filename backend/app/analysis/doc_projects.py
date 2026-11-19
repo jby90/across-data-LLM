@@ -2580,10 +2580,8 @@ async def _file(session: AsyncSession, task: AnalysisTask, code: str, ext: str, 
     if ext in ("docx", "pdf", "xlsx"):
         official = await D.official_docx(session, task, code, draft)
         if official is not None:
-            if ext == "pdf":  # 与 Word 同一份：由填好的官方原件转出
-                from app.analysis.docx_pdf import docx_to_pdf
-
-                return await asyncio.to_thread(docx_to_pdf, official[0]), named(task.title, official[1], ext="pdf"), "pdf"
+            if ext == "pdf":  # 与 Word 同一份：由填好的官方原件转出（无办公软件时降级内置排版）
+                return await _docx_form_to_pdf(official[0], official[1]), named(task.title, official[1], ext="pdf"), "pdf"
             if ext == "xlsx":
                 from app.analysis import official_docx as od
 

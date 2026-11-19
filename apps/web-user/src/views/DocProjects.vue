@@ -1626,10 +1626,10 @@ const allReady = computed(() => !!project.value?.final.ok)
 .item { position: relative; padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; }
 .item:hover, .item.on { background: #eff6ff; }
 .item .t { font-size: 14px; font-weight: 600; color: var(--cy-text-1); line-height: 1.5; }
-.item .sub { font-size: 12.5px; color: var(--cy-text-3); margin-top: 4px; display: flex; justify-content: space-between; align-items: center; gap: 3px 8px; flex-wrap: wrap; }
+.item .sub { font-size: 13px; color: var(--cy-text-3); margin-top: 4px; display: flex; justify-content: space-between; align-items: center; gap: 3px 8px; flex-wrap: wrap; }
 .item .tools { display: none; gap: 6px; flex: none; margin-left: auto; }
 .item:hover .tools, .item.on .tools { display: inline-flex; }
-.item .tools button { border: 0; background: transparent; color: var(--cy-text-3); font-size: 12.5px; cursor: pointer; padding: 0 2px; }
+.item .tools button { border: 0; background: transparent; color: var(--cy-text-3); font-size: 13px; cursor: pointer; padding: 0 2px; }
 .item .tools button:hover { color: #2563eb; }
 .item .actions { margin-top: 6px; display: flex; gap: 6px; }
 .main { flex: 1; min-width: 0; padding: 24px 32px; overflow-y: auto; max-height: calc(100vh - 100px); container-type: inline-size; }

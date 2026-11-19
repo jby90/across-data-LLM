@@ -1147,12 +1147,24 @@ async def export_document_pdf(
 
     official = await official_docx(session, task, code, draft)
     if official is not None:
-        # 有官方 Word 模板的文件：先释放数据库连接，再将填好的官方 Word 原件转成 PDF
-        from app.analysis.docx_pdf import docx_to_pdf
+        # 有官方 Word 模板的文件：先释放数据库连接，再将填好的官方 Word 原件转成 PDF（无办公软件时平滑降级为内置排版）
+        from app.analysis import official_docx as od
+        from app.analysis.docx_pdf import PdfEngineUnavailable, docx_to_pdf, engine
 
         await session.close()
+        pdf_bytes: bytes | None = None
+        if engine() != "builtin":
+            try:
+                pdf_bytes = await asyncio.to_thread(docx_to_pdf, official[0])
+            except PdfEngineUnavailable:
+                pdf_bytes = None
+        if pdf_bytes is None:
+            fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, official[0])
+            pdf_bytes = await asyncio.to_thread(
+                build_pdf, Rendered(blocks=fb_blocks), {"title": official[1]}, table_style="formal_black"
+            )
         return Response(
-            await asyncio.to_thread(docx_to_pdf, official[0]),
+            pdf_bytes,
             media_type="application/pdf",
             headers={"Content-Disposition": content_disposition(named(task_title, official[1], ext="pdf"))},
         )
@@ -1225,14 +1237,26 @@ async def export_edpb_en_pdf(
 ) -> Response:
     import asyncio
 
-    from app.analysis.docx_pdf import docx_to_pdf
+    from app.analysis import official_docx as od
+    from app.analysis.docx_pdf import PdfEngineUnavailable, docx_to_pdf, engine
 
     task = await _task(session, task_id, user)
     task_title = task.title
     data, label = await edpb_en_docx(session, task, draft, actor_user_id=user.user_id)
     await session.close()
+    pdf_bytes: bytes | None = None
+    if engine() != "builtin":
+        try:
+            pdf_bytes = await asyncio.to_thread(docx_to_pdf, data)
+        except PdfEngineUnavailable:
+            pdf_bytes = None
+    if pdf_bytes is None:
+        fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, data)
+        pdf_bytes = await asyncio.to_thread(
+            build_pdf, Rendered(blocks=fb_blocks), {"title": label}, table_style="edpb"
+        )
     return Response(
-        await asyncio.to_thread(docx_to_pdf, data),
+        pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": content_disposition(named(task_title, label, ext="pdf"))},
     )

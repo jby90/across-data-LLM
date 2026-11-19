@@ -15,10 +15,12 @@ if [[ ! -f ".env" ]]; then
   RAND_PG="$(openssl rand -hex 16)"
   RAND_RT="$(openssl rand -hex 16)"
   RAND_JWT="$(openssl rand -hex 32)"
+  RAND_SSO="$(openssl rand -hex 32)"
   sed -i "s/CHANGE_ME_STRONG_PG_SUPER_PASSWORD/${RAND_PG}/g" .env
   sed -i "s/CHANGE_ME_STRONG_PG_RUNTIME_PASSWORD/${RAND_RT}/g" .env
   sed -i "s/CHANGE_ME_AT_LEAST_32_CHARS_RANDOM_HEX_SECRET/${RAND_JWT}/g" .env
-  echo "已基于模板自动初始化 deploy/.env 随机数据库与会话密钥（如需接入大模型请在 deploy/.env 填写 CYSH_LLM_API_KEY）"
+  sed -i "s/CHANGE_ME_AT_LEAST_32_CHARS_PORTAL_SSO_SECRET/${RAND_SSO}/g" .env
+  echo "已基于模板自动初始化 deploy/.env 随机数据库、会话与门户单点对接密钥（如需接入大模型请在 deploy/.env 填写 CYSH_LLM_API_KEY）"
 fi
 
 echo "[3/4] 构建并启动数据库、迁移、后端接口、后台巡检及双端门户服务..."
