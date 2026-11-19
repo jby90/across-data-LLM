@@ -1,24 +1,29 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
-from app.iam.deps import Principal, require_admin_side, require_user_side
-from app.iam.models import Role
-from app.ingestion.models import Clause, Document, DocumentVersion
+from app.iam.deps import Principal, require_admin_side, require_platform_admin, require_user_side
+from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
 from app.ingestion.safety import document_available, document_is_held
 from app.knowledge.countries import country_catalog
 from app.knowledge.extractor import (
     extract_knowledge_for_country,
     seed_glossary_and_review_points,
 )
-from app.knowledge.graph_evidence import active_edge_filters, evidence_attributes
+from app.knowledge.graph_evidence import (
+    active_edge_filters,
+    evidence_attributes,
+    ontology_attributes,
+)
 from app.knowledge.models import (
     ClauseTranslation,
     GlossaryTerm,
@@ -26,12 +31,13 @@ from app.knowledge.models import (
     KgNode,
     NodeType,
     RelationType,
-    ReviewPoint,
     TranslationReviewStatus,
 )
 from app.knowledge.public_view import PublicRegulationDetail, PublicRegulationSummary
 from app.knowledge.schemas import (
     ClauseTranslationOut,
+    EdgeCreateIn,
+    EdgeRelationIn,
     EdgeReviewIn,
     GlossaryTermCreate,
     GlossaryTermOut,
@@ -39,13 +45,12 @@ from app.knowledge.schemas import (
     GraphPayloadOut,
     KgEdgeOut,
     KgNodeOut,
+    NodeCreateIn,
+    NodeEditIn,
     RegulationClauseItemOut,
     RegulationDetailOut,
     RegulationSummaryOut,
-    ReviewPointCreate,
-    ReviewPointDecideIn,
-    ReviewPointImportIn,
-    ReviewPointOut,
+    RestoreIn,
     TranslationReviewIn,
 )
 from app.knowledge.translator import (
@@ -56,9 +61,13 @@ from app.knowledge.translator import (
 from app.knowledge.user_relations import ReaderRelations, reader_relations
 from app.sources.models import SourceSite
 
-AdminOrReviewerDep = Annotated[Principal, Depends(require_admin_side)]
+AdminSideDep = Annotated[Principal, Depends(require_admin_side)]
+PlatformAdminDep = Annotated[Principal, Depends(require_platform_admin)]
 UserDep = Annotated[Principal, Depends(require_user_side)]
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+# 具体数值类属性：以条款自身抽取（含原句）为准
+OWN_CLAUSE_WINS = {"penalty_amount", "retention_period"}
 
 admin_router = APIRouter(prefix="/api/admin/knowledge", tags=["knowledge-admin"])
 user_router = APIRouter(prefix="/api/knowledge", tags=["knowledge-user"])
@@ -66,9 +75,9 @@ user_router = APIRouter(prefix="/api/knowledge", tags=["knowledge-user"])
 
 @admin_router.get("/parsed-graph-revisions")
 async def parsed_graph_revisions(
-    _: AdminOrReviewerDep,
+    _: PlatformAdminDep,
     session: SessionDep,
-    country_code: str = Query(..., pattern="^[A-Za-z]{2}$"),
+    country_code: str = Query(default="SG", pattern="^[A-Za-z]{2}$"),
 ) -> list[dict]:
     """Page-based graph proposals are for review, never active report/legal evidence."""
     from app.knowledge.history import payload_hash
@@ -101,18 +110,37 @@ async def parsed_graph_revisions(
 
 def _status_badge(review_status: str) -> tuple[bool, str]:
     if review_status == TranslationReviewStatus.APPROVED.value:
-        return True, "已复核(可作法律依据)"
+        return True, "已复核（可作法律依据）"
     if review_status == TranslationReviewStatus.REJECTED.value:
-        return False, "已驳回(待重译)"
+        return False, "已驳回（待重译）"
     if review_status == TranslationReviewStatus.STALE.value:
         return False, "法规已修订，旧译文待重核"
     if review_status == TranslationReviewStatus.TRANSLATION_FAILED.value:
-        return False, "翻译校验未通过(待重译)"
+        return False, "待人工复核"
     if review_status == TranslationReviewStatus.NOT_TRANSLATED.value:
-        return False, "未翻译"
+        return False, "暂无译文"
     if review_status == TranslationReviewStatus.SUPERSEDED.value:
-        return False, "旧版已作废"
-    return False, "机器翻译，待核对"
+        return False, "旧版已归档"
+    return False, "系统译文（已质检）"
+
+
+def _clean_glossary_hits(raw_hits: list | None) -> list:
+    if not raw_hits:
+        return []
+    from app.knowledge.legal_terms import is_stopword_term
+
+    cleaned: list = []
+    for h in raw_hits:
+        if not isinstance(h, dict):
+            continue
+        src = str(h.get("source_term") or h.get("en") or "").strip()
+        tgt = str(h.get("target_zh") or h.get("zh") or "").strip()
+        if is_stopword_term(src, tgt):
+            continue
+        if tgt and tgt.isascii() and tgt == tgt.lower():
+            continue
+        cleaned.append(h)
+    return cleaned
 
 
 async def _build_translation_outs(
@@ -181,7 +209,7 @@ async def _build_translation_outs(
                 tokens_in=int(tr.tokens_in or 0),
                 tokens_out=int(tr.tokens_out or 0),
                 duration_ms=int(tr.duration_ms or 0),
-                glossary_hits=tr.glossary_hits or [],
+                glossary_hits=_clean_glossary_hits(tr.glossary_hits),
                 unmatched_terms=tr.unmatched_terms or [],
                 quality_check_passed=tr.quality_check_passed,
                 quality_issues=tr.quality_issues or [],
@@ -197,22 +225,33 @@ async def _build_translation_outs(
 
 
 _DOC_TYPE_ZH: dict[str, str] = {
-    "act": "法律 (Act / Loi)",
-    "regulation": "行政法规与规则 (Regulation / Rules)",
-    "subsidiary": "附属立法与通告 (Subsidiary Legislation)",
-    "guidance": "监管指南与框架 (Advisory Guidelines / Framework)",
-    "guideline": "监管指南与框架 (Advisory Guidelines / Framework)",
+    "act": "法律",
+    "regulation": "行政法规与规章",
+    "subsidiary": "附属立法与通告",
+    "guidance": "监管指南与框架",
+    "guideline": "监管指南与框架",
+    "admission": "准入申报材料",
 }
+
+
+# 官方发布的准入申请须知与表格：不是立法，但车企做准入要用，在用户端单独归为一类，不混进监管指南
+ADMISSION_KIND = "ADMISSION_GUIDANCE"
+
+
+def public_doc_type(doc_type: str | None, instrument_kind: str | None) -> str:
+    return "ADMISSION" if instrument_kind == ADMISSION_KIND else (doc_type or "")
 
 
 def _doc_type_zh(doc_type: str | None, title: str = "") -> str:
     raw = (doc_type or "").lower().strip()
+    if raw == "admission":
+        return _DOC_TYPE_ZH["admission"]
     t_low = title.lower()
     if "guideline" in t_low or "guide" in t_low or "framework" in t_low:
-        return "监管指南与框架 (Guidelines / Framework)"
+        return "监管指南与框架"
     if "rules" in t_low or "regulations" in t_low or "notification" in t_low or "order" in t_low:
-        return "附属条例与实施规则 (Regulations / Rules)"
-    return _DOC_TYPE_ZH.get(raw, "法律与核心制度 (Act / Law)")
+        return "附属条例与实施规则"
+    return _DOC_TYPE_ZH.get(raw, "法律")
 
 
 def _compute_eight_attributes(
@@ -228,7 +267,7 @@ def _compute_eight_attributes(
     Evidence-backed attributes are assembled from actual current graph edges by the caller.
     """
     return {
-        key: "待核查（尚无经核验的条款依据）"
+        key: "条文未明确"
         for key in (
             "applicable_industry",
             "data_scope",
@@ -253,7 +292,8 @@ async def _build_graph_payload(
         select(KgNode)
         .where(
             KgNode.country_code == cc,
-            KgNode.review_status != "superseded",
+            KgNode.review_status.notin_(("superseded", "stale", "rejected")),
+            func.coalesce(KgNode.verify_state, "") != "retired",
             or_(
                 KgNode.document_id.is_(None),
                 KgNode.document_id.in_(select(Document.id).where(document_available())),
@@ -272,6 +312,7 @@ async def _build_graph_payload(
         select(KgEdge)
         .where(
             KgEdge.country_code == cc,
+            func.coalesce(KgEdge.verify_state, "") != "retired",
             *active_edge_filters(),
         )
         .order_by(KgEdge.relation_type)
@@ -294,16 +335,20 @@ async def _build_graph_payload(
         or 0
     )
 
+    all_clause_ids = {e.evidence_clause_id for e in edges} | {
+        n.evidence_clause_id for n in nodes if n.evidence_clause_id
+    }
     clause_ids = {e.evidence_clause_id for e in edges}
     clause_map: dict[uuid.UUID, tuple[str | None, str | None, str]] = {}
     clause_provenance: dict[uuid.UUID, dict] = {}
-    if clause_ids:
+    own_clauses: dict[uuid.UUID, tuple[str | None, str | None, str]] = {}
+    if all_clause_ids:
         c_rows = (
             await session.execute(
                 select(
                     Clause.id,
                     Clause.clause_number,
-                    Document.title,
+                    func.coalesce(func.nullif(func.btrim(Document.title_zh), ""), Document.title),
                     Clause.original_text,
                     DocumentVersion.id,
                     DocumentVersion.content_hash,
@@ -311,20 +356,62 @@ async def _build_graph_payload(
                 )
                 .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
                 .join(Document, Document.id == DocumentVersion.document_id)
-                .where(Clause.id.in_(clause_ids))
+                .where(Clause.id.in_(all_clause_ids))
             )
         ).all()
         for cid, cnum, dtitle, orig_txt, version_id, content_hash, source_url in c_rows:
-            clause_map[cid] = (cnum, dtitle, orig_txt or "")
-            clause_provenance[cid] = {
-                "evidence_version_id": version_id,
-                "evidence_content_hash": content_hash,
-                "official_source_url": source_url,
-            }
+            info = (cnum, dtitle, orig_txt or "")
+            if cid in clause_ids:
+                clause_map[cid] = info
+                clause_provenance[cid] = {
+                    "evidence_version_id": version_id,
+                    "evidence_content_hash": content_hash,
+                    "official_source_url": source_url,
+                }
+            own_clauses[cid] = info
 
     node_counts = {t.value: 0 for t in NodeType}
     for n in nodes:
         node_counts[n.node_type] = node_counts.get(n.node_type, 0) + 1
+
+    inst_doc_ids = {n.document_id for n in nodes if n.document_id}
+    inst_titles: dict[uuid.UUID, str] = {}
+    inst_relevances: dict[uuid.UUID, str] = {}
+    if inst_doc_ids:
+        for did, dtzh, drel in (
+            await session.execute(
+                select(
+                    Document.id,
+                    func.coalesce(func.nullif(func.btrim(Document.title_zh), ""), Document.title),
+                    Document.relevance,
+                ).where(Document.id.in_(inst_doc_ids))
+            )
+        ).all():
+            if dtzh:
+                inst_titles[did] = dtzh
+            if drel:
+                inst_relevances[did] = str(drel)
+
+    from app.knowledge.graph_verify import clean_verify_note, verify_edge, verify_node
+
+    node_verbatim_edge_ids: set[uuid.UUID] = set()
+    for e in edges:
+        src = node_by_id.get(e.source_node_id)
+        dst = node_by_id.get(e.target_node_id)
+        if not src or not dst:
+            continue
+        _, _, orig_txt = clause_map.get(e.evidence_clause_id, (None, None, ""))
+        if e.evidence_quote and (not orig_txt or e.evidence_quote in orig_txt):
+            node_verbatim_edge_ids.add(src.id)
+            node_verbatim_edge_ids.add(dst.id)
+
+    node_verification: dict[uuid.UUID, tuple[str, str]] = {}
+    for n in nodes:
+        node_verification[n.id] = verify_node(
+            n,
+            has_current_clause=bool(n.evidence_clause_id and n.evidence_clause_id in own_clauses),
+            has_verbatim_edge=(n.id in node_verbatim_edge_ids),
+        )
 
     edge_counts = {r.value: 0 for r in RelationType}
     edge_outs: list[KgEdgeOut] = []
@@ -332,6 +419,7 @@ async def _build_graph_payload(
     node_rels: dict[uuid.UUID, set[str]] = {}
     node_data_names: dict[uuid.UUID, list[str]] = {}
     node_obl_names: dict[uuid.UUID, list[str]] = {}
+    incident_edges: dict[uuid.UUID, list[KgEdge]] = {}
     quote_mismatch_count = 0
 
     for e in edges:
@@ -339,6 +427,9 @@ async def _build_graph_payload(
         dst = node_by_id.get(e.target_node_id)
         if not src or not dst:
             continue
+        incident_edges.setdefault(src.id, []).append(e)
+        if dst.id != src.id:
+            incident_edges.setdefault(dst.id, []).append(e)
         connected_node_ids.add(src.id)
         connected_node_ids.add(dst.id)
         node_rels.setdefault(src.id, set()).add(e.relation_type)
@@ -352,16 +443,26 @@ async def _build_graph_payload(
         cnum, dtitle, orig_txt = clause_map.get(e.evidence_clause_id, (None, None, ""))
         if not e.evidence_quote or (orig_txt and e.evidence_quote not in orig_txt):
             quote_mismatch_count += 1
+        v_status, v_reason = verify_edge(
+            e,
+            src_node=src,
+            dst_node=dst,
+            clause_text=orig_txt,
+            src_status=node_verification.get(src.id, ("auto_verified", ""))[0],
+            dst_status=node_verification.get(dst.id, ("auto_verified", ""))[0],
+        )
+        src_display = inst_titles.get(src.document_id) if src.node_type == "INSTRUMENT" and src.document_id else None
+        dst_display = inst_titles.get(dst.document_id) if dst.node_type == "INSTRUMENT" and dst.document_id else None
         edge_outs.append(
             KgEdgeOut(
                 **clause_provenance.get(e.evidence_clause_id, {}),
                 id=e.id,
                 country_code=e.country_code,
                 source_node_id=e.source_node_id,
-                source_name_zh=src.name_zh,
+                source_name_zh=src_display or src.name_zh,
                 source_node_type=src.node_type,
                 target_node_id=e.target_node_id,
-                target_name_zh=dst.name_zh,
+                target_name_zh=dst_display or dst.name_zh,
                 target_node_type=dst.node_type,
                 relation_type=e.relation_type,
                 evidence_clause_id=e.evidence_clause_id,
@@ -371,9 +472,11 @@ async def _build_graph_payload(
                 extractor_model=e.extractor_model,
                 confidence=float(getattr(e, "confidence", 0.85)),
                 judge_verdict=str(getattr(e, "judge_verdict", "yes")),
-                judge_reason=getattr(e, "judge_reason", None),
+                judge_reason=clean_verify_note(getattr(e, "judge_reason", None)) or None,
                 is_structural=bool(getattr(e, "is_structural", False)),
                 review_status=e.review_status,
+                verification_status=v_status,
+                verification_reason=clean_verify_note(v_reason),
                 usable_as_legal_basis=(
                     e.review_status == "approved"
                     and not e.is_structural
@@ -382,14 +485,18 @@ async def _build_graph_payload(
             )
         )
 
-    # 统计本国条款总数、未挂接义务/关系的条款数、OCR/阿语需人工核对条款数
+    # 统计本国有效范围内条款总数、未挂接义务/关系的条款数、OCR/阿语需人工核对条款数
     total_clauses = int(
         (
             await session.execute(
                 select(func.count(Clause.id))
                 .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
                 .join(Document, Document.id == DocumentVersion.document_id)
-                .where(Document.country_code == cc, DocumentVersion.state == "parsed")
+                .where(
+                    Document.country_code == cc,
+                    DocumentVersion.state == "parsed",
+                    _in_scope(),
+                )
             )
         ).scalar_one()
         or 0
@@ -403,6 +510,7 @@ async def _build_graph_payload(
                 .where(
                     Document.country_code == cc,
                     DocumentVersion.state == "parsed",
+                    _in_scope(),
                     or_(
                         DocumentVersion.text_source == "ocr",
                         Document.language == "ar",
@@ -436,15 +544,41 @@ async def _build_graph_payload(
             data_names=node_data_names.get(n.id),
             obl_names=node_obl_names.get(n.id),
         )
-        actual, provenance = evidence_attributes(edges, node_by_id, clause_map, node_id=n.id)
+        actual, provenance = evidence_attributes(
+            incident_edges.get(n.id, ()), node_by_id, clause_map, node_id=n.id
+        )
+        own, own_provenance = ontology_attributes(
+            n.attributes, own_clauses.get(n.evidence_clause_id)
+        )
+        for key, value in own.items():
+            # 处罚金额、留存期限是条款里的具体数字：边的目标名只是概括，条款抽取带数字与
+            # 原句，以它为准；其余属性保留边推出的关联（带复核状态），条款抽取的补在没有的地方
+            if key in OWN_CLAUSE_WINS or key not in actual:
+                actual[key] = value
+                provenance[key] = own_provenance[key]
         merged_attrs = {
             **(n.attributes or {}),
             **eight_attrs,
             **actual,
             "attribute_evidence": provenance,
         }
+        if n.document_id and n.document_id in inst_relevances:
+            merged_attrs["scope"] = (
+                "out_of_scope"
+                if inst_relevances[n.document_id] in ("out_of_scope", "irrelevant")
+                else "in_scope"
+            )
+        if "verify_note" in merged_attrs and isinstance(merged_attrs["verify_note"], str):
+            merged_attrs["verify_note"] = clean_verify_note(merged_attrs["verify_note"])
         nout = KgNodeOut.model_validate(n)
+        if n.node_type == "INSTRUMENT" and n.document_id and n.document_id in inst_titles:
+            nout.name_zh = inst_titles[n.document_id]
+        if nout.summary and ("待人工核对" in nout.summary or "机器抽取" in nout.summary):
+            nout.summary = str((n.attributes or {}).get("model_definition_proposal") or "") or None
         nout.attributes = merged_attrs
+        nout.verification_status, nout.verification_reason = node_verification.get(
+            n.id, ("auto_verified", "")
+        )
         node_outs.append(nout)
 
     doc_scope_rows = (
@@ -504,6 +638,21 @@ async def _build_graph_payload(
             "unlinked_clauses_count": max(0, total_clauses - len(clause_ids)),
             "pending_review_edges_count": pending_edges,
             "approved_edges_count": approved_edges,
+            "auto_verified_edges_count": sum(
+                1 for e in edge_outs if e.verification_status == "auto_verified"
+            ),
+            "needs_confirmation_edges_count": sum(
+                1 for e in edge_outs if e.verification_status == "needs_confirmation"
+            ),
+            "approved_nodes_count": sum(
+                1 for n in node_outs if n.verification_status == "approved"
+            ),
+            "auto_verified_nodes_count": sum(
+                1 for n in node_outs if n.verification_status == "auto_verified"
+            ),
+            "needs_confirmation_nodes_count": sum(
+                1 for n in node_outs if n.verification_status == "needs_confirmation"
+            ),
             "stale_or_rejected_edges_count": stale_or_rejected,
             "quote_mismatch_edges_count": quote_mismatch_count,
             "ocr_or_rtl_clauses_count": ocr_or_rtl_clauses,
@@ -513,12 +662,12 @@ async def _build_graph_payload(
     )
 
 
-# ==================== 管理端与律所复核端接口 ====================
+# ==================== 管理端接口 ====================
 
 
 @admin_router.post("/extract")
 async def trigger_country_extraction(
-    _: AdminOrReviewerDep,
+    _: PlatformAdminDep,
     session: SessionDep,
     country_code: str = Query(default="SG", min_length=2, max_length=2),
     translate_sample_per_doc: int = Query(default=0, ge=0, le=50),
@@ -535,7 +684,7 @@ async def trigger_country_extraction(
 
 @admin_router.get("/glossary", response_model=list[GlossaryTermOut])
 async def list_glossary_terms(
-    _: AdminOrReviewerDep,
+    _: AdminSideDep,
     session: SessionDep,
     country_code: str | None = None,
     review_status: str | None = None,
@@ -557,11 +706,24 @@ async def list_glossary_terms(
 @admin_router.post("/glossary", response_model=GlossaryTermOut, status_code=status.HTTP_201_CREATED)
 async def create_glossary_term(
     body: GlossaryTermCreate,
-    user: AdminOrReviewerDep,
+    user: AdminSideDep,
     session: SessionDep,
 ) -> GlossaryTerm:
+    import re
+
+    from app.knowledge.legal_terms import is_stopword_term
+
+    if is_stopword_term(body.source_term, body.target_zh):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="不能将常见英文介词、冠词或无效同词映射收录为专业法律术语",
+        )
+    raw_code = (body.concept_code or "").strip()
+    if not raw_code:
+        slug = re.sub(r"[^a-z0-9]+", "_", body.source_term.strip().lower()).strip("_")[:48]
+        raw_code = slug or f"term_{uuid.uuid4().hex[:8]}"
     term = GlossaryTerm(
-        concept_code=body.concept_code.strip(),
+        concept_code=raw_code,
         country_code=body.country_code.upper() if body.country_code else None,
         language=body.language.lower().strip(),
         source_term=body.source_term.strip(),
@@ -570,9 +732,7 @@ async def create_glossary_term(
         statutory_definition=body.statutory_definition,
         source_reference=body.source_reference,
         evidence_clause_id=body.evidence_clause_id,
-        review_status="approved"
-        if user.role in (Role.PLATFORM_ADMIN, Role.REVIEWER)
-        else "pending",
+        review_status="approved",
         reviewed_by=user.user_id,
         reviewed_at=datetime.now(UTC),
     )
@@ -586,15 +746,23 @@ async def create_glossary_term(
 async def review_glossary_term(
     term_id: uuid.UUID,
     body: GlossaryTermReviewIn,
-    user: AdminOrReviewerDep,
+    user: AdminSideDep,
     session: SessionDep,
 ) -> GlossaryTerm:
+    from app.knowledge.legal_terms import is_stopword_term
+
     term = await session.get(GlossaryTerm, term_id)
     if term is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="术语不存在")
+    next_target = body.target_zh.strip() if body.target_zh else term.target_zh
+    if body.decision == "approved" and is_stopword_term(term.source_term, next_target):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="常见英文介词、冠词或无效同词映射不可审核通过为强制法律术语",
+        )
     term.review_status = body.decision
     if body.target_zh:
-        term.target_zh = body.target_zh.strip()
+        term.target_zh = next_target
     if body.statutory_definition is not None:
         term.statutory_definition = body.statutory_definition
     term.reviewed_by = user.user_id
@@ -604,10 +772,17 @@ async def review_glossary_term(
     return term
 
 
+_SUBSTANTIVE_CLAUSE_REGEX = (
+    r"[\u4e00-\u9fff]{2,}"
+    r"|([A-Za-z\u00C0-\u024F]{2,}[^A-Za-z\u00C0-\u024F]+[A-Za-z\u00C0-\u024F]{2,})"
+    r"|([\u0600-\u06FF]{2,}[^\u0600-\u06FF]+[\u0600-\u06FF]{2,})"
+)
+
+
 @admin_router.get("/translations", response_model=list[ClauseTranslationOut])
 async def list_translations(
     response: Response,
-    _: AdminOrReviewerDep,
+    _: AdminSideDep,
     session: SessionDep,
     country_code: str | None = None,
     review_status: str | None = None,
@@ -615,13 +790,34 @@ async def list_translations(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     include_history: bool = False,
+    include_short: bool = Query(default=True),
 ) -> list[ClauseTranslationOut]:
+    from sqlalchemy import case
+
+    # 审核队列：只列每份法规当前版本的条款（同一法规的旧版本不重复出现），范围外的不列；
+    # 先核心法规、再配套、最后关系较远的文件（同级按业务类别），同一份法规按条文顺序
+    latest = (
+        select(DocumentVersion.document_id, func.max(DocumentVersion.version_no).label("v"))
+        .where(DocumentVersion.state == "parsed")
+        .group_by(DocumentVersion.document_id)
+        .subquery()
+    )
+    weight = case(
+        (Document.business_weight == "core", 0), (Document.business_weight == "supporting", 1),
+        (Document.business_weight == "peripheral", 3), else_=2,
+    )
+    from app.knowledge.business_topic import TOPICS
+
+    # 同为核心法规的，个人数据保护与跨境传输在前，再网络安全、车辆准入、车联网通信
+    topic = case(*[(Document.business_topic == k, i) for i, (k, _) in enumerate(TOPICS)], else_=len(TOPICS))
     stmt = (
         select(ClauseTranslation, Clause, Document)
         .join(Clause, Clause.id == ClauseTranslation.clause_id)
         .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
         .join(Document, Document.id == DocumentVersion.document_id)
-        .order_by(ClauseTranslation.updated_at.desc(), Clause.ordinal, ClauseTranslation.id)
+        .join(latest, (latest.c.document_id == Document.id) & (latest.c.v == DocumentVersion.version_no))
+        .where(Document.relevance.notin_(("irrelevant", "out_of_scope")))
+        .order_by(weight, topic, Document.title, Clause.ordinal, ClauseTranslation.id)
     )
     if country_code:
         stmt = stmt.where(Document.country_code == country_code.upper())
@@ -633,12 +829,20 @@ async def list_translations(
         )
     if document_id:
         stmt = stmt.where(Document.id == document_id)
-    if not include_history and review_status not in (
-        "translation_failed",
-        "not_translated",
-        "superseded",
-    ):
+    if not include_history and review_status != "superseded":
         stmt = stmt.where(ClauseTranslation.is_current.is_(True))
+    if not include_short:
+        stmt = stmt.where(
+            or_(
+                Document.country_code == "CN",
+                Document.language == "zh",
+                Clause.original_text.op("~")(r"[\u4e00-\u9fff]{2,}"),
+                (
+                    (func.length(func.btrim(Clause.original_text)) >= 16)
+                    & Clause.original_text.op("~")(_SUBSTANTIVE_CLAUSE_REGEX)
+                ),
+            )
+        )
     total = await session.scalar(select(func.count()).select_from(stmt.order_by(None).subquery()))
     response.headers["X-Total-Count"] = str(total)
     rows = list((await session.execute(stmt.offset(offset).limit(limit))).all())
@@ -648,7 +852,7 @@ async def list_translations(
 @admin_router.post("/clauses/{clause_id}/translate", response_model=ClauseTranslationOut)
 async def trigger_clause_translate(
     clause_id: uuid.UUID,
-    _: AdminOrReviewerDep,
+    _: PlatformAdminDep,
     session: SessionDep,
 ) -> ClauseTranslationOut:
     row = (
@@ -673,7 +877,7 @@ async def trigger_clause_translate(
 @admin_router.post("/documents/{document_id}/translate")
 async def trigger_document_translate(
     document_id: uuid.UUID,
-    _: AdminOrReviewerDep,
+    _: PlatformAdminDep,
     session: SessionDep,
     limit_clauses: int | None = Query(default=None, ge=1, le=500),
 ) -> dict:
@@ -693,7 +897,7 @@ async def trigger_document_translate(
 async def review_clause_translation(
     translation_id: uuid.UUID,
     body: TranslationReviewIn,
-    user: AdminOrReviewerDep,
+    user: AdminSideDep,
     session: SessionDep,
 ) -> ClauseTranslationOut:
     row = (
@@ -708,7 +912,6 @@ async def review_clause_translation(
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="翻译记录不存在")
     tr, clause, doc = row
-    from app.knowledge.history import snapshot
 
     if body.decision == "approved" and await document_is_held(session, doc.id):
         raise HTTPException(409, "来源绑定异常尚未解决，不可审批为法律依据")
@@ -724,7 +927,13 @@ async def review_clause_translation(
                 "issues": issues,
             },
         )
-    snapshot(session, tr, "before_human_review", user.user_id)
+    return await _apply_translation_review(session, tr, clause, doc, body, proposed_text, passed, issues, checked_hits, user.user_id)
+
+
+async def _apply_translation_review(session, tr, clause, doc, body, proposed_text, passed, issues, checked_hits, actor_id):
+    from app.knowledge.history import snapshot
+
+    snapshot(session, tr, "before_human_review", actor_id)
     if proposed_text != tr.translated_text:
         # Corrections are new revisions. Approval of the old text is never inherited.
         old = tr
@@ -747,147 +956,14 @@ async def review_clause_translation(
     tr.quality_issues = issues
     tr.glossary_hits = checked_hits
     tr.review_status = body.decision
-    tr.reviewer_id = user.user_id
+    tr.reviewer_id = actor_id
     tr.reviewer_note = body.reviewer_note
     tr.reviewed_at = datetime.now(UTC)
     tr.updated_at = datetime.now(UTC)
-    snapshot(session, tr, "after_human_review", user.user_id)
+    snapshot(session, tr, "after_human_review", actor_id)
     await session.commit()
     outs = await _build_translation_outs(session, [(tr, clause, doc)])
     return outs[0]
-
-
-@admin_router.get("/review-points", response_model=list[ReviewPointOut])
-async def list_review_points(
-    _: AdminOrReviewerDep,
-    session: SessionDep,
-    country_code: str | None = None,
-    status_filter: str | None = Query(default=None, alias="status"),
-) -> list[ReviewPoint]:
-    await seed_glossary_and_review_points(session)
-    stmt = select(ReviewPoint).order_by(ReviewPoint.country_code, ReviewPoint.point_code)
-    if country_code:
-        stmt = stmt.where(ReviewPoint.country_code == country_code.upper())
-    if status_filter:
-        stmt = stmt.where(ReviewPoint.status == status_filter)
-    return list((await session.execute(stmt)).scalars().all())
-
-
-@admin_router.post(
-    "/review-points", response_model=ReviewPointOut, status_code=status.HTTP_201_CREATED
-)
-async def create_review_point(
-    body: ReviewPointCreate,
-    _: AdminOrReviewerDep,
-    session: SessionDep,
-) -> ReviewPoint:
-    rp = ReviewPoint(
-        country_code=body.country_code.upper(),
-        point_code=body.point_code.strip(),
-        title=body.title.strip(),
-        question=body.question.strip(),
-        impact_on_conclusion=body.impact_on_conclusion.strip(),
-        provisional_interpretation=body.provisional_interpretation.strip(),
-        clause_id=body.clause_id,
-        term_id=body.term_id,
-    )
-    session.add(rp)
-    await session.commit()
-    await session.refresh(rp)
-    return rp
-
-
-@admin_router.post("/review-points/{point_id}/decide", response_model=ReviewPointOut)
-async def decide_review_point(
-    point_id: uuid.UUID,
-    body: ReviewPointDecideIn,
-    user: AdminOrReviewerDep,
-    session: SessionDep,
-) -> ReviewPoint:
-    rp = await session.get(ReviewPoint, point_id)
-    if rp is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="确认单条目不存在")
-    rp.status = body.status
-    rp.lawyer_reply = body.lawyer_reply.strip()
-    rp.decided_by = user.user_id
-    rp.decided_at = datetime.now(UTC)
-    await session.commit()
-    await session.refresh(rp)
-    return rp
-
-
-@admin_router.get("/review-points/export")
-async def export_review_points(
-    _: AdminOrReviewerDep,
-    session: SessionDep,
-    country_code: str | None = None,
-) -> dict:
-    """导出《解读要点确认单》(含 Markdown 表格与 JSON 结构),供外部合作律所离线填写并回传。"""
-    await seed_glossary_and_review_points(session)
-    stmt = select(ReviewPoint).order_by(ReviewPoint.country_code, ReviewPoint.point_code)
-    if country_code:
-        stmt = stmt.where(ReviewPoint.country_code == country_code.upper())
-    points = list((await session.execute(stmt)).scalars().all())
-
-    md_lines = [
-        "# 跨境合规法规解读要点确认单(供合作律所复核)",
-        "",
-        "> 说明:本确认单仅汇总法规未明确定义、官方无现成解释、但直接影响结论的少数关键问题。",
-        "",
-        "| 编号 | 国家 | 议题 | 待确认问题 | 对结论影响 | 暂拟口径 | 状态 | 律所意见 |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
-    items_json: list[dict] = []
-    for p in points:
-        md_lines.append(
-            f"| {p.point_code} | {p.country_code} | {p.title} | {p.question} | "
-            f"{p.impact_on_conclusion} | {p.provisional_interpretation} | "
-            f"{p.status} | {p.lawyer_reply or '待填写'} |"
-        )
-        items_json.append(
-            {
-                "point_code": p.point_code,
-                "country_code": p.country_code,
-                "title": p.title,
-                "question": p.question,
-                "impact_on_conclusion": p.impact_on_conclusion,
-                "provisional_interpretation": p.provisional_interpretation,
-                "status": p.status,
-                "lawyer_reply": p.lawyer_reply,
-            }
-        )
-    return {
-        "markdown": "\n".join(md_lines) + "\n",
-        "items": items_json,
-    }
-
-
-@admin_router.post("/review-points/import")
-async def import_review_point_decisions(
-    body: ReviewPointImportIn,
-    user: AdminOrReviewerDep,
-    session: SessionDep,
-) -> dict:
-    """批量导入律所填写的《解读要点确认单》回执。"""
-    updated = 0
-    not_found: list[str] = []
-    for item in body.items:
-        rp = (
-            await session.execute(
-                select(ReviewPoint).where(ReviewPoint.point_code == item.point_code)
-            )
-        ).scalar_one_or_none()
-        if rp is None:
-            not_found.append(item.point_code)
-            continue
-        reply = (item.lawyer_reply or "").strip() or rp.provisional_interpretation
-        rp.status = "confirmed" if item.status == "open" and item.lawyer_reply else item.status
-        rp.lawyer_reply = reply
-        rp.decided_by = user.user_id
-        rp.decided_at = datetime.now(UTC)
-        updated += 1
-    await session.commit()
-    return {"updated": updated, "not_found": not_found}
 
 
 async def _country_catalog(session: AsyncSession, codes, *, include_sites=False):
@@ -898,29 +974,227 @@ async def _country_catalog(session: AsyncSession, codes, *, include_sites=False)
     return country_catalog(discovered, sites)
 
 
+async def _count_needs_confirmation_edges(
+    session: AsyncSession, country_codes: list[str]
+) -> dict[str, int]:
+    """Compute exact needs_confirmation_edges_count per country aligned 100% with _build_graph_payload."""
+    if not country_codes:
+        return {}
+    from app.knowledge.graph_verify import verify_edge, verify_node
+
+    nodes = list(
+        (
+            await session.scalars(
+                select(KgNode).where(
+                    KgNode.country_code.in_(country_codes),
+                    KgNode.review_status.notin_(("superseded", "stale", "rejected")),
+                    or_(
+                        KgNode.document_id.is_(None),
+                        KgNode.document_id.in_(select(Document.id).where(document_available())),
+                    ),
+                )
+            )
+        ).all()
+    )
+    node_by_id = {n.id: n for n in nodes}
+    edges = list(
+        (
+            await session.scalars(
+                select(KgEdge).where(
+                    KgEdge.country_code.in_(country_codes),
+                    *active_edge_filters(),
+                )
+            )
+        ).all()
+    )
+    clause_ids = {e.evidence_clause_id for e in edges if e.evidence_clause_id}
+    own_clause_ids = {n.evidence_clause_id for n in nodes if n.evidence_clause_id}
+    clause_texts: dict[uuid.UUID, str] = {}
+    if clause_ids:
+        for cid, otxt in (
+            await session.execute(
+                select(Clause.id, Clause.original_text).where(Clause.id.in_(clause_ids))
+            )
+        ).all():
+            clause_texts[cid] = otxt or ""
+    present_own: set[uuid.UUID] = set()
+    if own_clause_ids:
+        present_own = set(
+            (
+                await session.scalars(
+                    select(Clause.id)
+                    .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+                    .where(Clause.id.in_(own_clause_ids), DocumentVersion.state == "parsed")
+                )
+            ).all()
+        )
+    verbatim_node_ids: set[uuid.UUID] = set()
+    for e in edges:
+        src = node_by_id.get(e.source_node_id)
+        dst = node_by_id.get(e.target_node_id)
+        if not src or not dst or src.country_code != e.country_code or dst.country_code != e.country_code:
+            continue
+        orig_txt = clause_texts.get(e.evidence_clause_id, "")
+        if e.evidence_quote and (not orig_txt or e.evidence_quote in orig_txt):
+            verbatim_node_ids.add(src.id)
+            verbatim_node_ids.add(dst.id)
+    node_status: dict[uuid.UUID, str] = {
+        n.id: verify_node(
+            n,
+            has_current_clause=bool(n.evidence_clause_id and n.evidence_clause_id in present_own),
+            has_verbatim_edge=(n.id in verbatim_node_ids),
+        )[0]
+        for n in nodes
+    }
+    counts: dict[str, int] = {}
+    for e in edges:
+        src = node_by_id.get(e.source_node_id)
+        dst = node_by_id.get(e.target_node_id)
+        if not src or not dst or src.country_code != e.country_code or dst.country_code != e.country_code:
+            continue
+        v_status, _ = verify_edge(
+            e,
+            src_node=src,
+            dst_node=dst,
+            clause_text=clause_texts.get(e.evidence_clause_id, ""),
+            src_status=node_status.get(src.id, "auto_verified"),
+            dst_status=node_status.get(dst.id, "auto_verified"),
+        )
+        if v_status == "needs_confirmation":
+            counts[e.country_code] = counts.get(e.country_code, 0) + 1
+    return counts
+
+
 @admin_router.get("/countries")
-async def get_admin_knowledge_countries(_: AdminOrReviewerDep, session: SessionDep) -> list[dict]:
-    """Read-only discovery; a listed country grants no crawl/analysis/review approval."""
+async def get_admin_knowledge_countries(_: AdminSideDep, session: SessionDep) -> list[dict]:
+    """Read-only discovery; empty out_of_scope-only shell countries (e.g. DE) are excluded."""
     codes = (
         await session.scalars(select(Document.country_code).union(select(KgNode.country_code)))
     ).all()
-    return await _country_catalog(session, codes, include_sites=True)
+    catalog = await _country_catalog(session, codes, include_sites=True)
+    doc_stats = {
+        cc: (int(cnt or 0), upd.isoformat() if upd else None)
+        for cc, cnt, upd in (
+            await session.execute(
+                select(
+                    Document.country_code,
+                    func.count(func.distinct(Document.id)),
+                    func.max(
+                        func.coalesce(
+                            DocumentVersion.parsed_at,
+                            DocumentVersion.fetched_at,
+                            Document.last_checked_at,
+                            Document.discovered_at,
+                        )
+                    ),
+                )
+                .select_from(Document)
+                .outerjoin(
+                    DocumentVersion,
+                    (DocumentVersion.document_id == Document.id)
+                    & (DocumentVersion.state == "parsed"),
+                )
+                .where(_in_scope())
+                .group_by(Document.country_code)
+            )
+        ).all()
+    }
+    active_catalog = [
+        c
+        for c in catalog
+        if c["country_code"] not in ("ZZ", "INTL")
+        and doc_stats.get(c["country_code"], (0, None))[0] > 0
+    ]
+    latest = (
+        select(DocumentVersion.document_id, func.max(DocumentVersion.version_no).label("v"))
+        .where(DocumentVersion.state == "parsed")
+        .group_by(DocumentVersion.document_id)
+        .subquery()
+    )
+    pending_tr = dict(
+        (
+            await session.execute(
+                select(Document.country_code, func.count(ClauseTranslation.id))
+                .select_from(ClauseTranslation)
+                .join(Clause, Clause.id == ClauseTranslation.clause_id)
+                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .join(
+                    latest,
+                    (latest.c.document_id == Document.id)
+                    & (latest.c.v == DocumentVersion.version_no),
+                )
+                .where(
+                    _in_scope(),
+                    Document.country_code != "CN",
+                    func.coalesce(Document.language, "") != "zh",
+                    ClauseTranslation.is_current.is_(True),
+                    ClauseTranslation.review_status.notin_(("superseded", "approved")),
+                    ~(
+                        ClauseTranslation.quality_check_passed.is_(True)
+                        & (ClauseTranslation.review_status == "machine_translated")
+                    ),
+                    func.length(Clause.original_text) >= 24,
+                )
+                .group_by(Document.country_code)
+            )
+        ).all()
+    )
+    pending_kg = await _count_needs_confirmation_edges(
+        session, [c["country_code"] for c in active_catalog]
+    )
+    return [
+        dict(
+            **c,
+            documents_count=doc_stats.get(c["country_code"], (0, None))[0],
+            last_updated_at=doc_stats.get(c["country_code"], (0, None))[1],
+            pending_translations_count=0
+            if c["country_code"] == "CN"
+            else int(pending_tr.get(c["country_code"], 0) or 0),
+            pending_kg_count=int(pending_kg.get(c["country_code"], 0) or 0),
+        )
+        for c in active_catalog
+    ]
+
+
+_GRAPH_JSON_CACHE: dict[tuple[str, bool], str] = {}
 
 
 @admin_router.get("/graph", response_model=GraphPayloadOut)
 async def get_admin_knowledge_graph(
-    _: AdminOrReviewerDep,
+    _: PlatformAdminDep,
     session: SessionDep,
     country_code: str = Query(default="SG", min_length=2, max_length=2),
     only_approved: bool = False,
-) -> GraphPayloadOut:
-    return await _build_graph_payload(session, country_code, only_approved=only_approved)
+) -> Response:
+    from app.knowledge.cache_sync import use_cached
+
+    key = (country_code.upper(), bool(only_approved))
+    hit = _GRAPH_JSON_CACHE.get(key)
+    if use_cached(hit):
+        return Response(content=hit, media_type="application/json")
+    payload = await _build_graph_payload(session, country_code, only_approved=only_approved)
+    raw = payload.model_dump_json()
+    if use_cached(True):
+        _GRAPH_JSON_CACHE[key] = raw
+    return Response(content=raw, media_type="application/json")
+
+
+@admin_router.get("/graph/validation")
+async def get_graph_validation(
+    _: PlatformAdminDep,
+    session: SessionDep,
+    country_code: str = Query(default="SG", min_length=2, max_length=2),
+) -> list[dict]:
+    from app.knowledge.graph_validation import validate_graph
+
+    return await validate_graph(session, country_code.upper())
 
 
 @admin_router.get("/history/{target_id}")
 async def knowledge_history(
     target_id: uuid.UUID,
-    _: AdminOrReviewerDep,
+    _: AdminSideDep,
     session: SessionDep,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
@@ -956,7 +1230,7 @@ async def knowledge_history(
 
 @admin_router.get("/graph-runs")
 async def graph_runs(
-    _: AdminOrReviewerDep,
+    _: PlatformAdminDep,
     session: SessionDep,
     country_code: str = Query(default="SG", min_length=2, max_length=2),
     offset: int = Query(default=0, ge=0),
@@ -985,7 +1259,7 @@ async def graph_runs(
 async def review_knowledge_edge(
     edge_id: uuid.UUID,
     body: EdgeReviewIn,
-    user: AdminOrReviewerDep,
+    user: PlatformAdminDep,
     session: SessionDep,
 ) -> KgEdgeOut:
     edge = await session.get(KgEdge, edge_id)
@@ -1004,8 +1278,8 @@ async def review_knowledge_edge(
         or not clause
         or not edge.evidence_quote
         or edge.evidence_quote not in clause.original_text
-        or (not edge.is_structural and edge.judge_verdict != "yes")
-        or (edge.is_structural and edge.judge_verdict != "structural")
+        or (not edge.is_structural and edge.judge_verdict not in ("yes", "title_inferred"))
+        or (edge.is_structural and edge.judge_verdict not in ("structural", "title_inferred"))
     ):
         raise HTTPException(status_code=409, detail="关系证据/裁判未通过或已失效；请先建立有效修订")
     snapshot(session, edge, "before_human_review", user.user_id)
@@ -1017,6 +1291,18 @@ async def review_knowledge_edge(
     src = await session.get(KgNode, edge.source_node_id)
     dst = await session.get(KgNode, edge.target_node_id)
     clause = await session.get(Clause, edge.evidence_clause_id)
+    from app.knowledge.graph_verify import clean_verify_note, verify_edge
+
+    v_status, v_reason = (
+        verify_edge(
+            edge,
+            src_node=src,
+            dst_node=dst,
+            clause_text=(clause.original_text if clause else ""),
+        )
+        if src and dst
+        else ("approved" if edge.review_status == "approved" else "retired", "")
+    )
     return KgEdgeOut(
         id=edge.id,
         country_code=edge.country_code,
@@ -1034,18 +1320,656 @@ async def review_knowledge_edge(
         extractor_model=edge.extractor_model,
         confidence=float(getattr(edge, "confidence", 0.85)),
         judge_verdict=str(getattr(edge, "judge_verdict", "yes")),
-        judge_reason=getattr(edge, "judge_reason", None),
+        judge_reason=clean_verify_note(getattr(edge, "judge_reason", None)) or None,
         is_structural=bool(getattr(edge, "is_structural", False)),
         review_status=edge.review_status,
+        verification_status=v_status,
+        verification_reason=clean_verify_note(v_reason),
         usable_as_legal_basis=(
             edge.review_status == "approved"
             and not edge.is_structural
-            and edge.judge_verdict == "yes"
+            and edge.judge_verdict in ("yes", "title_inferred")
         ),
     )
 
 
+@admin_router.post("/nodes/{node_id}/review", response_model=KgNodeOut)
+async def review_knowledge_node(
+    node_id: uuid.UUID,
+    body: EdgeReviewIn,
+    user: PlatformAdminDep,
+    session: SessionDep,
+) -> KgNodeOut:
+    node = await session.get(KgNode, node_id)
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="图谱节点不存在")
+    from app.knowledge.graph_verify import verify_node
+    from app.knowledge.history import snapshot
+
+    if body.decision == "approved" and node.review_status in ("superseded", "stale"):
+        raise HTTPException(status_code=409, detail="节点已停用，不能确认保留")
+    snapshot(session, node, "before_human_review", user.user_id)
+    node.review_status = body.decision
+    node.reviewed_by = user.user_id
+    node.reviewed_at = datetime.now(UTC)
+    snapshot(session, node, "after_human_review", user.user_id)
+    if body.decision == "rejected":
+        incident = (
+            await session.scalars(
+                select(KgEdge).where(
+                    or_(KgEdge.source_node_id == node.id, KgEdge.target_node_id == node.id),
+                    *active_edge_filters(),
+                )
+            )
+        ).all()
+        for e in incident:
+            snapshot(session, e, "before_node_reject_cascade", user.user_id)
+            e.review_status = "stale"
+            snapshot(session, e, "after_node_reject_cascade", user.user_id)
+    await session.commit()
+    await session.refresh(node)
+    nout = KgNodeOut.model_validate(node)
+    nout.verification_status, nout.verification_reason = verify_node(node)
+    return nout
+
+
+# ==================== 图谱人工编辑（改名、新增、改关系、停用、恢复） ====================
+
+
+async def _edited(session: AsyncSession, call):
+    from app.knowledge.graph_edit import GraphEditError
+
+    try:
+        result = await call
+    except GraphEditError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await session.commit()
+    return result
+
+
+def _node_brief(node: KgNode) -> dict:
+    return {
+        "id": str(node.id),
+        "country_code": node.country_code,
+        "node_type": node.node_type,
+        "name_zh": node.name_zh,
+        "review_status": node.review_status,
+    }
+
+
+def _edge_brief(edge: KgEdge) -> dict:
+    return {
+        "id": str(edge.id),
+        "relation_type": edge.relation_type,
+        "source_node_id": str(edge.source_node_id),
+        "target_node_id": str(edge.target_node_id),
+        "review_status": edge.review_status,
+    }
+
+
+@admin_router.get("/clauses")
+async def search_admin_knowledge_clauses(
+    _: AdminSideDep,
+    session: SessionDep,
+    country_code: str | None = Query(default=None, max_length=8),
+    q: str | None = Query(default=None, max_length=120),
+    document_id: uuid.UUID | None = None,
+    limit: int = Query(default=30, ge=1, le=100),
+) -> list[dict]:
+    """Search latest parsed in-scope clauses by country and keyword for GraphEditPanel."""
+    latest = (
+        select(DocumentVersion.document_id, func.max(DocumentVersion.version_no).label("v"))
+        .where(DocumentVersion.state == "parsed")
+        .group_by(DocumentVersion.document_id)
+        .subquery()
+    )
+    stmt = (
+        select(Clause, Document.id, Document.title, Document.title_zh, Document.country_code)
+        .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .join(
+            latest,
+            (latest.c.document_id == Document.id)
+            & (latest.c.v == DocumentVersion.version_no),
+        )
+        .where(_in_scope(), document_available())
+        .order_by(Document.title, Clause.ordinal)
+    )
+    if country_code and country_code.strip():
+        from app.knowledge.countries import resolve_country_code
+
+        stmt = stmt.where(Document.country_code == resolve_country_code(country_code))
+    if document_id is not None:
+        stmt = stmt.where(Document.id == document_id)
+    if q and q.strip():
+        for tok in q.strip().split()[:5]:
+            pat = f"%{tok}%"
+            stmt = stmt.where(
+                or_(
+                    Document.title.ilike(pat),
+                    Document.title_zh.ilike(pat),
+                    Clause.clause_number.ilike(pat),
+                    Clause.heading.ilike(pat),
+                    Clause.original_text.ilike(pat),
+                )
+            )
+    rows = (await session.execute(stmt.limit(limit))).all()
+    return [
+        {
+            "id": str(clause.id),
+            "country_code": cc,
+            "document_id": str(doc_id),
+            "document_title": (title_zh or "").strip() or title,
+            "clause_number": clause.clause_number,
+            "heading": clause.heading,
+            "original_text": clause.original_text,
+        }
+        for clause, doc_id, title, title_zh, cc in rows
+    ]
+
+
+@admin_router.get("/clauses/{clause_id}")
+async def get_knowledge_clause(
+    clause_id: uuid.UUID, _: AdminSideDep, session: SessionDep
+) -> dict:
+    """The clause a hand-made relation will cite: number, document, original text."""
+    row = (
+        await session.execute(
+            select(Clause, Document.title, Document.country_code)
+            .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(Clause.id == clause_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="条款不存在")
+    clause, title, country = row
+    return {
+        "id": str(clause.id),
+        "country_code": country,
+        "document_title": title,
+        "clause_number": clause.clause_number,
+        "original_text": clause.original_text,
+    }
+
+
+@admin_router.patch("/nodes/{node_id}")
+async def edit_knowledge_node(
+    node_id: uuid.UUID, body: NodeEditIn, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    from app.knowledge import graph_edit
+
+    node = await _edited(
+        session,
+        graph_edit.rename_node(
+            session, node_id, name_zh=body.name_zh, summary=body.summary, actor_id=user.user_id
+        ),
+    )
+    return _node_brief(node)
+
+
+@admin_router.post("/nodes", status_code=status.HTTP_201_CREATED)
+async def create_knowledge_node(
+    body: NodeCreateIn, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    from app.knowledge import graph_edit
+
+    node = await _edited(
+        session,
+        graph_edit.create_node(
+            session,
+            country_code=body.country_code,
+            node_type=body.node_type,
+            name_zh=body.name_zh,
+            name_orig=body.name_orig,
+            summary=body.summary,
+            evidence_clause_id=body.evidence_clause_id,
+            actor_id=user.user_id,
+        ),
+    )
+    return _node_brief(node)
+
+
+@admin_router.delete("/nodes/{node_id}")
+async def retire_knowledge_node(
+    node_id: uuid.UUID, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    from app.knowledge import graph_edit
+
+    node, edges = await _edited(
+        session, graph_edit.retire_node(session, node_id, actor_id=user.user_id)
+    )
+    return {**_node_brief(node), "retired_edges": edges}
+
+
+@admin_router.post("/edges", status_code=status.HTTP_201_CREATED)
+async def create_knowledge_edge(
+    body: EdgeCreateIn, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    from app.knowledge import graph_edit
+
+    edge = await _edited(
+        session,
+        graph_edit.create_edge(
+            session,
+            source_node_id=body.source_node_id,
+            target_node_id=body.target_node_id,
+            relation_type=body.relation_type,
+            evidence_clause_id=body.evidence_clause_id,
+            evidence_quote=body.evidence_quote,
+            actor_id=user.user_id,
+        ),
+    )
+    return _edge_brief(edge)
+
+
+@admin_router.patch("/edges/{edge_id}")
+async def edit_knowledge_edge(
+    edge_id: uuid.UUID, body: EdgeRelationIn, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    from app.knowledge import graph_edit
+
+    edge = await _edited(
+        session,
+        graph_edit.change_edge_relation(
+            session, edge_id, relation_type=body.relation_type, actor_id=user.user_id
+        ),
+    )
+    return _edge_brief(edge)
+
+
+@admin_router.delete("/edges/{edge_id}")
+async def retire_knowledge_edge(
+    edge_id: uuid.UUID, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    from app.knowledge import graph_edit
+
+    edge = await _edited(session, graph_edit.retire_edge(session, edge_id, actor_id=user.user_id))
+    return _edge_brief(edge)
+
+
+@admin_router.post("/restore")
+async def restore_knowledge_record(
+    body: RestoreIn, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    from app.knowledge import graph_edit
+
+    record = await _edited(
+        session, graph_edit.restore_from_history(session, body.audit_id, actor_id=user.user_id)
+    )
+    return _node_brief(record) if isinstance(record, KgNode) else _edge_brief(record)
+
+
+class BatchNodeItemIn(BaseModel):
+    country_code: str = Field(min_length=1, max_length=32)
+    node_type: str = Field(min_length=2, max_length=32)
+    name_zh: str = Field(min_length=1, max_length=255)
+    name_orig: str | None = None
+    summary: str | None = None
+    evidence_clause_id: uuid.UUID | None = None
+    document_title: str | None = None
+    clause_number: str | None = None
+
+
+class BatchEdgeItemIn(BaseModel):
+    country_code: str | None = None
+    source_node_id: uuid.UUID | None = None
+    target_node_id: uuid.UUID | None = None
+    source_node_name: str | None = None
+    target_node_name: str | None = None
+    relation_type: str = Field(min_length=2, max_length=40)
+    evidence_clause_id: uuid.UUID | None = None
+    document_title: str | None = None
+    clause_number: str | None = None
+    evidence_quote: str = Field(min_length=8, max_length=2000)
+
+
+class BatchImportIn(BaseModel):
+    nodes: list[Any] = Field(default_factory=list)
+    edges: list[Any] = Field(default_factory=list)
+    csv_text: str | None = None
+    csv_kind: str = Field(default="nodes", max_length=32)
+
+
+def _parse_uuid_field(raw_val: Any, field_label: str, row_prefix: str) -> uuid.UUID | None:
+    s = str(raw_val or "").strip()
+    if not s:
+        return None
+    try:
+        return uuid.UUID(s)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{row_prefix}“{field_label}”格式不正确，请核对编号后重试") from exc
+
+
+def _validate_batch_node_dict(raw: Any, idx: int, *, from_csv: bool = False) -> tuple[BatchNodeItemIn | None, dict | None]:
+    loc_key = "row" if from_csv else "index"
+    prefix = f"第 {idx} 行"
+    if not isinstance(raw, dict):
+        return None, {loc_key: idx, "kind": "节点", "error": f"{prefix}节点数据格式不正确，请按标准模板填写"}
+    cc = str(raw.get("country_code") or raw.get("国家或地区") or "").strip()
+    ntype = str(raw.get("node_type") or raw.get("节点类别") or "").strip()
+    name_zh = str(raw.get("name_zh") or raw.get("中文名称") or "").strip()
+    name_orig = str(raw.get("name_orig") or raw.get("原文名称") or "").strip() or None
+    summary = str(raw.get("summary") or raw.get("简要说明") or "").strip() or None
+    doc_title = str(raw.get("document_title") or raw.get("依据法规名称") or "").strip() or None
+    clause_no = str(raw.get("clause_number") or raw.get("依据条号") or "").strip() or None
+    if not cc or len(cc) > 32:
+        return None, {loc_key: idx, "kind": "节点", "name_zh": name_zh, "error": f"{prefix}“国家或地区”不能为空或格式超长，请填写有效国别"}
+    if len(ntype) < 2 or len(ntype) > 32:
+        return None, {loc_key: idx, "kind": "节点", "name_zh": name_zh, "error": f"{prefix}“节点类别”不能为空，请填写标准要素类别（如“合规义务”“数据类型”）"}
+    if not name_zh:
+        return None, {loc_key: idx, "kind": "节点", "error": f"{prefix}“中文名称”不能为空，请填写要素中文名称"}
+    if len(name_zh) > 255:
+        return None, {loc_key: idx, "kind": "节点", "name_zh": name_zh[:40], "error": f"{prefix}“中文名称”超出长度限制（最多 255 字）"}
+    try:
+        cid = _parse_uuid_field(raw.get("evidence_clause_id"), "依据条款编号", prefix)
+    except ValueError as exc:
+        return None, {loc_key: idx, "kind": "节点", "name_zh": name_zh, "error": str(exc)}
+    return (
+        BatchNodeItemIn(
+            country_code=cc,
+            node_type=ntype,
+            name_zh=name_zh,
+            name_orig=name_orig,
+            summary=summary,
+            evidence_clause_id=cid,
+            document_title=doc_title,
+            clause_number=clause_no,
+        ),
+        None,
+    )
+
+
+def _validate_batch_edge_dict(raw: Any, idx: int, *, from_csv: bool = False) -> tuple[BatchEdgeItemIn | None, dict | None]:
+    loc_key = "row" if from_csv else "index"
+    prefix = f"第 {idx} 行"
+    if not isinstance(raw, dict):
+        return None, {loc_key: idx, "kind": "关联关系", "error": f"{prefix}关联关系数据格式不正确，请按标准模板填写"}
+    cc = str(raw.get("country_code") or raw.get("国家或地区") or "").strip() or None
+    src_name = str(raw.get("source_node_name") or raw.get("起点节点名称") or "").strip() or None
+    tgt_name = str(raw.get("target_node_name") or raw.get("终点节点名称") or "").strip() or None
+    rtype = str(raw.get("relation_type") or raw.get("关联关系") or "").strip()
+    doc_title = str(raw.get("document_title") or raw.get("依据法规名称") or "").strip() or None
+    clause_no = str(raw.get("clause_number") or raw.get("依据条号") or "").strip() or None
+    quote = str(raw.get("evidence_quote") or raw.get("依据条文原句") or "").strip()
+    if len(rtype) < 2 or len(rtype) > 40:
+        return None, {loc_key: idx, "kind": "关联关系", "relation_type": rtype, "error": f"{prefix}“关联关系”不能为空，请填写标准关系类型（如“强制要求”“涵盖数据”）"}
+    if len(quote) < 8:
+        return None, {loc_key: idx, "kind": "关联关系", "relation_type": rtype, "error": f"{prefix}“原文佐证引句”不能为空或过短（至少 8 个字符），请填写对应条文原句"}
+    if len(quote) > 2000:
+        return None, {loc_key: idx, "kind": "关联关系", "relation_type": rtype, "error": f"{prefix}“原文佐证引句”过长（请控制在 2000 字以内）"}
+    try:
+        src_id = _parse_uuid_field(raw.get("source_node_id"), "起点节点编号", prefix)
+        tgt_id = _parse_uuid_field(raw.get("target_node_id"), "终点节点编号", prefix)
+        cid = _parse_uuid_field(raw.get("evidence_clause_id"), "依据条款编号", prefix)
+    except ValueError as exc:
+        return None, {loc_key: idx, "kind": "关联关系", "relation_type": rtype, "error": str(exc)}
+    return (
+        BatchEdgeItemIn(
+            country_code=cc,
+            source_node_id=src_id,
+            target_node_id=tgt_id,
+            source_node_name=src_name,
+            target_node_name=tgt_name,
+            relation_type=rtype,
+            evidence_clause_id=cid,
+            document_title=doc_title,
+            clause_number=clause_no,
+            evidence_quote=quote,
+        ),
+        None,
+    )
+
+
+_NODE_TYPE_ZH_MAP = {
+    "国家/地区": "COUNTRY",
+    "国家或地区": "COUNTRY",
+    "国家": "COUNTRY",
+    "监管机构": "REGULATOR",
+    "法规文件": "INSTRUMENT",
+    "合规义务": "OBLIGATION",
+    "数据类型": "DATA_CATEGORY",
+    "违规罚则": "PENALTY",
+}
+def _build_relation_zh_map() -> dict[str, str]:
+    from app.knowledge.graph_edit import RELATIONS
+
+    return {
+        "涵盖数据": "INVOLVES_DATA",
+        "涉及数据": "INVOLVES_DATA",
+        "规范": "GOVERNS",
+        "管辖": "GOVERNS",
+        "规定": "REQUIRES",
+        "规定了": "REQUIRES",
+        "要求": "REQUIRES",
+        "豁免于": "EXEMPTS",
+        "监管": "SUPERVISES",
+        "处罚": "IMPOSES_PENALTY",
+        "处罚为": "IMPOSES_PENALTY",
+        "罚则": "PENALIZES",
+        "限制出境": "RESTRICTS_TRANSFER",
+        "限制跨境传输": "RESTRICTS_CROSS_BORDER",
+        "适用准入": "REQUIRES_ADMISSION",
+        **{zh: code for code, zh in RELATIONS.items()},
+    }
+
+
+_RELATION_ZH_MAP = _build_relation_zh_map()
+
+
+def _resolve_cc_input(raw: str) -> str:
+    from app.knowledge.countries import resolve_country_code
+
+    return resolve_country_code(raw)
+
+
+async def _resolve_clause_by_title(
+    session: AsyncSession, country_code: str, doc_title: str | None, clause_no: str | None
+) -> uuid.UUID | None:
+    dt_val = (doc_title or "").strip().strip("《》")
+    cn_val = (clause_no or "").strip()
+    if not dt_val or not cn_val:
+        return None
+    stmt = (
+        select(Clause.id)
+        .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .where(
+            DocumentVersion.state == "parsed",
+            or_(Document.title_zh.ilike(f"%{dt_val}%"), Document.title.ilike(f"%{dt_val}%")),
+            Clause.clause_number.ilike(f"%{cn_val}%"),
+        )
+        .order_by(DocumentVersion.version_no.desc(), Clause.ordinal.asc())
+        .limit(1)
+    )
+    if country_code:
+        stmt = stmt.where(Document.country_code == country_code.upper())
+    return await session.scalar(stmt)
+
+
+async def _resolve_node_by_name(
+    session: AsyncSession, country_code: str | None, name_zh: str | None
+) -> uuid.UUID | None:
+    nm = (name_zh or "").strip()
+    if not nm:
+        return None
+    stmt = (
+        select(KgNode.id)
+        .where(KgNode.name_zh == nm, KgNode.review_status.notin_(("rejected", "superseded")))
+        .limit(1)
+    )
+    if country_code:
+        stmt = stmt.where(KgNode.country_code == country_code.upper())
+    return await session.scalar(stmt)
+
+
+@admin_router.get("/batch-template")
+async def get_kg_batch_template(
+    _: AdminSideDep,
+    country_code: str | None = Query(default=None, max_length=32),
+) -> dict:
+    from app.analysis.workflow_engine import country_name_zh
+    from app.knowledge import graph_edit
+
+    resolved_cc = _resolve_cc_input(country_code) if country_code else ""
+    sample_country = country_name_zh(resolved_cc) if resolved_cc else "新加坡"
+    return {
+        "node_types": list(graph_edit.NODE_TYPES),
+        "relation_types": list(graph_edit.RELATIONS),
+        "needs_evidence_node_types": list(graph_edit.NEEDS_EVIDENCE),
+        "json_example": {
+            "nodes": [
+                {
+                    "country_code": sample_country,
+                    "node_type": "数据类型",
+                    "name_zh": "车载电池热管理遥测参数",
+                    "name_orig": "Battery Thermal Telemetry Parameters",
+                    "summary": "用于云端热失控预警的电池包温度与电压采样参数",
+                    "document_title": "",
+                    "clause_number": "",
+                }
+            ],
+            "edges": [],
+        },
+        "csv_headers": {
+            "nodes": "国家或地区,节点类别,中文名称,原文名称,简要说明,依据法规名称,依据条号",
+            "edges": "国家或地区,起点节点名称,终点节点名称,关联关系,依据法规名称,依据条号,依据条文原句",
+        },
+    }
+
+
+@admin_router.post("/batch-import")
+async def batch_import_knowledge_graph(
+    body: BatchImportIn,
+    request: Request,
+    user: PlatformAdminDep,
+    session: SessionDep,
+) -> dict:
+    import csv
+    import io
+
+    from app.audit.service import set_detail
+    from app.knowledge import graph_edit
+
+    node_items: list[tuple[int, BatchNodeItemIn]] = []
+    edge_items: list[tuple[int, BatchEdgeItemIn]] = []
+    errors: list[dict] = []
+
+    for idx, raw_node in enumerate(body.nodes or [], start=1):
+        parsed_n, err_n = _validate_batch_node_dict(raw_node, idx, from_csv=False)
+        if err_n is not None:
+            errors.append(err_n)
+        elif parsed_n is not None:
+            node_items.append((idx, parsed_n))
+
+    for idx, raw_edge in enumerate(body.edges or [], start=1):
+        parsed_e, err_e = _validate_batch_edge_dict(raw_edge, idx, from_csv=False)
+        if err_e is not None:
+            errors.append(err_e)
+        elif parsed_e is not None:
+            edge_items.append((idx, parsed_e))
+
+    if body.csv_text and body.csv_text.strip():
+        reader = csv.DictReader(io.StringIO(body.csv_text.strip()))
+        for idx, row in enumerate(reader, start=2):
+            if body.csv_kind == "edges":
+                parsed_e, err_e = _validate_batch_edge_dict(row, idx, from_csv=True)
+                if err_e is not None:
+                    errors.append(err_e)
+                elif parsed_e is not None:
+                    edge_items.append((idx, parsed_e))
+            else:
+                parsed_n, err_n = _validate_batch_node_dict(row, idx, from_csv=True)
+                if err_n is not None:
+                    errors.append(err_n)
+                elif parsed_n is not None:
+                    node_items.append((idx, parsed_n))
+
+    created_nodes: list[dict] = []
+    created_edges: list[dict] = []
+
+    for idx, item in node_items:
+        try:
+            cc = _resolve_cc_input(item.country_code)
+            ntype = _NODE_TYPE_ZH_MAP.get(item.node_type.strip(), item.node_type.strip().upper())
+            cid = item.evidence_clause_id
+            if cid is None and item.document_title and item.clause_number:
+                cid = await _resolve_clause_by_title(session, cc, item.document_title, item.clause_number)
+                if cid is None:
+                    raise graph_edit.GraphEditError(
+                        f"未在已入库条文中匹配到《{item.document_title}》{item.clause_number}"
+                    )
+            async with session.begin_nested():
+                node = await graph_edit.create_node(
+                    session,
+                    country_code=cc,
+                    node_type=ntype,
+                    name_zh=item.name_zh,
+                    name_orig=item.name_orig,
+                    summary=item.summary,
+                    evidence_clause_id=cid,
+                    actor_id=user.user_id,
+                )
+            created_nodes.append(_node_brief(node))
+        except graph_edit.GraphEditError as exc:
+            errors.append({"index": idx, "kind": "节点", "name_zh": item.name_zh, "error": str(exc)})
+
+    for idx, item in edge_items:
+        try:
+            cc = _resolve_cc_input(item.country_code or "")
+            rtype = _RELATION_ZH_MAP.get(item.relation_type.strip(), item.relation_type.strip().upper())
+            src_id = item.source_node_id or await _resolve_node_by_name(session, cc or None, item.source_node_name)
+            tgt_id = item.target_node_id or await _resolve_node_by_name(session, cc or None, item.target_node_name)
+            if src_id is None or tgt_id is None:
+                raise graph_edit.GraphEditError("未匹配到对应的起点或终点节点名称，请确认节点已入库")
+            cid = item.evidence_clause_id
+            if cid is None and item.document_title and item.clause_number:
+                cid = await _resolve_clause_by_title(session, cc, item.document_title, item.clause_number)
+            if cid is None:
+                raise graph_edit.GraphEditError("请提供有效的依据法规名称与依据条号")
+            async with session.begin_nested():
+                edge = await graph_edit.create_edge(
+                    session,
+                    source_node_id=src_id,
+                    target_node_id=tgt_id,
+                    relation_type=rtype,
+                    evidence_clause_id=cid,
+                    evidence_quote=item.evidence_quote,
+                    actor_id=user.user_id,
+                )
+            created_edges.append(_edge_brief(edge))
+        except graph_edit.GraphEditError as exc:
+            errors.append({"index": idx, "kind": "关联关系", "relation_type": item.relation_type, "error": str(exc)})
+
+    if created_nodes or created_edges:
+        await session.commit()
+        from app.knowledge.cache_sync import after_admin_change
+
+        after_admin_change()
+
+    set_detail(
+        request,
+        summary=f"知识图谱批量校验导入：新增节点 {len(created_nodes)} 个、关系 {len(created_edges)} 条（拦截异常 {len(errors)} 条）",
+    )
+    return {
+        "created_nodes_count": len(created_nodes),
+        "created_edges_count": len(created_edges),
+        "created_nodes": created_nodes,
+        "created_edges": created_edges,
+        "errors": errors,
+    }
+
+
 # ==================== 用户端法规知识库浏览接口 ====================
+
+
+def _in_scope():
+    """用户可见的范围：与检索分析、用户端目录同一条规则——被判定为范围外的文件不计入、不展示。"""
+    return Document.relevance.notin_(("irrelevant", "out_of_scope"))
+
+
+_OVERVIEW_CACHE: dict[str, tuple[float, list[dict]]] = {}
 
 
 @user_router.get("/overview")
@@ -1053,28 +1977,86 @@ async def get_knowledge_overview(
     _: UserDep,
     session: SessionDep,
 ) -> list[dict]:
-    """Batch statistics for existing visible countries plus the original pilot labels."""
-    docs = dict(
-        (
-            await session.execute(
-                select(Document.country_code, func.count(Document.id))
-                .where(document_available())
-                .group_by(Document.country_code)
-            )
-        ).all()
+    """The country list of the library with its counts (cached half an hour; cleared whenever the
+    administrators change something, see cache_sync): the country picker must open at once."""
+    import time
+
+    # 不按时间过期：库或图谱有变化时由 cache_sync 在后台重建，重建期间沿用上一份，不让人等
+    from app.knowledge.cache_sync import use_cached
+
+    hit = _OVERVIEW_CACHE.get("all")
+    if use_cached(hit):
+        return hit[1]
+    data = await _knowledge_overview(session)
+    _OVERVIEW_CACHE["all"] = (time.monotonic(), data)
+    return data
+
+
+async def _knowledge_overview(session: AsyncSession) -> list[dict]:
+    """Batch statistics for existing visible countries plus the original pilot labels.
+
+    Documents and articles are counted from the user's library (same rules as library_view), with a
+    constant number of queries regardless of country count; newly discovered available countries
+    whose versions are not parsed yet are still surfaced."""
+    from app.knowledge.library_view import _Light
+    from app.knowledge.reading import reading_units
+
+    doc_filter = (
+        document_available(),
+        _in_scope(),
+        or_(Document.business_weight.is_(None), Document.business_weight != "peripheral"),
     )
-    clauses = dict(
+    all_docs = list(
+        (await session.scalars(select(Document).where(*doc_filter).order_by(Document.title))).all()
+    )
+    versions = list(
         (
-            await session.execute(
-                select(Document.country_code, func.count(Clause.id))
-                .select_from(Clause)
-                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+            await session.scalars(
+                select(DocumentVersion)
                 .join(Document, Document.id == DocumentVersion.document_id)
-                .where(document_available())
-                .group_by(Document.country_code)
+                .where(*doc_filter, DocumentVersion.state == "parsed")
+                .order_by(DocumentVersion.document_id, DocumentVersion.version_no.desc())
             )
         ).all()
     )
+    latest_by_doc: dict = {}
+    for v in versions:
+        latest_by_doc.setdefault(v.document_id, v)
+    clause_rows = (
+        await session.execute(
+            select(
+                Clause.version_id,
+                Clause.id,
+                Clause.ordinal,
+                Clause.clause_number,
+                Clause.heading,
+                Clause.page_start,
+                func.left(Clause.original_text, 80),
+                func.length(Clause.original_text),
+            )
+            .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(*doc_filter, DocumentVersion.state == "parsed")
+        )
+    ).all()
+    rows_by_ver: dict = {}
+    for vid, cid, ordinal, number, heading, page, head, length in clause_rows:
+        text = head if (length or 0) <= 80 else head + " " * ((length or 0) - 80)
+        rows_by_ver.setdefault(vid, []).append(_Light(cid, ordinal, number, heading, page, text))
+    discovered_docs: dict[str, int] = {}
+    parsed_docs: dict[str, int] = {}
+    clauses: dict[str, int] = {}
+    last_updated: dict[str, datetime] = {}
+    for d in all_docs:
+        cc = d.country_code
+        discovered_docs[cc] = discovered_docs.get(cc, 0) + 1
+        v = latest_by_doc.get(d.id)
+        ts = (v.fetched_at or v.parsed_at) if v is not None else (d.discovered_at or d.last_checked_at)
+        if ts is not None and (cc not in last_updated or ts > last_updated[cc]):
+            last_updated[cc] = ts
+        if v is not None and rows_by_ver.get(v.id):
+            parsed_docs[cc] = parsed_docs.get(cc, 0) + 1
+            clauses[cc] = clauses.get(cc, 0) + len(reading_units(rows_by_ver[v.id]))
     translations = {
         code: (total, approved)
         for code, total, approved in (
@@ -1092,6 +2074,7 @@ async def get_knowledge_overview(
                 .join(Document, Document.id == DocumentVersion.document_id)
                 .where(
                     document_available(),
+                    _in_scope(),
                     ClauseTranslation.is_current.is_(True),
                     ClauseTranslation.review_status.notin_(
                         ("superseded", "not_translated", "translation_failed", "rejected", "stale")
@@ -1101,17 +2084,25 @@ async def get_knowledge_overview(
             )
         ).all()
     }
+    active_node_conds = (
+        KgNode.review_status.notin_(("superseded", "stale", "rejected")),
+        func.coalesce(KgNode.verify_state, "") != "retired",
+        or_(
+            KgNode.document_id.is_(None),
+            KgNode.document_id.in_(
+                select(Document.id).where(
+                    document_available(),
+                    Document.relevance.in_(("relevant", "related")),
+                )
+            ),
+        ),
+    )
+    valid_node_ids = select(KgNode.id).where(*active_node_conds)
     nodes = dict(
         (
             await session.execute(
                 select(KgNode.country_code, func.count(KgNode.id))
-                .where(
-                    KgNode.review_status != "superseded",
-                    or_(
-                        KgNode.document_id.is_(None),
-                        KgNode.document_id.in_(select(Document.id).where(document_available())),
-                    ),
-                )
+                .where(*active_node_conds)
                 .group_by(KgNode.country_code)
             )
         ).all()
@@ -1120,21 +2111,35 @@ async def get_knowledge_overview(
         (
             await session.execute(
                 select(KgEdge.country_code, func.count(KgEdge.id))
-                .where(*active_edge_filters())
+                .where(
+                    *active_edge_filters(),
+                    func.coalesce(KgEdge.verify_state, "") != "retired",
+                    KgEdge.source_node_id.in_(valid_node_ids),
+                    KgEdge.target_node_id.in_(valid_node_ids),
+                )
                 .group_by(KgEdge.country_code)
             )
         ).all()
     )
-    catalog = await _country_catalog(session, docs.keys())
+    catalog = await _country_catalog(session, discovered_docs.keys())
     return [
         dict(
             **country,
-            documents_count=docs.get(country["country_code"], 0),
+            documents_count=(
+                parsed_docs[country["country_code"]]
+                if country["country_code"] in parsed_docs
+                else discovered_docs.get(country["country_code"], 0)
+            ),
             clauses_count=clauses.get(country["country_code"], 0),
             translations_count=translations.get(country["country_code"], (0, 0))[0],
             approved_translations_count=translations.get(country["country_code"], (0, 0))[1],
             kg_nodes_count=nodes.get(country["country_code"], 0),
             kg_edges_count=edges.get(country["country_code"], 0),
+            last_updated_at=(
+                last_updated[country["country_code"]].isoformat()
+                if country["country_code"] in last_updated
+                else None
+            ),
         )
         for country in catalog
     ]
@@ -1147,10 +2152,14 @@ async def search_knowledge_clauses(
     country_code: str = Query(default="SG", min_length=2, max_length=2),
     keyword: str | None = None,
     only_approved: bool = False,
+    include_repealed: bool = False,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[ClauseTranslationOut]:
-    """用户端检索法规条款与对照译文(未复核内容显式带机器翻译待核对标识)。"""
-    stmt = (
+    """用户端检索法规条款与对照译文(未复核内容显式带机器翻译待核对标识)。
+
+    默认不返回已废止、草案状态的版本（include_repealed=true 可看）。关键词按空白拆成多个词：
+    先要求每个词都出现（原文、译文或标题中），一条都没有时放宽为任一词出现，并按命中词数排序。"""
+    base = (
         select(ClauseTranslation, Clause, Document)
         .join(Clause, Clause.id == ClauseTranslation.clause_id)
         .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
@@ -1163,21 +2172,44 @@ async def search_knowledge_clauses(
                 ("superseded", "not_translated", "translation_failed", "rejected", "stale")
             ),
         )
-        .order_by(Document.title, Clause.ordinal)
-        .limit(limit)
     )
+    if not include_repealed:
+        base = base.where(DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES))
     if only_approved:
-        stmt = stmt.where(ClauseTranslation.review_status == "approved")
-    if keyword and keyword.strip():
-        kw = f"%{keyword.strip()}%"
-        stmt = stmt.where(
-            or_(
-                Clause.original_text.ilike(kw),
-                ClauseTranslation.translated_text.ilike(kw),
-                Document.title.ilike(kw),
-            )
+        base = base.where(ClauseTranslation.review_status == "approved")
+
+    def hit(token: str):
+        kw = f"%{token}%"
+        return or_(
+            Clause.original_text.ilike(kw),
+            ClauseTranslation.translated_text.ilike(kw),
+            Document.title.ilike(kw),
         )
-    rows = list((await session.execute(stmt)).all())
+
+    tokens = list((keyword or "").split())[:6]
+    if not tokens:
+        rows = list(
+            (
+                await session.execute(base.order_by(Document.title, Clause.ordinal).limit(limit))
+            ).all()
+        )
+        return await _build_translation_outs(session, rows)
+    ordered = base.order_by(Document.title, Clause.ordinal)
+    rows = list(
+        (await session.execute(ordered.where(*(hit(t) for t in tokens)).limit(limit))).all()
+    )
+    if not rows and len(tokens) > 1:
+        pool = list(
+            (await session.execute(ordered.where(or_(*(hit(t) for t in tokens))).limit(400))).all()
+        )
+
+        def matched(row) -> int:
+            blob = " ".join(
+                (row[1].original_text, row[0].translated_text or "", row[2].title)
+            ).lower()
+            return sum(1 for t in tokens if t.lower() in blob)
+
+        rows = sorted(pool, key=lambda r: -matched(r))[:limit]
     return await _build_translation_outs(session, rows)
 
 
@@ -1200,8 +2232,29 @@ async def get_user_topics(
 ):
     from app.knowledge.business_view import topic_cards
 
-    items = await topic_cards(session, country_code, document_id)
+    if document_id:
+        items = await topic_cards(session, country_code, document_id)
+    else:
+        items = await _topics_cached(session, country_code.upper())
     return {"items": items, "total": len(items)}
+
+
+_TOPICS_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+async def _topics_cached(session: AsyncSession, cc: str) -> list[dict]:
+    """The compliance topics of a country (half an hour; warmed at start-up with the country pages)."""
+    import time
+
+    from app.knowledge.business_view import requirement_topics
+    from app.knowledge.cache_sync import use_cached
+
+    hit = _TOPICS_CACHE.get(cc)
+    if use_cached(hit):
+        return hit[1]
+    items = await requirement_topics(session, cc)
+    _TOPICS_CACHE[cc] = (time.monotonic(), items)
+    return items
 
 
 @user_router.get("/glossary", response_model=list[GlossaryTermOut])
@@ -1238,9 +2291,11 @@ async def _build_regulation_summary(
         .scalars()
         .all()
     )
+    from app.analysis.workflow_engine import country_name_zh
+
     latest = next((v for v in versions if v.state == "parsed"), versions[0] if versions else None)
     site = await session.get(SourceSite, doc.site_id)
-    publisher = site.publisher if site else f"{doc.country_code} 官方发布机构"
+    publisher = site.publisher if site else f"{country_name_zh(doc.country_code)}官方发布机构"
 
     clauses_count = 0
     translated_count = 0
@@ -1250,14 +2305,9 @@ async def _build_regulation_summary(
     obl_names: list[str] = []
 
     if latest is not None:
-        clauses_count = int(
-            (
-                await session.execute(
-                    select(func.count(Clause.id)).where(Clause.version_id == latest.id)
-                )
-            ).scalar_one()
-            or 0
-        )
+        from app.knowledge.library_view import articles_in
+
+        clauses_count = await articles_in(session, latest.id)
         translated_count = int(
             (
                 await session.execute(
@@ -1350,8 +2400,11 @@ async def _build_regulation_summary(
         id=doc.id,
         country_code=doc.country_code,
         title=doc.title,
-        document_type=doc.document_type,
-        document_type_zh=_doc_type_zh(doc.document_type, doc.title),
+        title_zh=doc.title_zh,
+        document_type=public_doc_type(doc.document_type, doc.instrument_kind),
+        document_type_zh=_doc_type_zh(
+            public_doc_type(doc.document_type, doc.instrument_kind), doc.title
+        ),
         language=doc.language,
         source_url=doc.source_url,
         publisher=publisher,
@@ -1374,22 +2427,78 @@ async def list_user_regulations(
     session: SessionDep,
     country_code: str = Query(default="SG", min_length=2, max_length=2),
     keyword: str | None = None,
+    legal_status: str | None = Query(default=None, max_length=32),
 ) -> list[RegulationSummaryOut]:
     """按国家返回法规文件目录（供用户端「国家 → 法律层级/监管机构 → 法规」分级树与列表使用）。"""
-    cc = country_code.upper()
-    stmt = (
-        select(Document)
-        .where(Document.country_code == cc, document_available())
-        .order_by(Document.title)
+    # 与检索分析用同一条规则：被判定为范围外（法院改革法、公共部门治理法、门户页、办事表格等）的文件
+    # 不出现在用户的法规目录里。文件原样留在库中，管理端仍可见，直接按链接打开某份文档也不受影响。
+    # 目录、国家列表、合规简报用同一个范围（library_view），同一国家在各处显示的份数一致。
+    from app.knowledge.library_view import library, main_law, relation_counts
+
+    # 外围文件（与车辆数据业务关系较远）也返回、带上标记：目录里不列，按名称搜索时能找到
+    entries = await library(session, country_code, include_peripheral=True)
+    relations = await relation_counts(session, [e.version.id for e in entries])
+    main = main_law(entries, relations)
+    status_filter = (legal_status or "").strip().lower()
+    if status_filter and status_filter != "all":
+        entries = [
+            e for e in entries if (e.version.legal_status or "in_force").lower() == status_filter
+        ]
+    terms = [t for t in (keyword or "").strip().lower().split() if t]
+    if terms:
+        def _haystack(entry) -> str:
+            d = entry.document
+            return " ".join(
+                [d.title or "", d.title_zh or "", d.business_topic or "", d.country_code or ""]
+            ).lower()
+
+        entries = [e for e in entries if all(t in _haystack(e) for t in terms)]
+    sites = (
+        {
+            s.id: s.publisher
+            for s in (
+                await session.scalars(
+                    select(SourceSite).where(
+                        SourceSite.id.in_({e.document.site_id for e in entries})
+                    )
+                )
+            ).all()
+        }
+        if entries
+        else {}
     )
-    if keyword and keyword.strip():
-        stmt = stmt.where(Document.title.ilike(f"%{keyword.strip()}%"))
-    docs = list((await session.execute(stmt)).scalars().all())
+    from app.analysis.workflow_engine import country_name_zh
+
     results: list[RegulationSummaryOut] = []
-    for doc in docs:
-        summary, _ = await _build_regulation_summary(session, doc)
-        if summary.clauses_count > 0:
-            results.append(summary)
+    for e in entries:
+        doc, v = e.document, e.version
+        kind = public_doc_type(doc.document_type, doc.instrument_kind)
+        results.append(
+            RegulationSummaryOut(
+                id=doc.id,
+                country_code=doc.country_code,
+                title=doc.title,
+                title_zh=doc.title_zh,
+                business_topic=doc.business_topic,
+                business_weight=doc.business_weight,
+                document_type=kind,
+                document_type_zh=_doc_type_zh(kind, doc.title),
+                language=doc.language,
+                source_url=doc.source_url,
+                publisher=sites.get(doc.site_id) or f"{country_name_zh(doc.country_code)}官方发布机构",
+                version_no=v.version_no,
+                legal_status=v.legal_status,
+                fetched_at=v.fetched_at,
+                sha256_hex=None,
+                clauses_count=e.articles,
+                translated_clauses_count=0,
+                edges_count=0,
+                eight_attributes={},
+                version_count=1,
+                relations_count=relations.get(v.id, 0),
+                primary=main is not None and main.document.id == doc.id,
+            )
+        )
     return results
 
 
@@ -1418,7 +2527,7 @@ async def get_user_regulation_detail(
 ) -> RegulationDetailOut:
     """Paginated original/Chinese reading; exact source navigation without graph diagnostics."""
     doc = await session.get(Document, document_id)
-    if doc is None:
+    if doc is None or getattr(doc, "relevance", "") == "irrelevant":
         raise HTTPException(404, "法规文件不存在")
     summary, latest = await _build_regulation_summary(session, doc)
     if focus_clause_id:
@@ -1433,12 +2542,9 @@ async def get_user_regulation_detail(
             raise HTTPException(404, "归档版本不存在或尚未完成解析")
         latest = selected
         summary.version_no, summary.legal_status = selected.version_no, selected.legal_status
-        summary.clauses_count = (
-            await session.scalar(
-                select(func.count()).select_from(Clause).where(Clause.version_id == selected.id)
-            )
-            or 0
-        )
+        from app.knowledge.library_view import articles_in
+
+        summary.clauses_count = await articles_in(session, selected.id)
         summary.translated_clauses_count = (
             await session.scalar(
                 select(func.count(func.distinct(ClauseTranslation.clause_id)))
@@ -1465,51 +2571,56 @@ async def get_user_regulation_detail(
     )
     clauses_out, total = [], 0
     if latest:
-        filters = [Clause.version_id == latest.id]
-        if keyword.strip():
-            pattern = f"%{keyword.strip()}%"
-            translated_matches = select(ClauseTranslation.clause_id).where(
-                ClauseTranslation.is_current.is_(True),
-                ClauseTranslation.quality_check_passed.is_(True),
-                ClauseTranslation.review_status.in_(
-                    ("approved", "machine_translated", "pending_review")
-                ),
-                ClauseTranslation.translated_text.ilike(pattern),
-            )
-            filters.append(
-                or_(
-                    Clause.original_text.ilike(pattern),
-                    Clause.heading.ilike(pattern),
-                    Clause.clause_number.ilike(pattern),
-                    Clause.id.in_(translated_matches),
-                )
-            )
-        total = await session.scalar(select(func.count()).select_from(Clause).where(*filters)) or 0
-        if focus_clause_id:
-            preceding = (
-                await session.scalar(
-                    select(func.count())
-                    .select_from(Clause)
-                    .where(*filters, Clause.ordinal < focus.ordinal)
-                )
-                or 0
-            )
-            clause_offset = (preceding // clause_limit) * clause_limit
-        clauses = list(
-            (
-                await session.scalars(
-                    select(Clause)
-                    .where(*filters)
-                    .order_by(Clause.ordinal, Clause.id)
-                    .offset(clause_offset)
-                    .limit(clause_limit)
-                )
-            ).all()
-        )
-        ids = [c.id for c in clauses]
+        from app.ingestion.display_text import for_reading
+        from app.ingestion.intake_scope import note_for as scope_note_for
         from app.ingestion.safety import held_citation_ids
+        from app.knowledge.reading import joined, reading_units
+        from app.knowledge.user_relations import reader_relations
 
-        held = set(await held_citation_ids(session, ids))
+        rows = list(
+            (await session.scalars(select(Clause).where(Clause.version_id == latest.id))).all()
+        )
+        units = reading_units(rows)
+        first_numbered = next((u.head.ordinal for u in units if u.head.clause_number), None)
+        if first_numbered is None and units:
+            first_numbered = units[0].head.ordinal + 1  # 全文都没有条号：只有第一段算“前言”
+        position = {u.head.id: k + 1 for k, u in enumerate(units)}
+        if keyword.strip():
+            terms = [t for t in keyword.strip().split() if t][:6]
+            term_conds = []
+            for term in terms:
+                pattern = f"%{term}%"
+                translated_matches = select(ClauseTranslation.clause_id).where(
+                    ClauseTranslation.is_current.is_(True),
+                    ClauseTranslation.quality_check_passed.is_(True),
+                    ClauseTranslation.review_status.in_(
+                        ("approved", "machine_translated", "pending_review")
+                    ),
+                    ClauseTranslation.translated_text.ilike(pattern),
+                )
+                term_conds.append(
+                    or_(
+                        Clause.original_text.ilike(pattern),
+                        Clause.heading.ilike(pattern),
+                        Clause.clause_number.ilike(pattern),
+                        Clause.id.in_(translated_matches),
+                    )
+                )
+            hits = set(
+                (
+                    await session.scalars(
+                        select(Clause.id).where(Clause.version_id == latest.id, *term_conds)
+                    )
+                ).all()
+            )
+            units = [u for u in units if hits & set(u.ids)]
+        total = len(units)
+        if focus_clause_id:
+            at = next((k for k, u in enumerate(units) if focus_clause_id in u.ids), 0)
+            clause_offset = (at // clause_limit) * clause_limit
+        page_units = units[clause_offset : clause_offset + clause_limit]
+        ids = [cid for u in page_units for cid in u.ids]
+        held = set(await held_citation_ids(session, ids)) if ids else set()
         translations = (
             list(
                 (
@@ -1531,32 +2642,59 @@ async def get_user_regulation_detail(
         by_clause = {}
         for tr in translations:
             by_clause.setdefault(tr.clause_id, []).append(tr)
-        for c in clauses:
+
+        def usable(c):
             candidates = by_clause.get(c.id, [])
-            tr = candidates[0] if len(candidates) == 1 and c.id not in held else None
-            state = tr.review_status if tr else "not_translated"
+            return candidates[0] if len(candidates) == 1 else None
+
+        for unit in page_units:
+            head = unit.head
+            parts = [(c, usable(c)) for c in unit.rows]
+            done = [tr for _, tr in parts if tr]
+            if not done:
+                zh, state = None, "not_translated"
+            else:
+                # 一条由几段组成：每段用自己的中文；某段还没有中文时在那里注明，不拿别段顶替
+                zh = for_reading(joined([tr.translated_text if tr else "〔此段暂无中文〕" for _, tr in parts]))
+                states = {tr.review_status for tr in done}
+                state = (
+                    "approved"
+                    if states == {"approved"} and len(done) == len(parts)
+                    else (
+                        "machine_translated"
+                        if "machine_translated" in states
+                        else done[0].review_status
+                    )
+                )
             clauses_out.append(
                 RegulationClauseItemOut(
-                    clause_id=c.id,
-                    ordinal=c.ordinal,
-                    clause_number=c.clause_number,
-                    heading=c.heading,
-                    section_path=c.section_path,
-                    original_text=c.original_text,
-                    translated_text=tr.translated_text if tr else None,
+                    clause_id=head.id,
+                    part_ids=unit.ids,
+                    position=position[head.id],
+                    preamble=not head.clause_number
+                    and (first_numbered is None or head.ordinal < first_numbered),
+                    ordinal=head.ordinal,
+                    scope_note=scope_note_for(doc.intake_scope, latest.id, head.ordinal),
+                    clause_number=head.clause_number,
+                    heading=head.heading,
+                    section_path=head.section_path,
+                    original_text=for_reading(joined([c.original_text for c in unit.rows])),
+                    translated_text=zh,
                     translation_status=state,
                     status_badge=_status_badge(state)[1],
                     usable_as_legal_basis=bool(
-                        tr
-                        and tr.review_status == "approved"
+                        done
+                        and len(done) == len(parts)
+                        and all(tr.review_status == "approved" for tr in done)
                         and latest.review_status == "approved"
-                        and not c.needs_review
+                        and not any(c.needs_review or c.id in held for c in unit.rows)
                     ),
                     glossary_hits=[],
                     unmatched_terms=[],
                     linked_edges=[],
                 )
             )
+        summary.relations_count = (await reader_relations(session, doc.id, latest.id, 0, 1)).total
     return RegulationDetailOut(
         regulation=summary,
         version_id=latest.id if latest else None,
@@ -1567,6 +2705,8 @@ async def get_user_regulation_detail(
                 version_no=v.version_no,
                 legal_status=v.legal_status,
                 fetched_at=v.fetched_at.isoformat() if v.fetched_at else None,
+                version_label=v.version_label,
+                published_date=v.published_date.isoformat() if v.published_date else None,
             )
             for v in versions
         ],
@@ -1579,3 +2719,102 @@ async def get_user_regulation_detail(
             edges=[],
         ),
     )
+
+
+_STD_KIND_ZH = {"mandatory": "强制性", "recommended": "推荐性", "guidance": "指导性"}
+_STD_STATUS_ZH = {"in_force": "现行", "upcoming": "即将实施"}
+_STD_COUNTRY_FALLBACK = {
+    "ZZ": "国际通用标准",
+    "INTL": "国际通用标准",
+    "ISO": "国际通用标准",
+    "UN": "联合国法规标准",
+    "EU": "欧盟",
+    "CN": "中国",
+}
+
+
+@user_router.get("/standards")
+async def list_public_standards(
+    _: UserDep,
+    session: SessionDep,
+    country_code: str | None = Query(None, max_length=8),
+    kind: str | None = Query(None, max_length=24),
+    q: str | None = Query(None, max_length=80),
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """User-portal read-only automotive data & cybersecurity technical standards directory (in_force + upcoming)."""
+    from app.analysis.workflow_engine import country_name_zh
+    from app.standards.models import StandardEntry
+
+    def _std_country_zh(code: str) -> str:
+        return _STD_COUNTRY_FALLBACK.get(code) or country_name_zh(code)
+
+    active_statuses = ("in_force", "upcoming")
+    base_where = [StandardEntry.status.in_(active_statuses)]
+    if country_code and country_code.strip():
+        cc = country_code.strip().upper()
+        base_where.append(StandardEntry.country_code == cc)
+    if kind and kind.strip():
+        base_where.append(StandardEntry.kind == kind.strip())
+    if q and q.strip():
+        for tok in q.strip().split()[:5]:
+            base_where.append(
+                or_(
+                    StandardEntry.title.ilike(f"%{tok}%"),
+                    StandardEntry.number.ilike(f"%{tok}%"),
+                    StandardEntry.publisher.ilike(f"%{tok}%"),
+                )
+            )
+
+    total = int(
+        (await session.scalar(select(func.count(StandardEntry.id)).where(*base_where))) or 0
+    )
+    rows = (
+        await session.scalars(
+            select(StandardEntry)
+            .where(*base_where)
+            .order_by(StandardEntry.published_on.desc().nulls_last(), StandardEntry.number)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    country_counts_rows = (
+        await session.execute(
+            select(StandardEntry.country_code, func.count(StandardEntry.id))
+            .where(StandardEntry.status.in_(active_statuses))
+            .group_by(StandardEntry.country_code)
+            .order_by(func.count(StandardEntry.id).desc())
+        )
+    ).all()
+    countries_summary = [
+        {
+            "country_code": cc,
+            "country_name_zh": _std_country_zh(cc),
+            "count": int(cnt or 0),
+        }
+        for cc, cnt in country_counts_rows
+    ]
+    return {
+        "total": total,
+        "countries": countries_summary,
+        "items": [
+            {
+                "id": str(r.id),
+                "country_code": r.country_code,
+                "country_name_zh": _std_country_zh(r.country_code),
+                "number": r.number,
+                "title": r.title,
+                "kind_code": r.kind,
+                "kind": _STD_KIND_ZH.get(r.kind, r.kind),
+                "status_code": r.status,
+                "status": _STD_STATUS_ZH.get(r.status, r.status),
+                "published_on": r.published_on.isoformat() if r.published_on else None,
+                "effective_on": r.effective_on.isoformat() if r.effective_on else None,
+                "topics": list(r.topics or []),
+                "detail_url": r.detail_url,
+                "publisher": r.publisher,
+            }
+            for r in rows
+        ],
+    }

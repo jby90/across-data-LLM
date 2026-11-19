@@ -16,15 +16,17 @@ onMounted(() => {
   refresh()
   timer = window.setInterval(refresh, 15000)
   document.addEventListener('visibilitychange', refresh)
+  window.addEventListener('notifications-read', refresh)  // 看过通知，角标马上更新
 })
 onUnmounted(() => {
   window.clearInterval(timer)
   document.removeEventListener('visibilitychange', refresh)
+  window.removeEventListener('notifications-read', refresh)
 })
 </script>
 <template>
   <RouterLink to="/notifications" class="notification-bell" aria-label="更新通知"
-    :title="unread === null ? '通知状态暂不可用，点击查看' : `${unread} 条未读更新通知`">
+    :title="unread ? `${unread} 条未读更新通知` : '更新通知'">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
       <path d="M18 8a6 6 0 0 0-12 0v6l-2 3h16l-2-3V8 M10 21h4" />
     </svg>
@@ -34,5 +36,5 @@ onUnmounted(() => {
 <style scoped>
 .notification-bell{position:relative;display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;color:var(--el-text-color-regular);border-radius:9px}
 .notification-bell:hover{background:var(--el-fill-color-light)}
-svg{width:21px;height:21px}.notification-count{position:absolute;right:-5px;top:-2px;min-width:17px;padding:1px 4px;border-radius:10px;background:#b45309;color:white;font-size:10px;text-align:center}
+svg{width:21px;height:21px}.notification-count{position:absolute;right:-6px;top:-2px;min-width:18px;height:18px;line-height:18px;padding:0 5px;border-radius:10px;background:#b45309;color:white;font-size:13px;text-align:center}
 </style>

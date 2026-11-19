@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 DEV = Path.home() / ".cyshuhe-dev"
 
-DEMO_ORG = "演示车企"
+DEMO_ORG = "启衡智行汽车科技（上海）有限公司"
 DEMO_USERS = [
     ("admin@example.com", "平台管理员", "platform_admin", False),
     ("reviewer@example.com", "律所复核员", "reviewer", False),

@@ -288,6 +288,22 @@ class PoliteFetcher:
                 continue
         raise FetchError(f"重定向次数过多: {url}")
 
+    async def post_form(self, url: str, form: dict[str, str]) -> FetchResult:
+        """礼貌 POST 表单(用于官方目录的公开检索接口,如行业标准信息服务平台)。规则同 get。"""
+        host = await self._check_target(url)
+        await self._throttle(host)
+        headers = {"User-Agent": self._ua, "X-Requested-With": "XMLHttpRequest"}
+        try:
+            resp = await self._client.post(url, data=form, headers=headers, follow_redirects=False)
+            if resp.status_code >= 400:
+                raise FetchError(f"HTTP {resp.status_code}: {url}")
+            if len(resp.content) > self._max_bytes:
+                raise FetchError(f"响应超过大小上限: {url}")
+            mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            return FetchResult(url, resp.status_code, resp.content, mime, None, None)
+        except httpx.HTTPError as e:
+            raise FetchError(f"网络错误: {url}: {e}") from e
+
     async def post_json(
         self,
         url: str,

@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from app.analysis.models import ReportVersion
 from app.analysis.tools import ToolBox
 from app.cli import batch_translate
-from app.ingestion.models import Clause
+from app.ingestion.models import Clause, Document
 from app.ingestion.safety import document_is_held, report_held_citation_ids
 from app.knowledge.history import propose
 from app.knowledge.models import ClauseTranslation
@@ -106,3 +106,69 @@ async def test_report_hold_checks_nested_actual_citation_ids(session_factory):
         await session.commit()
         report = ReportVersion(dimensions_json=[{"citations": [{"clause_id": str(clauses[0].id)}]}])
         assert await report_held_citation_ids(session, report) == [clauses[0].id]
+
+
+async def test_out_of_scope_documents_are_hidden_from_users_but_kept_for_admins(
+    client, seed, session_factory
+):
+    """范围外的文件（法院改革法、门户页、办事表格等）不出现在用户的法规目录和统计里；
+    文件原样留在库里，管理员仍然可见，按链接直接打开也不受影响。
+    同一份文档先在“核心”状态下断言可见，再改成“范围外”断言消失——证明靠的就是这一个字段。"""
+    async with session_factory() as session:
+        doc, _, clauses = await make_document(session)
+        session.add(
+            ClauseTranslation(
+                clause_id=clauses[0].id,
+                translated_text="组织应保护个人数据。",
+                engine="llm",
+                model_name="test",
+                review_status="machine_translated",
+            )
+        )
+        await session.commit()
+        doc_id = str(doc.id)
+    user = bearer(await login(client, "user", "a-member@example.com"))
+    admin = bearer(await login(client, "admin", "admin@example.com"))
+
+    async def user_view():
+        listed = (
+            await client.get("/api/knowledge/regulations?country_code=SG", headers=user)
+        ).json()
+        overview = (await client.get("/api/knowledge/overview", headers=user)).json()
+        sg = next(row for row in overview if row["country_code"] == "SG")
+        return {r["id"] for r in listed}, sg
+
+    ids, sg = await user_view()
+    assert doc_id in ids
+    assert sg["documents_count"] == 1 and sg["clauses_count"] == 1 and sg["translations_count"] == 1
+
+    async with session_factory() as session:
+        row = await session.get(Document, doc.id)
+        row.relevance = "out_of_scope"
+        await session.commit()
+    # 这里绕过管理端接口直接改库：管理端修改后会清用户端缓存，测试里照做
+    from app.knowledge.cache_sync import clear_user_caches
+
+    clear_user_caches()
+    ids, sg = await user_view()
+    assert doc_id not in ids
+    # 统计和目录口径一致：概览里的文档、条款、译文都不再包含范围外的文件
+    assert sg["documents_count"] == 0 and sg["clauses_count"] == 0 and sg["translations_count"] == 0
+    # 管理员仍然看得到；用户按链接直接打开也不受影响（引用跳转不会 404）
+    admin_ids = {d["id"] for d in (await client.get("/api/admin/documents", headers=admin)).json()}
+    assert doc_id in admin_ids
+    assert (
+        await client.get(f"/api/knowledge/regulations/{doc_id}", headers=user)
+    ).status_code == 200
+
+
+def test_admission_materials_get_their_own_public_category():
+    """官方准入申请须知与表格不是立法，但车企要用：用户端单独归为“准入申报材料”，不混进监管指南。"""
+    from app.knowledge.router import _doc_type_zh, public_doc_type
+
+    assert public_doc_type("GUIDANCE", "ADMISSION_GUIDANCE") == "ADMISSION"
+    assert public_doc_type("GUIDANCE", "REGULATOR_GUIDANCE") == "GUIDANCE"
+    assert public_doc_type("LAW", None) == "LAW"
+    assert "准入申报材料" in _doc_type_zh(
+        "ADMISSION", "Application for Trial of Autonomous Motor Vehicles"
+    )

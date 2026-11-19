@@ -63,10 +63,18 @@ PDF_CACHE = ArtifactCache()
 def cached_pdf(task, report, dimension, build):
     task_view, report_view = _view(task, report, dimension)
     snapshot = {
-        "org_id": str(task.org_id), "report_id": str(report.id), "dimension": dimension,
-        "task": vars(task_view), "report": vars(report_view),
+        "org_id": str(task.org_id),
+        "report_id": str(report.id),
+        "dimension": dimension,
+        "task": vars(task_view),
+        "report": vars(report_view),
     }
-    key = hashlib.sha256(json.dumps(
-        snapshot, ensure_ascii=False, sort_keys=True, default=str,
-    ).encode()).hexdigest()
+    key = hashlib.sha256(
+        json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
     return PDF_CACHE.get_or_build(key, lambda: build(task, report, dimension))

@@ -32,7 +32,7 @@ function buildOption(): echarts.EChartsOption {
     animationDurationUpdate: 180,
     tooltip: {
       renderMode: 'richText',
-      textStyle: { fontSize: 12 },
+      textStyle: { fontSize: 13 },
       confine: true,
       formatter: (p: any) => {
         if (p.dataType === 'edge') return `${p.data.name}`
@@ -103,13 +103,13 @@ onUnmounted(() => {
       ref="canvas"
       class="canvas"
       role="img"
-      aria-label="法规知识关系图，证据明细可在列表中查看"
+      aria-label="法规知识关系图，条文依据明细可在列表中查看"
     ></div>
     <button class="reset-view" type="button" @click="chart?.dispatchAction({ type: 'restore' })">
       重置视图
     </button>
     <div v-if="!nodes.length" class="empty">
-      当前筛选条件下暂无关联节点，可开启更多节点类型或切换关系筛选
+      当前筛选条件下暂无关联要素，可开启更多要素类型或切换关系筛选
     </div>
   </div>
 </template>
@@ -142,7 +142,7 @@ onUnmounted(() => {
   border: 1px solid #dce4ed;
   border-radius: 7px;
   padding: 7px 12px;
-  font-size: 12px;
+  font-size: 13px;
   color: #64798a;
 }
 .reset-view:hover {

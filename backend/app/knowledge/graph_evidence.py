@@ -92,7 +92,10 @@ def evidence_attributes(edges, node_by_id, clause_map, *, node_id=None):
         if target.node_type == "DATA_CATEGORY":
             keys.append("data_scope")
         if edge.relation_type in dimensions:
-            keys.append(dimensions[edge.relation_type])
+            key = dimensions[edge.relation_type]
+            # “适用场景”边的目标可能是数据类型（个人数据），那是数据范围，不是适用行业
+            if not (key == "applicable_industry" and target.node_type == "DATA_CATEGORY"):
+                keys.append(key)
         if edge.relation_type == "REQUIRES_ADMISSION":
             keys.append("authorization_requirement")
         if edge.relation_type == "REQUIRES" and any(
@@ -113,3 +116,38 @@ def evidence_attributes(edges, node_by_id, clause_map, *, node_id=None):
                 }
             )
     return {key: "；".join(dict.fromkeys(texts)) for key, texts in values.items()}, provenance
+
+
+_ONTOLOGY_KEY = {"admission_materials": "admission_checklist"}
+
+
+def ontology_attributes(
+    node_attributes: dict | None, clause_info: tuple | None
+) -> tuple[dict, dict]:
+    """Attributes read from the node's own evidence clause (``attributes.ontology``).
+
+    Each carries the sentence of the clause it rests on; one is shown only when that sentence is
+    found in the clause text we hold, so a stale or edited value cannot be displayed as if
+    it were in the source. ``clause_info`` is ``(number, document title, original text)``."""
+    stored = (node_attributes or {}).get("ontology")
+    if not isinstance(stored, dict) or not clause_info:
+        return {}, {}
+    source = " ".join((clause_info[2] or "").split())
+    values: dict[str, str] = {}
+    provenance: dict[str, list[dict]] = {}
+    for name, item in stored.items():
+        quote = " ".join(str((item or {}).get("quote", "")).split())
+        value = str((item or {}).get("value", "")).strip()
+        if not value or not quote or quote not in source:
+            continue
+        key = _ONTOLOGY_KEY.get(name, name)
+        values[key] = value
+        provenance[key] = [
+            {
+                "clause_number": clause_info[0],
+                "document_title": clause_info[1],
+                "evidence_quote": quote,
+                "review_status": "text_extract",
+            }
+        ]
+    return values, provenance

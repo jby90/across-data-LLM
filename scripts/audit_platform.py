@@ -463,7 +463,7 @@ def print_human_report(report: dict[str, Any]) -> None:
 def prepare_cleanup_backup(
     base_url: str, admin_email: str, admin_password: str, backup_path: Path
 ) -> dict[str, Any]:
-    """导出待清理的 ZZ 演示站点与 E2E 测试对话(组织='演示车企' 且标题含 'CYS-Pilot')完整备份。"""
+    """导出待清理的 ZZ 演示站点与 E2E 测试对话(组织='启衡智行汽车科技（上海）有限公司' 且标题含 'CYS-Pilot')完整备份。"""
     with httpx.Client(base_url=base_url, timeout=60.0) as client:
         token = _login_admin(client, admin_email, admin_password)
         headers = {"Authorization": f"Bearer {token}"}
@@ -490,7 +490,7 @@ def prepare_cleanup_backup(
             det_r = client.get(f"/api/admin/agent-studio/tasks/{t['id']}", headers=headers)
             full_obj = det_r.json() if det_r.status_code == 200 else t
             all_tasks_full.append(full_obj)
-            if t.get("org_name") == "演示车企" and "CYS-Pilot" in (t.get("title") or ""):
+            if t.get("org_name") in ("演示车企", "启衡智行汽车科技（上海）有限公司") and "CYS-Pilot" in (t.get("title") or ""):
                 target_tasks_full.append(full_obj)
 
         backup = {
@@ -530,7 +530,7 @@ def execute_cleanup(
             title = t.get("title") or ""
             vmodel = t.get("vehicle_model") or ""
             is_script_task = (
-                t.get("org_name") == "演示车企"
+                t.get("org_name") in ("演示车企", "启衡智行汽车科技（上海）有限公司")
                 and (
                     "CYS-Pilot" in title
                     or "CYS-Pilot" in vmodel

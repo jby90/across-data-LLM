@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 import uuid
@@ -95,6 +96,7 @@ async def post_model(payload, *, timeout, purpose, protected=None):
     try:
         await audit("started")
     except Exception:
+        logging.getLogger(__name__).warning("出站审计写入失败", exc_info=True)
         raise LlmUnavailableError(
             "模型出站审计不可用，未发送请求", kind="egress_audit_error"
         ) from None
@@ -110,6 +112,8 @@ async def post_model(payload, *, timeout, purpose, protected=None):
         stage = "success" if response.is_success else "http_error"
         if response.is_success:
             body = response.json()
+            if not isinstance(body, dict):  # 偶尔返回 200 但正文是 null：当作空回复，走重试
+                body = {}
             usage = body.get("usage") or {}
             for choice in body.get("choices") or []:
                 message = choice.get("message") or {}
@@ -186,16 +190,19 @@ async def call_llm_json(
     failures = []
     for _attempt in range(MAX_ATTEMPTS):
         try:
+            payload: dict[str, Any] = {
+                "model": requested_model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+                # 推理型模型默认会耗尽 max_tokens 而返回空内容,分析任务只需低强度推理
+                "reasoning_effort": "low",
+            }
+            if "deepseek" in (requested_model or "").lower():
+                payload["thinking"] = {"type": "disabled"}
             resp = await post_model(
-                {
-                    "model": requested_model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "response_format": {"type": "json_object"},
-                    # 推理型模型默认会耗尽 max_tokens 而返回空内容,分析任务只需低强度推理
-                    "reasoning_effort": "low",
-                },
+                payload,
                 timeout=request_timeout,
                 purpose="analysis_json",
             )

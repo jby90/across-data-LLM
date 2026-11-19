@@ -17,6 +17,12 @@ export interface FgCategory {
   color: string
 }
 
+function cleanGraphNodeLabel(raw: string): string {
+  const s = (raw || '').trim()
+  const m = s.match(/^(.*[\u4e00-\u9fff])\s*[（(]\s*([A-Za-zÀ-ÿ\u0600-\u06FF][^）)]*)\s*[）)]$/)
+  return m ? m[1].trim() : s
+}
+
 export function graphSeries(
   nodes: FgNode[], edges: FgEdge[], categories: FgCategory[],
   options: { overview?: boolean; selectedId?: string; reducedMotion?: boolean; viewportWidth?: number } = {},
@@ -47,6 +53,7 @@ export function graphSeries(
         itemStyle: selected ? { borderColor: '#0f172a', borderWidth: 2 } : undefined,
         label: {
           show: selected || n.type === 'COUNTRY' || labelled.has(n.id),
+          formatter: cleanGraphNodeLabel(n.name),
         },
       }
     }),
@@ -61,18 +68,18 @@ export function graphSeries(
       },
     })),
     force: {
-      repulsion: 150, edgeLength: [45, 115], gravity: 0.15,
+      repulsion: 420, edgeLength: [95, 185], gravity: 0.08, friction: 0.6,
       layoutAnimation: !options.reducedMotion,
     },
     edgeSymbol: ['none', 'arrow'],
     edgeSymbolSize: 4,
-    edgeLabel: { show: false, fontSize: 11 },
-    labelLayout: { hideOverlap: true },
+    edgeLabel: { show: false, fontSize: 13 },
+    labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' as const },
     // Preserve normal label visibility on adjacent nodes; tooltip reveals the hovered name.
-    emphasis: { focus: 'adjacency' as const, label: { fontSize: 12 } },
+    emphasis: { focus: 'adjacency' as const, label: { fontSize: 13 } },
     lineStyle: { width: overview ? 0.8 : 1 },
     label: {
-      position: 'right' as const, fontSize: 11, color: '#334155',
+      position: 'right' as const, fontSize: 13, color: '#334155',
       overflow: 'truncate' as const, width: 160,
     },
   }

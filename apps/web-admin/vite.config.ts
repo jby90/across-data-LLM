@@ -5,6 +5,9 @@ export default defineConfig({
   cacheDir: process.env.CYSH_VITE_CACHE_DIR,
   base: process.env.VITE_APP_BASE || '/',
   plugins: [vue()],
+  optimizeDeps: {
+    exclude: ['@cyshuhe/shared'],
+  },
   server: {
     proxy: { '/api': process.env.CYSH_DEV_API_TARGET || 'http://127.0.0.1:8000' },
   },

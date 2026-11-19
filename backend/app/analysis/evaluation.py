@@ -136,8 +136,8 @@ def aggregate(cases):
             if c.get("model_call")
         ),
         "note": (
-            "工程来源标注集，非人工金标准。事实一致性为独立模型对结论是否获引文支持的判断"
-            "（llm_judged），不代表法律准确率。未生成/未判定项不计为通过，另列覆盖率。"
+            "工程来源标注集，非人工金标准。事实一致性为独立模型对结论是否获引文支持的自动判别结果"
+            "，不代表法律准确率。未生成/未判定项不计为通过，另列覆盖率。"
         ),
         "cases": cases,
     }
@@ -174,7 +174,7 @@ async def evaluate_case(session, question_id, batch_id, actor_id):
     frozen = suite()
     question = next((c for c in frozen["cases"] if c["id"] == question_id), None)
     if question is None:
-        raise LookupError("冻结评测题不存在")
+        raise LookupError("冻结评测案例不存在")
     cfg = await ensure_workflow_config(session)
     require_executable(cfg)
     config = execution_settings(
@@ -315,15 +315,28 @@ async def evaluate_case(session, question_id, batch_id, actor_id):
     return case
 
 
+_LATEST_EVAL_CACHE: dict[tuple, dict] = {}
+
+
 async def latest_evaluation(session):
-    latest = await session.scalar(
-        select(KnowledgeAuditRecord)
-        .where(
-            KnowledgeAuditRecord.action == ACTION,
+    latest_meta = (
+        await session.execute(
+            select(
+                KnowledgeAuditRecord.id,
+                KnowledgeAuditRecord.target_id,
+                KnowledgeAuditRecord.created_at,
+            )
+            .where(KnowledgeAuditRecord.action == ACTION)
+            .order_by(KnowledgeAuditRecord.created_at.desc())
+            .limit(1)
         )
-        .order_by(KnowledgeAuditRecord.created_at.desc())
-        .limit(1)
-    )
+    ).first()
+    if latest_meta is None:
+        return aggregate([])
+    cache_key = (latest_meta[0], latest_meta[1], latest_meta[2])
+    if cache_key in _LATEST_EVAL_CACHE:
+        return dict(_LATEST_EVAL_CACHE[cache_key])
+    latest = await session.get(KnowledgeAuditRecord, latest_meta[0])
     if latest is None:
         return aggregate([])
     rows = (
@@ -343,9 +356,12 @@ async def latest_evaluation(session):
         if r.payload["suite_sha256"] == latest.payload["suite_sha256"]
         and r.payload["workflow_version_id"] == latest.payload["workflow_version_id"]
     }
-    return {
+    out = {
         **aggregate(list(cases.values())),
         "batch_id": str(latest.target_id),
         "suite_sha256": latest.payload["suite_sha256"],
         "workflow_version_id": latest.payload["workflow_version_id"],
     }
+    _LATEST_EVAL_CACHE.clear()
+    _LATEST_EVAL_CACHE[cache_key] = out
+    return dict(out)

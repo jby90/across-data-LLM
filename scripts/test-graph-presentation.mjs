@@ -41,8 +41,8 @@ test('small and large graphs never enable rotated edge labels automatically or o
 test('text and node sizes are bounded for dense hubs and selected nodes', () => {
   for (const overview of [true, false]) {
     const series = graphSeries(nodes, edges, categories, { overview, selectedId: law.id })
-    assert.ok(series.label.fontSize <= 12)
-    assert.ok(series.emphasis.label.fontSize <= 12)
+    assert.ok(series.label.fontSize >= 13 && series.label.fontSize <= 14)
+    assert.ok(series.emphasis.label.fontSize >= 13 && series.emphasis.label.fontSize <= 14)
     assert.equal(series.nodeScaleRatio, 0)
     assert.ok(series.data.every(n => n.symbolSize <= 32))
   }

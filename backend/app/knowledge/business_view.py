@@ -2,7 +2,8 @@
 
 from sqlalchemy import select
 
-from app.ingestion.models import Clause, Document, DocumentVersion
+from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
+from app.knowledge.data_classes import class_of
 from app.knowledge.graph_evidence import active_edge_filters
 from app.knowledge.models import KgEdge, KgNode
 
@@ -19,6 +20,53 @@ TOPICS = {
 }
 
 
+# 与国家简报同一套方面（claim_tags），顺序即办理时关注的先后
+ASPECT_TOPICS = [
+    ("transfer", "跨境传输"),
+    ("consent", "告知与同意"),
+    ("security", "存储与安全"),
+    ("admission", "申报与许可"),
+    ("governance", "内部管理"),
+    ("penalty", "处罚"),
+]
+
+
+async def requirement_topics(session, country_code):
+    """The country's compliance topics: every verified requirement of the country page's pools,
+    one card each, with its facts and its source as《中文名》第X条."""
+    from app.knowledge import whitepaper_graph as wg
+
+    cc = country_code.upper()
+    pools, _, _ = await wg.requirement_pools(session, cc)
+    refs = wg._Refs(session)
+    cards = []
+    for aspect, label in ASPECT_TOPICS:
+        nodes = pools.get(aspect) or []
+        items = await wg._claim_items(refs, nodes, penalty=aspect == "penalty")
+        for node, item in zip(nodes, items, strict=True):
+            ref = refs.items[item.ref - 1] if item.ref else None
+            if ref is None:
+                continue  # 依据条文已不可引用（废止版本等）的不列
+            cards.append(
+                dict(
+                    id=str(node.id),
+                    topic=aspect,
+                    topic_label=label,
+                    title=item.title,
+                    facts=[{"label": k, "text": v} for k, v in item.facts],
+                    document_id=ref.doc_id,
+                    document_title=ref.title,
+                    clause_id=ref.clause_id,
+                    clause_number=ref.label,
+                    source=f"《{ref.title}》{ref.label}",
+                    quote=ref.zh or ref.original or "",
+                    source_url="",
+                    version_no=0,
+                )
+            )
+    return cards
+
+
 async def topic_cards(session, country_code, document_id=None, clause_id=None):
     stmt = (
         select(KgEdge, Clause, DocumentVersion, Document, KgNode)
@@ -30,7 +78,8 @@ async def topic_cards(session, country_code, document_id=None, clause_id=None):
             *active_edge_filters(),
             KgEdge.is_structural.is_(False),
             Document.country_code == country_code.upper(),
-            DocumentVersion.legal_status != "repealed",
+            Document.relevance.not_in(("irrelevant", "out_of_scope")),
+            DocumentVersion.legal_status.not_in(NOT_CITABLE_STATUSES),
             KgNode.review_status.in_(("approved", "pending_review")),
         )
         .order_by(Document.title, Clause.ordinal, KgEdge.id)
@@ -41,6 +90,10 @@ async def topic_cards(session, country_code, document_id=None, clause_id=None):
         stmt = stmt.where(Clause.id == clause_id)
     cards = []
     for edge, clause, version, doc, target in (await session.execute(stmt)).all():
+        if doc.business_weight == "peripheral":
+            continue  # 与车辆数据业务关系较远的文件（谢绝来电登记、机构名单公告等）不列为合规主题
+        if target.node_type == "DATA_CATEGORY" and class_of(target) == "unrelated":
+            continue  # 只关乎与车辆数据处理无关的数据（如营销电话号码登记），不作为合规主题列出
         topic, label = TOPICS.get(edge.relation_type, ("other", "其他要求"))
         cards.append(
             dict(
@@ -49,7 +102,7 @@ async def topic_cards(session, country_code, document_id=None, clause_id=None):
                 topic_label=label,
                 title=target.name_zh,
                 document_id=str(doc.id),
-                document_title=doc.title,
+                document_title=doc.title_zh or doc.title,
                 clause_id=str(clause.id),
                 clause_number=clause.clause_number or str(clause.ordinal),
                 version_no=version.version_no,

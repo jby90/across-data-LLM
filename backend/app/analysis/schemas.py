@@ -18,7 +18,7 @@ def compute_active_node(task_status: str, traces: list[Any]) -> tuple[str | None
     if task_status == "collecting_facts":
         return "node_fact_collector", "信息采集与追问 Agent（对话采集中）"
     if task_status == "awaiting_user_facts":
-        return "node_fact_collector", "信息采集与追问 Agent（分析暂停，等待业务事实）"
+        return "node_fact_collector", "信息采集与追问 Agent（分析暂停，待补充情况）"
     if task_status == "ready_to_run":
         return "node_fact_collector", "信息采集与追问 Agent（事实已齐备，待启动）"
     if task_status != "running":
@@ -275,6 +275,7 @@ class ReportVersionOut(BaseModel):
     executive_summary: str
     dimensions: list[ReportDimensionOut]
     stale_impacts: list[StaleImpactAlertOut] = Field(default_factory=list)
+    consulting: dict[str, Any] | None = None
     created_at: datetime
 
     @model_validator(mode="after")
@@ -314,6 +315,8 @@ class AnalysisTaskSummaryOut(BaseModel):
     backtrack_count: int
     created_at: datetime
     updated_at: datetime
+    project_id: str | None = None  # 文件项目旁边的对话：所属项目
+    viewer_own: bool = False  # 普通查看者自己新建的私密咨询对话
 
 
 class ChatMessageOut(BaseModel):
@@ -326,13 +329,26 @@ class ChatMessageOut(BaseModel):
     created_at: datetime
 
 
+class GuidedStartIn(BaseModel):
+    """引导式入口：先选目标国家、车型、功能、业务场景，其余缺项进入同一个对话工作流逐项追问。"""
+
+    country_code: str | None = Field(default=None, max_length=2)
+    vehicle_model: str | None = Field(default=None, max_length=128)
+    scenario_type: str | None = Field(default=None, max_length=64)  # 功能
+    business_scene: str | None = Field(default=None, max_length=64)  # 业务场景
+
+
 class ChatMessageIn(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
     question_id: uuid.UUID | None = None
+    # 随这条消息发出的文件
+    attachment_ids: list[uuid.UUID] = Field(default_factory=list, max_length=5)
 
 
 class AnalysisTaskDetailOut(BaseModel):
     activity: dict[str, Any] | None = None
+    archived: bool = False  # 在“已归档”里：只读，不出现在当前对话列表
+    viewer_own: bool = False  # 普通查看者自己新建的私密咨询对话
     id: uuid.UUID
     conversation_code: str = ""
     org_id: uuid.UUID | None = None

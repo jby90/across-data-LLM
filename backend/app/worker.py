@@ -27,7 +27,9 @@ log = logging.getLogger("app.worker")
 async def main(once: bool) -> None:
     settings = get_settings()
     archive = ArchiveStore(settings.archive_dir)
-    ocr = OcrEngine(settings.tesseract_cmd, settings.tessdata_dir, settings.ocr_dpi)
+    ocr = OcrEngine(
+        settings.tesseract_cmd, settings.tessdata_dir, settings.ocr_dpi, settings.paddle_python
+    )
     log.info("OCR %s", "可用" if ocr.available else "不可用(扫描件只标记,不识别)")
     sf = get_sessionmaker()
     if settings.env == "prod":

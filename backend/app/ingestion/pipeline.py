@@ -27,7 +27,9 @@ from app.ingestion.discovery import (
     parse_egazette_hits,
     parse_egazette_search_config,
 )
+from app.ingestion.excerpt import cut_excerpt
 from app.ingestion.fetcher import BlockedError, FetchError, PoliteFetcher
+from app.ingestion.legal_nature import NATURE_LABEL, classify_legal_nature
 from app.ingestion.models import (
     Clause,
     Document,
@@ -35,6 +37,7 @@ from app.ingestion.models import (
     PipelineEvent,
     VersionState,
 )
+from app.ingestion.noise import clean_text  # 网页导航、地址电话、下一章标题不进库
 from app.ingestion.ocr import LOW_CONFIDENCE, OcrEngine
 from app.ingestion.parsing import (
     ParseError,
@@ -288,6 +291,37 @@ async def parse_version(
                         message=f"移除页边行号 {margin_removed} 个",
                     )
                 )
+        if version.excerpt:
+            spec = version.excerpt
+
+            def cut(source: list[str]) -> list[str]:
+                return cut_excerpt(
+                    source,
+                    official_number=spec.get("number", ""),
+                    start=spec.get("start", ""),
+                    end=spec.get("end", ""),
+                )
+
+            cut_pages = cut(pages)
+            if cut_pages is pages and version.text_source != "ocr" and ocr and ocr.available:
+                # 文字层里数字、大写字母错位时找不到标题行：按页面图像识别后再找一次
+                result = await asyncio.to_thread(ocr.run, content, language)
+                version.text_source = "ocr"
+                version.ocr_required = True
+                version.ocr_confidence = result.mean_confidence
+                session.add(
+                    PipelineEvent(
+                        version_id=version.id,
+                        step="ocr",
+                        status="ok",
+                        message=f"文字层里找不到标题行，改用图像识别（{len(result.pages)} 页）",
+                    )
+                )
+                pages, _ = strip_running_headers(result.pages)
+                cut_pages = cut(pages)
+            if cut_pages is pages:  # 找不到标题行就不入库，免得把别的法令的条文当成这一部
+                raise ParseError("摘录页里找不到这部法令的标题行，未入库")
+            pages = cut_pages
         drafts, strategy = split_clauses(
             pages, paragraph_mode="line" if parsed.kind == "html" else "blank"
         )
@@ -301,10 +335,10 @@ async def parse_version(
                     clause_number=d.clause_number,
                     heading=d.heading,
                     section_path=d.section_path,
-                    original_text=d.text,
+                    original_text=clean_text(d.text),
                     page_start=d.page_start,
                     page_end=d.page_end,
-                    text_hash=ArchiveStore.sha256(d.text.encode("utf-8")),
+                    text_hash=ArchiveStore.sha256(clean_text(d.text).encode("utf-8")),
                     language=language,
                     ocr_required=bool(version.ocr_required),
                     needs_review=True,
@@ -322,6 +356,11 @@ async def parse_version(
                 message=f"{len(drafts)} 条,策略 {strategy}",
             )
         )
+        if version.text_source == "ocr":  # 扫描件：解析完就做识别质量检查，通过的记为已核对
+            await session.flush()
+            from app.ingestion.ocr_check import apply_recognition_check
+
+            await apply_recognition_check(session, version)
         if version.version_no > 1:
             await session.flush()
             from app.knowledge.extractor import handle_new_version_linkage
@@ -377,6 +416,171 @@ async def parse_version(
                 )
             )
             log.warning("术语索引失败 version=%s: %s", version.id, type(exc).__name__)
+
+
+async def screen_document(
+    s: AsyncSession, doc: Document, version: DocumentVersion, stats: Stats | None = None
+) -> None:
+    """入库把关：文件是不是法律文书；同一份文件是否被挂在了别的标题下。
+
+    1. 文书性质（legal_nature）：非法律资料（白皮书、研究报告、机构介绍页、办事表格）不进入法律库。
+       这里不新增状态：直接标成 out_of_scope 并写明理由，法律库检索本来就会跳过它，文件原样留档。
+       人工设定过的判定（relevance_source='manual'）不会被覆盖；模型不可用或没把握时保持原状，不猜。
+    2. 重复挂载：不同文档下出现完全相同的文件哈希，说明有一方挂错了（实测发生过：
+       个人数据保护法条目下存的是自动驾驶申请表）。只记录告警事件，由人决定哪个是对的，不自动改库。
+    """
+    if version.state != VersionState.PARSED.value:
+        return
+    # 2. 重复挂载
+    twins = (
+        await s.execute(
+            select(Document.id, Document.title)
+            .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+            .where(DocumentVersion.content_hash == version.content_hash, Document.id != doc.id)
+            .distinct()
+        )
+    ).all()
+    if twins:
+        s.add(
+            PipelineEvent(
+                version_id=version.id,
+                step="duplicate_file",
+                status="error",
+                message="同一份文件同时挂在多个文档下，其中必有一处挂错，请核对: "
+                + doc.title[:60]
+                + " <-> "
+                + " | ".join(t[:60] for _, t in twins),
+            )
+        )
+    # 1. 文书性质
+    if doc.relevance_source == "manual":
+        return
+    sample_rows = (
+        (
+            await s.execute(
+                select(Clause.original_text)
+                .where(Clause.version_id == version.id)
+                .order_by(Clause.ordinal)
+                .limit(4)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    verdict = await classify_legal_nature(
+        title=doc.title,
+        source_url=doc.source_url,
+        document_type=doc.document_type,
+        country_code=doc.country_code,
+        sample_text="\n".join(t[:450] for t in sample_rows),
+        pages=version.page_count,
+    )
+    if verdict is None:
+        return
+    s.add(
+        PipelineEvent(
+            version_id=version.id,
+            step="legal_nature",
+            status="ok",
+            message=f"{NATURE_LABEL[verdict.nature]}（{verdict.confidence}）：{verdict.reason}",
+        )
+    )
+    if verdict.nature == "non_legal" and verdict.confidence == "high":
+        doc.relevance = "out_of_scope"
+        doc.relevance_source = "llm"
+        doc.relevance_note = f"非法律资料，不进入法律库：{verdict.reason}"
+    elif verdict.confidence == "low" and doc.relevance == "relevant":
+        # 没把握：不擅自排除，但也不当作已确认——放进待确认，由管理端处理
+        doc.relevance = "needs_review"
+        doc.relevance_note = (
+            f"文书性质判定把握不足（{NATURE_LABEL[verdict.nature]}）：{verdict.reason}"
+        )
+    if stats is not None and verdict.nature == "non_legal":
+        stats.messages.append(f"{doc.source_url}: 判定为非法律资料")
+
+
+class _PrecomputedOcr:
+    """把已经跑完的 OCR 结果交给 parse_version，避免同一份扫描件再识别一遍（一页要近一分钟）。"""
+
+    available = True
+
+    def __init__(self, result) -> None:
+        self._result = result
+
+    def run(self, content: bytes, language: str, max_pages: int | None = None):
+        return self._result
+
+
+async def upgrade_ocr_version(
+    session: AsyncSession,
+    archive: ArchiveStore,
+    version: DocumentVersion,
+    language: str,
+    ocr: OcrEngine,
+    *,
+    accept_equal: bool = False,
+) -> dict:
+    """用更好的 OCR 重新识别一份扫描件，识别结果确实更好才替换旧条款。
+
+    “已有条款不可原位重建”保护的是被引用的证据；扫描件早期的识别结果常常残缺
+    （埃及法 31 页只读出 15 条）。
+    所以：新结果在“可用页数 → 条号数 → 字符数”上严格更好才替换；旧条款原文先整体留档到流水线记录；
+    如果旧条款已被证据台账引用，数据库外键会拒绝删除，此时整体回滚、保持原样，不会留下半截数据。"""
+    from sqlalchemy import delete
+
+    from app.ingestion.page_quality import document_quality
+
+    if version.text_source != "ocr":
+        return {"status": "skipped", "reason": "不是 OCR 版本"}
+    rows = (
+        await session.execute(
+            select(Clause.page_start, Clause.original_text)
+            .where(Clause.version_id == version.id)
+            .order_by(Clause.ordinal)
+        )
+    ).all()
+    by_page: dict[int, list[str]] = {}
+    for page, text in rows:
+        by_page.setdefault(page or 0, []).append(text)
+    n_pages = version.page_count or max(by_page, default=0)
+    old_pages = ["\n".join(by_page.get(p, [])) for p in range(1, n_pages + 1)]
+    content = archive.read(version.archive_path)
+    result = await asyncio.to_thread(ocr.run, content, language)
+    old_q = document_quality(old_pages, language)
+    new_q = document_quality(result.pages, language)
+    # accept_equal：识别引擎本身改进了（如新增预处理），但“可读页数、条号数”没有变化时，
+    # 这两项指标量不出文字准确率的提升，允许在不变差的前提下替换。
+    worse = new_q[:2] < old_q[:2] if accept_equal else new_q <= old_q
+    if worse:
+        return {"status": "kept_old", "old": old_q, "new": new_q}
+    old_clauses = len(rows)
+    old_snapshot = json.dumps(
+        [{"page": p, "text": t[:300]} for p, t in rows[:200]], ensure_ascii=False
+    )
+    try:
+        async with session.begin_nested():
+            await session.execute(delete(Clause).where(Clause.version_id == version.id))
+    except Exception as exc:  # noqa: BLE001 - 外键拒绝删除=旧条款已被引用，原样保留
+        return {
+            "status": "kept_old_referenced",
+            "old": old_q,
+            "new": new_q,
+            "error": str(exc)[:200],
+        }
+    session.add(
+        PipelineEvent(
+            version_id=version.id,
+            step="ocr_upgrade",
+            status="ok",
+            message=(
+                f"重新识别：可读页数 {old_q[0]}→{new_q[0]}，条号 {old_q[1]}→{new_q[1]}；"
+                f"替换旧条款 {old_clauses} 条。旧条款开头存档：{old_snapshot}"
+            ),
+        )
+    )
+    version.state = VersionState.DOWNLOADED.value
+    await parse_version(session, archive, version, language, _PrecomputedOcr(result))  # type: ignore[arg-type]
+    return {"status": "upgraded", "old": old_q, "new": new_q, "old_clauses": old_clauses}
 
 
 async def _process_candidate(
@@ -465,10 +669,13 @@ async def _process_candidate(
 
         existing = (
             await s.execute(
-                select(DocumentVersion).where(
+                select(DocumentVersion)
+                .where(
                     DocumentVersion.document_id == doc.id,
                     DocumentVersion.content_hash == ArchiveStore.sha256(res.content),
                 )
+                .order_by(DocumentVersion.version_no.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         if existing is not None:  # 内容与某个已有版本完全相同,不产生新版本
@@ -517,6 +724,7 @@ async def _process_candidate(
         )
         stats.versions_new += 1
         await parse_version(s, archive, version, site.language, ocr)
+        await screen_document(s, doc, version, stats)
         await observe_fetch(s, doc, version, archived_previous=latest, observed_at=observed_at)
         if version.state in (VersionState.FAILED.value, VersionState.NEEDS_OCR.value):
             doc.last_error = version.error or f"原文尚未解析完成: {version.state}"

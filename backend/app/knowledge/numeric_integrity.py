@@ -13,9 +13,17 @@ def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "")
     # Arabic sources place the percentage sign before the number. Preserve the
     # percentage identity, rather than misreading it as a bare numeric amount.
+    text = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬", "01234567890123456789.,"))
     text = re.sub(rf"٪\s*({NUMBER})", r"\1%", text)
-    text = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٪٫٬", "01234567890123456789%.,"))
-    return re.sub(rf"百分之\s*({NUMBER})", r"\1%", text)
+    text = text.replace("٪", "%")
+    text = re.sub(rf"百分之\s*({NUMBER})", r"\1%", text)
+    # “40 percent / 40 per cent / 40 pour cent”与“40%”是同一个数；写法不同不算译错
+    return re.sub(
+        rf"({NUMBER})\s*(?:percent|per\s*cent|pour\s*cent|pourcent|بالمئة|في المئة)(?![A-Za-z])",
+        r"\1%",
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def canonical(token: str) -> tuple[str, bool]:
@@ -93,7 +101,17 @@ MONTHS = {
 }
 
 
+def _valid(year: int, month: int, day: int) -> bool:
+    try:
+        date(year, month, day)
+    except ValueError:
+        return False
+    return True
+
+
 def dates(text: str) -> set[tuple[int, int, int]]:
+    """Complete, real calendar dates only. "1.0 October 2020" is a version number then a month,
+    not the 0th of October, and "31 February 2020" is not a date at all."""
     text = normalize(text).lower()
     found = set()
     for year, month, day in re.findall(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", text):
@@ -102,13 +120,13 @@ def dates(text: str) -> set[tuple[int, int, int]]:
         found.add((int(year), int(month), int(day)))
     month_words = "|".join(sorted(MONTHS, key=len, reverse=True))
     for day, month, year in re.findall(
-        rf"(?<!\d)(\d{{1,2}})(?:st|nd|rd|th)?(?:\s+day\s+of)?\s+({month_words})\s*[,،]?\s*(\d{{4}})(?!\d)",
+        rf"(?<![\d.])(\d{{1,2}})(?:st|nd|rd|th)?(?:\s+day\s+of)?\s+({month_words})\s*[,،]?\s*(\d{{4}})(?!\d)",
         text,
     ):
         found.add((int(year), MONTHS[month], int(day)))
     for month, day, year in re.findall(rf"({month_words})\s+(\d{{1,2}}),?\s+(\d{{4}})(?!\d)", text):
         found.add((int(year), MONTHS[month], int(day)))
-    return found
+    return {d for d in found if _valid(*d)}
 
 
 def separate_explicit_dates(text: str):
@@ -150,3 +168,106 @@ def separate_explicit_dates(text: str):
     for start, end in spans:
         characters[start:end] = " " * (end - start)
     return tokens("".join(characters)), values, invalid
+
+
+_CURRENCY_MARKERS = re.compile(
+    "|".join(f"(?:{marker})" for marker in CURRENCIES.values()), re.IGNORECASE
+)
+
+
+_MIN_WORD_LETTERS = 3
+# 货币码只在不紧贴字母时才算（“Made”里的 MAD 不是货币）
+_STANDALONE_CURRENCY = re.compile(
+    r"(?<![^\W\d_])(?:" + "|".join(f"(?:{m})" for m in CURRENCIES.values()) + r")(?![^\W\d_])",
+    re.IGNORECASE,
+)
+
+
+_CONTACT = re.compile(r"\S*@\S+|(?:https?://|www\.)\S+", re.IGNORECASE)
+_LEADER_DOTS = re.compile(r"\.{8,}|…{3,}|。{8,}")  # 目录里页码前的点线
+_REVISION_ROW = re.compile(
+    r"^\s*\d+(?:\.\d+)*\s+(?:January|February|March|April|May|June|July|August|September|October|"
+    r"November|December|janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|"
+    r"novembre|d[ée]cembre)\s+\d{4}(?!\d)",
+    re.I,
+)
+
+
+_LEADER = r"(?:\.{3,}|…|。{3,})[.…。\s]*"
+_PAGES = r"\d{1,4}(?:\s*(?:à|-|–|to)\s*\d{1,4})?(?:\s+\d{1,4}){0,2}"
+# 一行目录：标题 + 点线 + 页码（从右往左排的文字页码在点线前），页码在行尾
+_CONTENTS_ENTRY = re.compile(
+    rf"(?:{_LEADER}:?\s*{_PAGES}|(?<![\d.]){_PAGES}\s*(?:\.{{3,}}|…{{2,}}|。{{3,}})[.…。]*)\s*$"
+    # 从右往左排的文字抽出来是“页码 …… 标题”
+    rf"|^\s*{_PAGES}\s*(?:\.{{8,}}|…{{3,}}|。{{8,}})[.…。]*\s*\S"
+)
+# 页码被切到下一段的目录行：以章节编号或“章、条、附件”开头、以长点线结尾
+# （表单里“姓名：……”以标签开头，不算）
+_NUMBERED_TITLE = re.compile(
+    r"^\s*(?:\d+(?:[.\-]\d+)*[.\-)]?|[IVXLC]+[.\-)]|(?:Chapitre|Chapter|CHAPITRE|CHAPTER|Section|SECTION|Article|"
+    r"TITRE|Titre|Annexe|ANNEXE|Annex|ANNEX|Part|PART|المادة|الفصل|الباب)\b)\s*\S.*?(?:\.{8,}|…{3,}|。{8,})[.…。]*\s*[:：]?\s*$"
+)
+# 页码排在另一栏、被抽到别处的目录行：标题以长点线收尾，前面没有“标签：”（表单的填空行带冒号）
+_TRAILING_LEADER = re.compile(r"^[^:：]*[^\W\d_][^:：]*?(?:\.{8,}|…{3,}|。{8,})[.…。\s]*$")
+# 法典目录常见的“条号范围 + 页码”结尾（“… 1 à 20 79”），没有点线
+_RANGE_PAGE = re.compile(r"\b\d{1,4}\s*(?:à|-|–|to)\s*\d{1,4}\s+\d{1,4}\s*$")
+_WORD3 = re.compile(r"[^\W\d_]{3,}")
+MAX_CONTENTS_GAP_WORDS = 30  # 两个目录项之间（以及首尾）最多容许的折行字数，按 3 个字母以上的词计
+# 大段目录（十项以上、目录项占有字的行五分之一以上）里，长标题会折好几行、还夹着页眉水印，容许宽一些
+LONG_CONTENTS_GAP_WORDS = 100
+
+
+def _is_contents(text: str) -> bool:
+    """A table of contents, judged line by line: an entry is “title … page” on one line (or a
+    numbered title ending in dot leaders whose page went to the next fragment, or “… 1 à 20 79”).
+    The text is a table of contents when, between its entries (and before and after them), there
+    are only wrapped titles; a stretch of running text — a table of contents followed by the body,
+    or a form or table inside the law with dot leaders to fill in (“Poids : ……… T”) — makes it law
+    to be translated."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    worded = sum(1 for ln in lines if _WORD3.search(ln))  # 页眉水印拆出来的零碎字母行不算
+    # 带页码的目录项是确凿的；只以点线收尾的行，在没有任何页码的多行文字里多半是表单的填空
+    paged = any(_CONTENTS_ENTRY.search(ln) or _RANGE_PAGE.search(ln) for ln in lines)
+    weak_ok = paged or worded <= 1
+    entries, gap, widest = 0, 0, 0
+    for ln in lines:
+        strong = _CONTENTS_ENTRY.search(ln) or _RANGE_PAGE.search(ln)
+        weak = _NUMBERED_TITLE.match(ln) or _TRAILING_LEADER.match(ln)
+        if strong or (weak and weak_ok):
+            entries += 1
+            widest, gap = max(widest, gap), 0
+        else:
+            gap += len(_WORD3.findall(ln))
+    widest = max(widest, gap)
+    if not entries:
+        return False
+    if widest <= MAX_CONTENTS_GAP_WORDS:
+        return True
+    return entries >= 10 and entries * 5 >= worded and widest <= LONG_CONTENTS_GAP_WORDS
+
+
+def _is_front_matter(text: str) -> bool:
+    """A table of contents (see ``_is_contents``) or a row of a document's own revision history
+    ("1.3 September 2023 <agency> Revised process"). They carry no legal content, and a model that
+    translates them invents days and dates."""
+    flat = " ".join((text or "").split())
+    return _is_contents(text) or (bool(_REVISION_ROW.match(flat)) and len(flat) < 220)
+
+
+def is_numeric_only(text: str) -> bool:
+    """True when a fragment has nothing to translate: numbers and symbols only, a table-of-contents
+    line, or a revision-history row of the document itself (see below for the first kind).
+
+    That is: only numbers, amounts, symbols and punctuation (price-list cells, bare figures),
+    or no real word at all — only one- and two-letter debris (OCR noise such as "m Il I Il 1",
+    a stray "من" next to a figure). A word of three or more letters in any alphabet keeps the
+    fragment translatable.
+    """
+    if _is_front_matter(text):
+        return True
+    # 邮箱、网址不是要翻译的词（“43 -----@tra.gov.eg”这样的联系方式碎片）
+    rest = _STANDALONE_CURRENCY.sub(" ", _CONTACT.sub(" ", normalize(text)))
+    if not any(ch.isalnum() for ch in rest):
+        return False  # 只有符号/标点：不是“数字片段”，保持原判断
+    words = re.findall(r"[^\W\d_]+", rest)
+    return not any(len(w) >= _MIN_WORD_LETTERS for w in words)

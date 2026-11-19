@@ -1,8 +1,10 @@
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import and_, not_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +17,62 @@ from app.sources.schemas import RunOut, SiteCreate, SiteOut, SitePatch, TermsDec
 
 router = APIRouter(prefix="/api/admin/sites", tags=["sources"])
 
+_SHARED_CDN_HOSTS = frozenset({"isomer-user-content.by.gov.sg"})
+
+
+def _norm_host(url: str | None) -> str:
+    if not url:
+        return ""
+    host = (urlparse(url).hostname or "").lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    for prefix in ("digital.", "cms.", "assets."):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+    if host in _SHARED_CDN_HOSTS:
+        return ""
+    return host
+
+
+async def site_document_filter(session: AsyncSession, site_id: uuid.UUID):
+    """Build a SQLAlchemy filter matching documents directly under `site_id` or, when `site_id` is
+    a portal or deduplicated single-file import with zero direct rows, the matching publisher/domain
+    or URL documents in the same country so `/admin/sites` counts and `/admin/documents?site_id=...`
+    drill-down agree 1-to-1."""
+    site = await session.get(SourceSite, site_id)
+    if site is None:
+        return Document.site_id == site_id
+    direct_cnt = len(
+        (
+            await session.scalars(select(Document.id).where(Document.site_id == site_id).limit(1))
+        ).all()
+    )
+    if direct_cnt > 0:
+        return Document.site_id == site_id
+    is_single_import = site.strategy == "DIRECT" and not site.enabled
+    if is_single_import:
+        return and_(
+            Document.country_code == site.country_code,
+            or_(Document.site_id == site_id, Document.source_url == site.entry_url),
+        )
+    host = _norm_host(site.entry_url)
+    sibling_sites = (
+        await session.scalars(
+            select(SourceSite).where(SourceSite.country_code == site.country_code)
+        )
+    ).all()
+    matched_site_ids = {
+        st.id
+        for st in sibling_sites
+        if st.id == site.id
+        or st.publisher == site.publisher
+        or (host and _norm_host(st.entry_url) == host)
+    }
+    conds = [Document.site_id.in_(matched_site_ids)]
+    if host:
+        conds.append(Document.source_url.ilike(f"%{host}%"))
+    return and_(Document.country_code == site.country_code, or_(*conds))
+
 
 async def _get_site(session: AsyncSession, site_id: uuid.UUID) -> SourceSite:
     site = await session.get(SourceSite, site_id)
@@ -26,26 +84,93 @@ async def _get_site(session: AsyncSession, site_id: uuid.UUID) -> SourceSite:
 async def _attach_doc_summaries(session: AsyncSession, sites: list[SourceSite]) -> list[SiteOut]:
     if not sites:
         return []
-    ids = [s.id for s in sites]
+    countries = {s.country_code for s in sites if s.country_code}
+    all_country_sites = (
+        list(
+            (
+                await session.scalars(
+                    select(SourceSite).where(SourceSite.country_code.in_(countries))
+                )
+            ).all()
+        )
+        if countries
+        else list(sites)
+    )
+    site_map = {st.id: st for st in all_country_sites}
     rows = (
         await session.execute(
-            select(Document.site_id, Document.title)
-            .where(Document.site_id.in_(ids))
+            select(
+                Document.id,
+                Document.country_code,
+                Document.site_id,
+                Document.source_url,
+                Document.title,
+                Document.title_zh,
+                Document.document_type,
+                Document.discovered_at,
+            )
+            .where(Document.country_code.in_(countries))
             .order_by(Document.discovered_at.desc(), Document.id)
         )
     ).all()
-    counts: dict[uuid.UUID, int] = {}
-    titles: dict[uuid.UUID, list[str]] = {}
-    for sid, title in rows:
-        counts[sid] = counts.get(sid, 0) + 1
-        bucket = titles.setdefault(sid, [])
-        if len(bucket) < 3:
-            bucket.append(title)
+
+    by_site: dict[uuid.UUID, list[tuple]] = {}
+    by_url: dict[tuple[str, str], list[tuple]] = {}
+    by_pub: dict[tuple[str, str], list[tuple]] = {}
+    by_host: dict[tuple[str, str], list[tuple]] = {}
+
+    for row in rows:
+        _did, cc, sid, src_url, _title, _title_zh, _dtype, _disc = row
+        by_site.setdefault(sid, []).append(row)
+        if src_url:
+            by_url.setdefault((cc, src_url), []).append(row)
+        owner_site = site_map.get(sid)
+        if owner_site and owner_site.publisher:
+            by_pub.setdefault((cc, owner_site.publisher), []).append(row)
+        for h in {_norm_host(src_url), _norm_host(owner_site.entry_url if owner_site else None)}:
+            if h:
+                by_host.setdefault((cc, h), []).append(row)
+
+    def _summarize(doc_rows: list[tuple], default_dtype: str | None):
+        seen_ids = set()
+        titles: list[str] = []
+        dtypes: list[str] = []
+        latest_dt: datetime | None = None
+        for did, _cc, _sid, _url, title, title_zh, doc_type, discovered_at in doc_rows:
+            if did in seen_ids:
+                continue
+            seen_ids.add(did)
+            display_title = (title_zh or title or "").strip() or title
+            if display_title and len(titles) < 3 and display_title not in titles:
+                titles.append(display_title)
+            norm_dtype = str(doc_type or "").strip().upper()
+            if norm_dtype and norm_dtype != "OTHER" and norm_dtype not in dtypes:
+                dtypes.append(norm_dtype)
+            if discovered_at and (latest_dt is None or discovered_at > latest_dt):
+                latest_dt = discovered_at
+        norm_default = str(default_dtype or "").strip().upper()
+        if not dtypes and norm_default:
+            dtypes = [norm_default]
+        return len(seen_ids), titles, dtypes, latest_dt
+
     out: list[SiteOut] = []
     for s in sites:
         item = SiteOut.model_validate(s)
-        item.document_count = counts.get(s.id, 0)
-        item.sample_titles = titles.get(s.id, [])
+        matched = list(by_site.get(s.id, []))
+        if not matched:
+            is_single_import = s.strategy == "DIRECT" and not s.enabled
+            if is_single_import:
+                matched = list(by_url.get((s.country_code, s.entry_url), []))
+            else:
+                host = _norm_host(s.entry_url)
+                matched = list(by_pub.get((s.country_code, s.publisher), []))
+                if host:
+                    matched = matched + list(by_host.get((s.country_code, host), []))
+        cnt, s_titles, s_dtypes, s_latest = _summarize(matched, s.document_type)
+        item.document_count = cnt
+        item.sample_titles = s_titles
+        item.doc_types = s_dtypes
+        item.latest_discovered_at = s_latest
         out.append(item)
     return out
 
@@ -53,12 +178,20 @@ async def _attach_doc_summaries(session: AsyncSession, sites: list[SourceSite]) 
 @router.get("", response_model=list[SiteOut], summary="站点列表")
 async def list_sites(
     country_code: str | None = None,
+    scope: Literal["monitor", "imports", "all"] = "monitor",
     _: Principal = Depends(require_platform_admin),
     session: AsyncSession = Depends(get_session),
 ):
+    """monitor：入口页与已启用的采集站点（要定期看的）；imports：人工导入单份文件时留下的记录
+    （一份文件一条，不会被定期采集）；all：全部。"""
     stmt = select(SourceSite).order_by(
         SourceSite.country_code, SourceSite.publisher, SourceSite.entry_url
     )
+    single_file = and_(SourceSite.strategy == "DIRECT", SourceSite.enabled.is_(False))
+    if scope == "monitor":
+        stmt = stmt.where(not_(single_file))
+    elif scope == "imports":
+        stmt = stmt.where(single_file)
     if country_code:
         stmt = stmt.where(SourceSite.country_code == country_code.upper())
     sites = list((await session.execute(stmt)).scalars().all())

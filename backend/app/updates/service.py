@@ -179,9 +179,9 @@ async def create_change(session, old, new, *, origin_key, detected_at, observati
         changes_json=changes,
         graph_edge_ids=[str(i) for i in edge_ids],
         content_hashes={"old": old.content_hash, "new": new.content_hash},
-        summary="归档字节变化，已解析条款一致"
+        summary="官方原文版式更新，已解析条文内容一致"
         if kind == "bytes_only"
-        else ("来源或上传原文内容变化，是否构成法规修订及影响范围待核对；旧证据和审批记录保留。"),
+        else ("官方来源或上传原文内容有变化，待确认条文修订范围；既有依据和审批记录保留。"),
     )
     session.add(change)
     await session.flush()

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新加坡联网汽车数据合规评估 · 示例报告</title>
+<style>
+:root{
+  --paper:#FAFBFC; --ink:#16233A; --muted:#5B6678; --line:#DDE2EA; --wash:#EFF2F7;
+  --accent:#2F3F9E; --high:#B5342A; --mid:#B7791F; --low:#2F7D5B; --none:#6B7385;
+  --serif:"Source Han Serif SC","Noto Serif CJK SC","Songti SC","STSong","SimSun",serif;
+  --sans:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC",sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.85 var(--sans)}
+a{color:var(--accent)}
+.shell{display:grid;grid-template-columns:200px minmax(0,1fr);max-width:1080px;margin:0 auto;gap:56px;padding:0 24px}
+nav.rail{position:sticky;top:0;align-self:start;height:100vh;padding:36px 0;font-size:14px;overflow:auto}
+nav.rail .brand{font:600 13px var(--sans);color:var(--muted);margin-bottom:22px;line-height:1.5}
+nav.rail ol{list-style:none;margin:0;padding:0}
+nav.rail li a{display:flex;gap:10px;align-items:center;padding:7px 0;color:var(--ink);text-decoration:none;border-bottom:1px solid transparent}
+nav.rail li a:hover{color:var(--accent)}
+nav.rail li a.on{color:var(--accent);font-weight:600}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--none)}
+.dot.high{background:var(--high)}.dot.mid{background:var(--mid)}.dot.low{background:var(--low)}
+main{max-width:40em;padding:36px 0 120px}
+.tag{display:inline-block;font-size:13px;color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:1px 8px;background:#fff}
+h1{font:700 34px/1.35 var(--serif);margin:18px 0 10px;letter-spacing:.01em}
+.sub{color:var(--muted);margin:0 0 6px}
+.lead{font:600 25px/1.6 var(--serif);margin:40px 0 18px}
+.lead em{font-style:normal;border-bottom:3px solid var(--accent)}
+h2{font:700 26px/1.4 var(--serif);margin:72px 0 6px;scroll-margin-top:24px}
+h3{font:700 17px/1.5 var(--sans);margin:30px 0 8px}
+p{margin:12px 0}
+.must{margin:10px 0 0;padding:0;list-style:none;counter-reset:m}
+.must li{counter-increment:m;position:relative;padding:12px 0 12px 44px;border-top:1px solid var(--line)}
+.must li:last-child{border-bottom:1px solid var(--line)}
+.must li::before{content:counter(m);position:absolute;left:0;top:12px;font:700 22px/1.3 var(--serif);color:var(--accent);width:30px;text-align:center}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14.5px;line-height:1.65}
+th{font-weight:600;text-align:left;color:var(--muted);border-bottom:2px solid var(--ink);padding:8px 10px 8px 0}
+td{border-bottom:1px solid var(--line);padding:10px 10px 10px 0;vertical-align:top}
+td:last-child,th:last-child{padding-right:0}
+.risk{white-space:nowrap}
+.risk i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--none)}
+.risk.high i{background:var(--high)}.risk.mid i{background:var(--mid)}.risk.low i{background:var(--low)}
+.risk.high{color:var(--high);font-weight:600}.risk.mid{color:var(--mid);font-weight:600}
+.next{background:var(--wash);border-left:3px solid var(--accent);padding:12px 18px;margin:20px 0;border-radius:0 4px 4px 0}
+.next b{display:block;margin-bottom:2px}
+.need{color:var(--mid);font-size:14px}
+td.need{white-space:nowrap}
+.tw{overflow-x:auto}
+.top5 td:first-child{font:700 20px var(--serif);color:var(--accent);width:34px}
+.road td:first-child{white-space:nowrap;font-weight:600}
+sup.ref{font-size:.7em;line-height:0}
+a.cite{text-decoration:none;color:var(--accent);font-weight:600;cursor:pointer;padding:0 1px}
+a.cite:hover,a.cite:focus{background:var(--wash);outline:none}
+#pop{position:fixed;z-index:20;max-width:360px;background:#fff;border:1px solid var(--line);box-shadow:0 8px 28px rgba(22,35,58,.16);border-radius:6px;padding:14px 16px;font-size:14px;line-height:1.65;display:none}
+#pop b{display:block;margin-bottom:2px}
+#pop small{color:var(--muted);display:block;margin-top:6px}
+.refs{font-size:14.5px;line-height:1.7}
+.refs li{padding:6px 0;border-bottom:1px solid var(--line);scroll-margin-top:24px}
+.refs li:target{background:var(--wash)}
+.refs .n{font-weight:700;color:var(--accent);margin-right:8px}
+.refs .why{color:var(--muted)}
+.foot{margin-top:40px;color:var(--muted);font-size:14px}
+@media (max-width:860px){.shell{display:block;padding:0 18px}nav.rail{display:none}h1{font-size:28px}.lead{font-size:21px}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="rail" aria-label="目录">
+  <div class="brand">新加坡 · 联网汽车<br>数据合规评估</div>
+  <ol>
+    <li><a href="#summary" class="on">先看结论</a></li>
+    <li><a href="#scene">我们对业务的理解</a></li>
+    <li><a href="#d1"><span class="dot mid"></span>法规体系</a></li>
+    <li><a href="#d2"><span class="dot"></span>数据怎么分类</a></li>
+    <li><a href="#d3"><span class="dot high"></span>数据回传中国</a></li>
+    <li><a href="#d4"><span class="dot high"></span>告知与同意</a></li>
+    <li><a href="#d5"><span class="dot mid"></span>存多久、怎么删</a></li>
+    <li><a href="#d6"><span class="dot high"></span>出事了会怎样</a></li>
+    <li><a href="#d7"><span class="dot"></span>上路与准入</a></li>
+    <li><a href="#d8"><span class="dot"></span>怎么改、先改什么</a></li>
+    <li><a href="#refs">参考文献</a></li>
+  </ol>
+</nav>
+
+<main>
+<span class="tag">示例报告 · 业务情景为假设</span>
+<h1>在新加坡卖联网汽车，数据怎么合规地回传中国？</h1>
+<p class="sub">面向：车企 A（中国）及其新加坡子公司 B　|　依据：新加坡《个人数据保护法》及配套条例、官方指引</p>
+
+<section id="summary">
+<p class="lead">可以做，但在开通每日回传之前，先把<em>三件事</em>办好。</p>
+<ul class="must">
+  <li>让 B 和 A 签一份数据传输协议，写明数据去中国、A 要给到什么保护水平。现在两边之间没有这份文件，这是最大的缺口。<sup class="ref"><a class="cite" data-n="9"></a><a class="cite" data-n="10"></a><a class="cite" data-n="11"></a></sup></li>
+  <li>改掉车内摄像头和定位的告知与同意。目前没有单独告知，也没有撤回入口。<sup class="ref"><a class="cite" data-n="3"></a><a class="cite" data-n="4"></a><a class="cite" data-n="6"></a></sup></li>
+  <li>准备好数据泄露的应对流程。评估为需要上报后，3 个日历日内必须通知监管机构。<sup class="ref"><a class="cite" data-n="13"></a><a class="cite" data-n="14"></a></sup></li>
+</ul>
+
+<h3>风险排序</h3>
+<table class="top5">
+  <tr><td>1</td><td>数据回传中国，没有有法律约束力的文件</td><td class="risk high"><i></i>高</td></tr>
+  <tr><td>2</td><td>车内摄像头图像没有取得同意、也没有单独告知</td><td class="risk high"><i></i>高</td></tr>
+  <tr><td>3</td><td>没有泄露响应机制，3 天上报来不及</td><td class="risk high"><i></i>高</td></tr>
+  <tr><td>4</td><td>云服务商 C 的责任边界没写清楚</td><td class="risk mid"><i></i>中</td></tr>
+  <tr><td>5</td><td>没有指定数据保护负责人</td><td class="risk mid"><i></i>中</td></tr>
+</table>
+<div class="next"><b>30 天内能做完的</b>签传输协议、上线泄露应对手册、指定并公示负责人。告知同意的改造要动产品，预计 60 天。完整排期见<a href="#d8">第 8 节</a>。</div>
+<p>有几处我们手上的资料还没覆盖：个人数据的法定定义原文、普通联网汽车的上路认证要求、中国境内对数据入境后的处理要求。这几处在文中标了“需补充”，建议下一步一起补齐。</p>
+</section>
+
+<section id="scene">
+<h2>我们对业务的理解</h2>
+<p>A 是中国车企，B 是它在新加坡的全资子公司，负责销售和售后。联网车辆产生的数据由 B 汇集，每天批量回传给 A 在中国的数据中心，用于产品研发、OTA 升级和售后诊断。数据中心由第三方云服务商 C 托管运维。</p>
+<table>
+  <tr><th style="width:9em">回传的数据</th><td>车辆识别码、GPS 轨迹、驾驶行为数据、驾驶员监测摄像头图像、车主账号（姓名、手机号）</td></tr>
+  <tr><th>已经做了的</th><td>传输加密</td></tr>
+  <tr><th>还没有的</th><td>摄像头图像的单独同意、数据保护负责人</td></tr>
+  <tr><th>我们还不清楚的</th><td>和 C 有没有数据处理合同、有没有泄露应对流程、各类数据现在保留多久、购车协议是否把同意打包</td></tr>
+</table>
+<p>这些情况来自一次假设的沟通，请以贵司实际为准。凡是“我们还不清楚”的，下文都标了“需补充”，补上后结论会更准。</p>
+</section>
+
+<section id="d1">
+<h2>1 · 新加坡的数据法规体系</h2>
+<p>新加坡管个人数据的核心是《个人数据保护法》（PDPA）。它把企业的义务拆成了几块，对照起来很清楚：谁负责、怎么征得同意、怎么保护、存多久、能不能出境、泄露了怎么办。<sup class="ref"><a class="cite" data-n="1"></a><a class="cite" data-n="3"></a><a class="cite" data-n="7"></a><a class="cite" data-n="8"></a><a class="cite" data-n="9"></a><a class="cite" data-n="13"></a></sup> B 在新加坡经营，直接受这些规则约束；A 收到这些数据，也要通过法律文件被同样的标准约束，不能只靠“我们在中国”来豁免。<span class="need">（“组织”的法定定义原文需补充）</span></p>
+<table>
+  <tr><th>法律要求</th><th>现在的情况</th><th>差距</th><th>风险</th></tr>
+  <tr><td>指定负责合规的人，并公开联系方式<sup class="ref"><a class="cite" data-n="1"></a></sup></td><td>还没有指定</td><td>未达到</td><td class="risk mid"><i></i>中</td></tr>
+  <tr><td>有制度和投诉渠道<sup class="ref"><a class="cite" data-n="2"></a></sup></td><td>尚不清楚</td><td class="need">需补充</td><td class="risk"><i></i>—</td></tr>
+</table>
+<div class="next"><b>建议</b>由现有岗位兼任数据保护负责人，在官网和 App 公示业务联系方式；用三个月把隐私政策改成覆盖车辆数据，并建好投诉流程。责任人：B 的合规负责人。完成标准：公示页面上线、政策与流程文件归档。</div>
+</section>
+
+<section id="d2">
+<h2>2 · 数据怎么分类</h2>
+<p>能指向具体某个人的数据，要按个人数据管：车主的姓名、手机号、账号，能认出驾驶员的影像，跟车主绑定的行驶轨迹。<span class="need">（个人数据的法定定义原文需补充，下表是先按保守口径分的）</span>特别要注意账号：账号标识加上密码、安全码或生物识别信息，新加坡的规定直接把它列为“可能造成重大伤害”的数据，泄露后更容易触发上报。<sup class="ref"><a class="cite" data-n="14"></a></sup></p>
+<table>
+  <tr><th>数据</th><th>能否认出个人</th><th>建议保护等级</th></tr>
+  <tr><td>姓名、手机号、账号</td><td>能</td><td>高</td></tr>
+  <tr><td>驾驶员监测摄像头图像</td><td>能（可认出驾驶员）</td><td>高</td></tr>
+  <tr><td>GPS 轨迹</td><td>和车主关联时能</td><td>中高，保留期要短</td></tr>
+  <tr><td>车辆识别码</td><td>和车主关联时能</td><td>中，随车主信息一起管</td></tr>
+  <tr><td>纯机械、工况参数</td><td>无法关联个人时不能</td><td>低（要先验证“确实无法关联”）</td></tr>
+</table>
+<div class="next"><b>建议</b>先画一张数据地图：每个字段从哪来、到哪去、做什么用、存多久。再据此分级。责任人：B 与 A 的数据治理小组，30 天。</div>
+</section>
+
+<section id="d3">
+<h2>3 · 数据回传中国，要先具备什么</h2>
+<p>把数据从新加坡发到 A 的中国数据中心，在法律上是“向新加坡境外传输个人数据”。传输之前，B 必须采取合适的步骤，确认接收方受到有法律约束力的义务约束，保护水平不低于新加坡的要求。<sup class="ref"><a class="cite" data-n="9"></a><a class="cite" data-n="10"></a></sup> 现在这一步是空的。</p>
+<h3>可以选的路径</h3>
+<table>
+  <tr><th style="width:8.5em">路径</th><th>要点</th><th>适合你们吗</th></tr>
+  <tr><td>签合同</td><td>合同要求接收方提供不低于新加坡的保护，并写明数据可以传到哪些国家<sup class="ref"><a class="cite" data-n="11"></a></sup></td><td><b>适合。</b>B 与 A 签集团内数据传输协议，写明目的地是中国</td></tr>
+  <tr><td>集团约束规则</td><td>只能用于有关联关系的接收方，要列明适用对象、目的地国家、权利义务<sup class="ref"><a class="cite" data-n="11"></a></sup></td><td>适合长期集团内传输，A 是 B 的母公司，符合条件</td></tr>
+  <tr><td>认证</td><td>接收方持有指定认证，即视为受约束<sup class="ref"><a class="cite" data-n="12"></a></sup></td><td>暂不适合：A 目前没有这类认证</td></tr>
+  <tr><td>个人同意</td><td>要先用书面说明保护水平，不能把同意当成服务前提<sup class="ref"><a class="cite" data-n="10"></a></sup></td><td>只作补充。官方指引建议前几条走不通时再用<sup class="ref"><a class="cite" data-n="16"></a></sup></td></tr>
+</table>
+<p>两个细节值得留意。其一，如果数据放在 A 自有、自己维护的服务器上，数据仍算在企业控制之下，企业要遵守全部保护义务；交给第三方处理，才适用传输限制。<sup class="ref"><a class="cite" data-n="16"></a></sup> C 在这里到底是受托处理方，还是只是 A 自有设施的运维，要看合同怎么写。<span class="need">（需补充）</span>其二，“认证”的范围，条例文本只列了亚太经合组织的两类体系，而官方指引还提到了全球跨境隐私规则等体系，二者不一致，需要核对条例的后续修订。<sup class="ref"><a class="cite" data-n="12"></a><a class="cite" data-n="16"></a></sup><span class="need">（需核对）</span></p>
+<table>
+  <tr><th>法律要求</th><th>现在的情况</th><th>差距</th><th>风险</th></tr>
+  <tr><td>传输前确认接收方受法律约束<sup class="ref"><a class="cite" data-n="9"></a><a class="cite" data-n="10"></a><a class="cite" data-n="11"></a></sup></td><td>没有任何文件</td><td>未达到</td><td class="risk high"><i></i>高</td></tr>
+  <tr><td>合同写明目的地国家<sup class="ref"><a class="cite" data-n="11"></a></sup></td><td>没有合同</td><td>未达到</td><td class="risk high"><i></i>高</td></tr>
+  <tr><td>对云服务商 C 的约束<sup class="ref"><a class="cite" data-n="15"></a><a class="cite" data-n="16"></a></sup></td><td>尚不清楚</td><td class="need">需补充</td><td class="risk"><i></i>—</td></tr>
+</table>
+<div class="next"><b>建议</b>签集团内数据传输协议，条款覆盖：保护标准、目的地中国、再转移限制、泄露通知、配合审计。同时评估 A 的实际措施是否达到新加坡的保护水平，评估记录要留存。责任人：B 的法务，30 天。完成标准：协议签署、评估记录归档。</div>
+<p>另外，这个场景是新加坡的数据流向中国，数据到中国之后适用的中国境内规则，不在这次评估范围内，建议单独做一份。</p>
+</section>
+
+<section id="d4">
+<h2>4 · 告知与同意</h2>
+<p>收集、使用、披露个人数据，需要本人同意，或者属于法律允许的例外。<sup class="ref"><a class="cite" data-n="3"></a></sup> 同意要有效，前提是企业先告知了用途。<sup class="ref"><a class="cite" data-n="4"></a><a class="cite" data-n="6"></a></sup> 企业也只能为“一个合理的人会觉得恰当”、且已告知本人的目的去用数据。<sup class="ref"><a class="cite" data-n="5"></a></sup> 本人可以随时撤回同意，企业收到通知后要告诉他撤回的后果，并让数据中介一起停止使用。<sup class="ref"><a class="cite" data-n="17"></a></sup></p>
+<p>你们最容易出问题的是车内摄像头。把驾驶员图像用于“产品研发”，和用于“保障行车安全”，是两种不同的目的，需要分别说清楚。如果把超出提供服务所必需的同意，作为买车或用车的条件，这样得来的同意是无效的。<sup class="ref"><a class="cite" data-n="4"></a></sup></p>
+<table>
+  <tr><th>法律要求</th><th>现在的情况</th><th>差距</th><th>风险</th></tr>
+  <tr><td>摄像头图像的目的告知和同意<sup class="ref"><a class="cite" data-n="3"></a><a class="cite" data-n="4"></a><a class="cite" data-n="6"></a></sup></td><td>没有单独设置</td><td>未达到</td><td class="risk high"><i></i>高</td></tr>
+  <tr><td>研发目的是否已在隐私政策中披露<sup class="ref"><a class="cite" data-n="6"></a></sup></td><td>尚不清楚</td><td class="need">需补充</td><td class="risk"><i></i>—</td></tr>
+  <tr><td>不得把过度的同意作为服务条件<sup class="ref"><a class="cite" data-n="4"></a></sup></td><td>购车协议怎么写，尚不清楚</td><td class="need">需补充</td><td class="risk"><i></i>—</td></tr>
+  <tr><td>撤回机制，并通知云服务商一起停止<sup class="ref"><a class="cite" data-n="17"></a></sup></td><td>还没有设计</td><td>未达到</td><td class="risk mid"><i></i>中</td></tr>
+</table>
+<div class="next"><b>建议</b>把同意分成两层：“提供车辆功能所必需的”，和“研发改进等非必需的”。非必需的单独勾选、可随时撤回。摄像头图像在车机首次启用时弹窗说明用途，默认只在车内本地处理，要上传的话另行征得同意。撤回后 B 通知 A 和 C 停止使用。责任人：产品和法务，60 天。完成标准：新版车机和 App 流程通过评审。</div>
+</section>
+
+<section id="d5">
+<h2>5 · 存多久、怎么删</h2>
+<p>数据用完了、也没有法律或业务上继续留的必要时，企业要停止保留，或者去掉能把数据和具体个人对应起来的信息。<sup class="ref"><a class="cite" data-n="8"></a></sup> 官方指引说明：匿名化之后再也无法对应到个人，就视为已经停止保留。<sup class="ref"><a class="cite" data-n="18"></a></sup> 同时，企业要用合理的安全措施，防止数据被未经授权地访问、复制、修改、处置，也要防止存储设备丢失。<sup class="ref"><a class="cite" data-n="7"></a></sup></p>
+<table>
+  <tr><th>法律要求</th><th>现在的情况</th><th>差距</th><th>风险</th></tr>
+  <tr><td>按数据类别设定保留期，到期销毁或匿名化<sup class="ref"><a class="cite" data-n="8"></a><a class="cite" data-n="18"></a></sup></td><td>尚不清楚</td><td class="need">需补充</td><td class="risk"><i></i>—</td></tr>
+  <tr><td>合理的安全措施<sup class="ref"><a class="cite" data-n="7"></a></sup></td><td>只确认了传输加密</td><td>部分达到</td><td class="risk mid"><i></i>中</td></tr>
+</table>
+<div class="next"><b>建议</b>按第 2 节的分类做一张保留矩阵：GPS 轨迹和摄像头图像的保留期要明显短于账号数据；到期自动销毁或匿名化，并留存执行日志。安全措施补上云端的访问控制、密钥管理和日志审计。责任人：A 的数据治理、C 的运维，90 天。如果涉及新加坡公共道路的自动驾驶试验，另有 3 年的保留要求，见第 7 节。</div>
+</section>
+
+<section id="d6">
+<h2>6 · 出事了会怎样</h2>
+<p>监管机构可以下指令让企业整改，比如停止违规收集使用、销毁不当收集的数据，也可以对故意或疏忽违反规定的企业处以罚款。<sup class="ref"><a class="cite" data-n="19"></a></sup> 我们取得的法条文本显示罚款上限为 100 万新元；这份文本是不是现行版本、有没有按营业额计算的更高上限，需要对照官方现行版本核实，在核实之前，不建议向管理层报具体上限。<span class="need">（需核对）</span></p>
+<p>实际风险最集中的是数据泄露。企业一旦有理由相信发生了泄露，就要尽快评估是否属于必须上报的泄露。<sup class="ref"><a class="cite" data-n="13"></a></sup> 涉及“重大伤害”，或者影响 500 人及以上，就必须上报。<sup class="ref"><a class="cite" data-n="14"></a></sup> 评估为必须上报之后，最迟 3 个日历日内要通知监管机构，上报内容有明确清单。<sup class="ref"><a class="cite" data-n="13"></a><a class="cite" data-n="14"></a></sup> 联网汽车一次回传就是成批的数据，500 人这条线很容易越过。</p>
+<table>
+  <tr><th>法律要求</th><th>现在的情况</th><th>差距</th><th>风险</th></tr>
+  <tr><td>泄露评估，必要时 3 日内上报<sup class="ref"><a class="cite" data-n="13"></a><a class="cite" data-n="14"></a></sup></td><td>没有流程（需确认）</td><td>未达到</td><td class="risk high"><i></i>高</td></tr>
+  <tr><td>云服务商发现泄露后及时通知企业<sup class="ref"><a class="cite" data-n="13"></a><a class="cite" data-n="15"></a></sup></td><td>尚不清楚</td><td class="need">需补充</td><td class="risk"><i></i>—</td></tr>
+</table>
+<div class="next"><b>建议</b>写一份泄露应对手册：发现、评估、上报、处置、复盘。明确 3 日的倒计时从“评估为必须上报”那天算起。在和 C 的合同里写明发现泄露后立即通知。每半年演练一次。责任人：B 的合规、A 的安全团队，30 天。</div>
+</section>
+
+<section id="d7">
+<h2>7 · 上路与准入</h2>
+<p>我们目前手上和这个场景相关的新加坡准入资料，只有自动驾驶车辆试验的申请指引。按假设，你们暂时不做公共道路的自动驾驶试验，所以它不直接适用；<b>普通联网汽车在新加坡的认证和上路要求，我们的资料还没覆盖，需补充。</b></p>
+<p>如果以后要在新加坡公共道路做自动驾驶试验，对数据的影响会很大：车辆要先通过安全评估和检查；<sup class="ref"><a class="cite" data-n="20"></a></sup> 要装持续运行的数据记录装置，数据只读保存，试验期间和结束后至少 3 年要留着，随时给主管部门调取；<sup class="ref"><a class="cite" data-n="20"></a></sup> 每个运行日结束后 1 天内，要通过指定接口把数据提交到主管部门的监测系统；<sup class="ref"><a class="cite" data-n="20"></a></sup> 事故或事件要在 24 小时内报告。<sup class="ref"><a class="cite" data-n="20"></a></sup></p>
+<div class="next"><b>对回传中国的启示</b>这些数据既要留在新加坡、随时可调取，又要提交给主管部门，所以不能因为回传了中国，就只在境外保留一份。方案里要设计“新加坡本地留存一份、对外传输一份”。</div>
+</section>
+
+<section id="d8">
+<h2>8 · 怎么改，先改什么</h2>
+<p>下面的顺序按“风险高、能快速见效”排，同一个动作能解决的几个问题合并在一起。</p>
+<table class="road">
+  <tr><th>时限</th><th>要做的事</th><th>谁来做</th><th>做到什么算完成</th></tr>
+  <tr><td>30 天</td><td>签署集团内数据传输协议，完成保护水平评估</td><td>B 法务</td><td>协议签署，评估记录归档</td></tr>
+  <tr><td>30 天</td><td>上线泄露应对手册，和 C 约定通知条款</td><td>合规、安全</td><td>手册发布，做一次桌面演练</td></tr>
+  <tr><td>30 天</td><td>指定数据保护负责人并公示</td><td>B 管理层</td><td>公示页面上线</td></tr>
+  <tr><td>60 天</td><td>摄像头与定位的告知同意改造，含撤回</td><td>产品、法务</td><td>新版流程通过评审</td></tr>
+  <tr><td>90 天</td><td>数据地图、分类和保留矩阵</td><td>数据治理</td><td>矩阵获批，有销毁日志</td></tr>
+  <tr><td>90 天</td><td>补充云端安全措施</td><td>A 安全、C 运维</td><td>安全基线检查通过</td></tr>
+  <tr><td>90 天</td><td>完善政策与投诉流程</td><td>合规</td><td>文件发布</td></tr>
+</table>
+<div class="next"><b>想让结论更准，请补充这几项</b>和 C 有没有数据处理合同；有没有泄露应对流程；各类数据现在保留多久；购车协议是否打包了同意；是否计划在新加坡公共道路做自动驾驶试验。</div>
+</section>
+
+<section id="refs">
+<h2>参考文献</h2>
+<p class="foot" style="margin-top:0">点击正文里的角标，可以直接看到对应条款。</p>
+<ol class="refs" id="reflist" style="list-style:none;padding:0"></ol>
+<p class="foot">以上条款均取自平台已收录的新加坡官方文本，并逐条对照过原文。条文的“现行有效”状态和人工法律复核仍在进行，在此之前请把本报告当作决策参考。</p>
+</section>
+</main>
+</div>
+
+<div id="pop" role="dialog" aria-live="polite"></div>
+
+<script>
+const REFS = {
+ 1:["个人数据保护法 2012","第 11 条 · 合规","指定负责合规的人，公开其业务联系方式。"],
+ 2:["个人数据保护法 2012","第 12 条 · 政策与实践","制定并落实制度，建立投诉流程，按要求公开制度信息。"],
+ 3:["个人数据保护法 2012","第 13 条 · 需要同意","收集、使用、披露个人数据，需要本人同意，或有法律依据的例外。"],
+ 4:["个人数据保护法 2012","第 14 条 · 同意的提供","同意以已告知用途为前提；不得把超出必要范围的同意作为服务条件。"],
+ 5:["个人数据保护法 2012","第 18 条 · 目的和范围限制","只能为合理且已告知的目的收集、使用、披露。"],
+ 6:["个人数据保护法 2012","第 20 条 · 目的告知","收集前或收集时告知目的；之后有新目的，使用前再告知。"],
+ 7:["个人数据保护法 2012","第 24 条 · 保护个人数据","采取合理的安全措施，防止未经授权的访问、复制、修改、处置，及存储设备丢失。"],
+ 8:["个人数据保护法 2012","第 25 条 · 保留","目的已达成且无法律或业务必要时，停止保留或去除可对应个人的信息。"],
+ 9:["个人数据保护法 2012","第 26 条 · 向新加坡境外传输","只有按规定的要求，才能把个人数据传到境外，保护水平要可比。"],
+ 10:["个人数据保护条例 2021","第 10 条 · 传输要求","传输前确认接收方受法律约束；列出视为满足要求的几种情形，及同意的限制。"],
+ 11:["个人数据保护条例 2021","第 11 条 · 有法律约束力的义务","合同、集团约束规则等可作为约束方式，并规定了应包含的内容。"],
+ 12:["个人数据保护条例 2021","第 12 条 · 持有指定认证的接收方","接收方持有指定认证，视为受约束。"],
+ 13:["个人数据保护法 2012","第 26A–26D 条 · 泄露通知","评估泄露是否需上报；需上报时最迟 3 个日历日内通知监管机构。"],
+ 14:["数据泄露通知条例 2021","第 3、4、5 条","何谓“重大伤害”、500 人的重大规模门槛，及上报内容。"],
+ 15:["个人数据保护法 2012","第 4(3) 条 · 数据中介","企业对由数据中介代为处理的个人数据，承担与自己处理相同的义务。"],
+ 16:["咨询指引：PDPA 关键概念","第 19.1、19.3、19.6、19.7 段；第 3.23 段","对传输限制、数据中介责任、认证和同意路径的官方说明。"],
+ 17:["个人数据保护法 2012","第 16 条 · 撤回同意","本人可随时撤回；企业须告知后果，并让数据中介停止使用。"],
+ 18:["咨询指引：PDPA 关键概念","第 18.14 段","匿名化后无法对应到个人，视为已停止保留。"],
+ 19:["个人数据保护法 2012","第 48I、48J 条","监管机构可下整改指令并处以罚款；所取文本的上限待核对现行版本。"],
+ 20:["自动驾驶车辆试验申请指引","第 5、11–14、52、53 段","安全评估、数据记录与保留、每日提交、事故报告。"]
+};
+const pop=document.getElementById('pop');
+document.querySelectorAll('a.cite').forEach(a=>{
+  const n=a.dataset.n; a.textContent='['+n+']'; a.href='#ref-'+n; a.setAttribute('aria-label','参考文献 '+n);
+  const show=e=>{const r=REFS[n];pop.innerHTML='<b>'+r[0]+'</b>'+r[1]+'<br>'+r[2]+'<small>点击跳到参考文献</small>';
+    pop.style.display='block';const b=a.getBoundingClientRect();
+    pop.style.left=Math.min(b.left,innerWidth-380)+'px';pop.style.top=(b.bottom+8>innerHeight-180?b.top-pop.offsetHeight-8:b.bottom+8)+'px'};
+  a.addEventListener('mouseenter',show);a.addEventListener('focus',show);
+  a.addEventListener('mouseleave',()=>pop.style.display='none');a.addEventListener('blur',()=>pop.style.display='none');
+});
+const list=document.getElementById('reflist');
+Object.keys(REFS).forEach(n=>{const r=REFS[n];const li=document.createElement('li');li.id='ref-'+n;
+  li.innerHTML='<span class="n">['+n+']</span>'+r[0]+'，'+r[1]+'<br><span class="why">'+r[2]+'</span>';list.appendChild(li)});
+document.querySelectorAll('main table').forEach(t=>{const w=document.createElement('div');w.className='tw';t.parentNode.insertBefore(w,t);w.appendChild(t)});
+const links=[...document.querySelectorAll('nav.rail a')];
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){links.forEach(l=>l.classList.toggle('on',l.getAttribute('href')==='#'+e.target.id))}}),{rootMargin:'-20% 0px -70% 0px'});
+document.querySelectorAll('main section').forEach(s=>io.observe(s));
+</script>
+</body>
+</html>

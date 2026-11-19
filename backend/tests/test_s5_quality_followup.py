@@ -64,7 +64,7 @@ def test_saved_prompt_declares_json_for_provider_json_mode():
     assert "json" in ANALYSIS_SYSTEM_PROMPT.lower()
 
 
-@pytest.mark.parametrize("status", ["unknown", "in_force", "amended", "repealed"])
+@pytest.mark.parametrize("status", ["unknown", "in_force", "amended", "repealed", "draft"])
 async def test_repealed_latest_source_is_excluded_without_guessing_unknown_status(
     session_factory, status
 ):
@@ -77,7 +77,7 @@ async def test_repealed_latest_source_is_excluded_without_guessing_unknown_statu
         version.legal_status = status
         await s.flush()
         found = await ToolBox(s, "SG")._load_candidates()
-        assert bool(found) is (status != "repealed")
+        assert bool(found) is (status not in ("repealed", "draft"))  # 草案不是现行法，不引用
         if found:
             assert found[0].legal_status == status
 
@@ -390,3 +390,23 @@ async def test_source_limited_refusal_is_preserved_and_never_counted_as_verified
     assert len(result["findings"]) == 1 and not call.verified
     assert pipeline._verify_dimension("D1", result, rows)
     assert result["findings"][0]["_ok"] is False
+
+
+def test_guidance_ranks_below_the_statute_when_the_wording_matches_equally():
+    from types import SimpleNamespace
+
+    from app.analysis.retrieval import ClauseIndex
+
+    def cand(cid, kind):
+        return SimpleNamespace(
+            clause_id=cid,
+            text="processing of personal data requires the consent of the data subject",
+            translated_text="处理个人数据须取得数据主体同意",
+            heading="consent",
+            instrument_kind=kind,
+        )
+
+    ranked = ClauseIndex([cand("a-guide", "GUIDANCE"), cand("b-law", "BASE")]).rank(
+        "consent of the data subject", None
+    )
+    assert [c.clause_id for c, _ in ranked][0] == "b-law"

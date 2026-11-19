@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Query-aware multilingual sparse retrieval. Normalization is never used as legal evidence."""
 
 import math
@@ -5,7 +6,13 @@ import re
 import unicodedata
 from collections import Counter
 
-RETRIEVAL_VERSION = "query-bm25-rrf-scope-v2"
+from app.analysis.edition_currency import kind_weight
+
+RETRIEVAL_VERSION = "query-bm25-rrf-scope-tier-graph-v6"
+# 项目只关心三类业务：直接相关的文件优先，一般性文件（如通用的应用安全清单）得分接近时排后
+RELATED_WEIGHT = {"related": 0.85}
+# 汽车数据跨境业务的核心法规（app.knowledge.business_topic）在得分接近时排前
+BUSINESS_WEIGHT = {"core": 1.15}
 _CJK = re.compile(r"[\u3400-\u9fff]+")
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
 
@@ -61,7 +68,12 @@ class ClauseIndex:
     def __init__(self, candidates):
         self.candidates = candidates
         # Pending machine translations only find candidates; source and review status stay separate.
-        self.body = SparseIndex([c.text + "\n" + c.translated_text for c in candidates])
+        self.body = SparseIndex(
+            [
+                c.text + "\n" + c.translated_text + "\n" + getattr(c, "search_text", "")
+                for c in candidates
+            ]
+        )
         self.heading = SparseIndex(
             [
                 c.heading + "\n" + c.text.split("\n", 1)[0] + "\n" + c.translated_text[:180]
@@ -69,11 +81,17 @@ class ClauseIndex:
             ]
         )
 
-    def rank(self, dimension_terms: str, query: str | None):
+    def rank(self, dimension_terms: str, query: str | None, graph: set[str] | None = None):
+        """``graph``: clauses the knowledge graph ties to this dimension (e.g. the clauses behind a
+        verified “restricts cross-border transfer” relation for D3), so the article that states the rule is found
+        even when its wording shares few words with the question: they come first (each a verified
+        statement of what the dimension asks about), those of core regulations first, each group in the
+        order of its text score, then the rest."""
         channels = [
             (self.body.scores(dimension_terms), 1.0),
             (self.heading.scores(dimension_terms), 0.5),
         ]
+        graph = graph or set()
         if query and terms(query):
             channels += [(self.body.scores(query), 3.0), (self.heading.scores(query), 1.0)]
         fused = [0.0] * len(self.candidates)
@@ -90,7 +108,13 @@ class ClauseIndex:
         order = sorted(
             (i for i, s in enumerate(fused) if s > 0),
             key=lambda i: (
-                -fused[i],
+                self.candidates[i].clause_id not in graph,
+                # 图谱里的条文中，核心法规（法律本身、主要实施条例）在前
+                self.candidates[i].clause_id in graph and getattr(self.candidates[i], "business_weight", "") != "core",
+                -fused[i]
+                * kind_weight(getattr(self.candidates[i], "instrument_kind", ""))
+                * RELATED_WEIGHT.get(getattr(self.candidates[i], "relevance", ""), 1.0)
+                * BUSINESS_WEIGHT.get(getattr(self.candidates[i], "business_weight", ""), 1.0),
                 self.candidates[i].clause_id,
             ),
         )

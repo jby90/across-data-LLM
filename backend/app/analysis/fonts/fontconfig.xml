@@ -5,5 +5,14 @@
   <dir prefix="relative">inter</dir>
   <dir prefix="relative">notosanssc</dir>
   <dir prefix="relative">notonaskharabic</dir>
+  <dir>/usr/share/fonts</dir>
+  <alias>
+    <family>Times New Roman</family>
+    <prefer><family>Liberation Serif</family></prefer>
+  </alias>
+  <alias>
+    <family>Arial</family>
+    <prefer><family>Liberation Sans</family></prefer>
+  </alias>
   <cachedir prefix="xdg">fontconfig</cachedir>
 </fontconfig>

@@ -83,6 +83,8 @@ async def answer_user_facts(session, task, answers, question_ids):
     affected = set(checkpoint.get("resume_dimensions", []))
     for key, value in answers.items():
         facts[key] = value.strip()
+        for same in pending[key].get("also_answers", []):
+            facts.setdefault(same, value.strip())  # 并掉的同一问题：各维度要的事实键都拿到这条回答
         affected.update(pending[key]["dimension_codes"])
         for code, result in checkpoint["results"].items():
             if any(f.get("fact_key") == key for f in result.get("findings", [])):
@@ -133,3 +135,48 @@ async def answer_user_facts(session, task, answers, question_ids):
     )
     await session.commit()
     return True
+
+
+def _question_terms(text: str) -> set[str]:
+    """Words of a question, for telling two phrasings of the same question apart.
+
+    Chinese runs are cut into overlapping pairs of characters; Latin and digit runs stay whole."""
+    import re
+
+    terms: set[str] = set()
+    for run in re.findall(r"[一-鿿]+|[A-Za-z0-9]+", text or ""):
+        if run[0].isascii():
+            terms.add(run.lower())
+        else:
+            terms.update(run[i : i + 2] for i in range(len(run) - 1))
+    return terms
+
+
+def same_question(first: str, second: str, threshold: float = 0.45) -> bool:
+    """Two requests ask the same thing when their wording largely overlaps.
+
+    Stop-word-like pairs are common to every question, so the overlap is measured on the
+    smaller of the two, which is what makes "是否已取得许可" and "贵司是否已就…取得…许可或批准"
+    match while "是否设立法人实体" does not."""
+    a, b = _question_terms(first), _question_terms(second)
+    if not a or not b:
+        return False
+    return len(a & b) / min(len(a), len(b)) >= threshold
+
+
+def merge_same_questions(requests: dict[str, dict]) -> dict[str, dict]:
+    """Within one round, keep one request for questions that are the same question under
+    different fact keys; the dimensions that needed the dropped keys are added to the kept one,
+    and the kept request records the other keys so the answer can be copied to them."""
+    kept: dict[str, dict] = {}
+    for key, req in requests.items():
+        for other in kept.values():
+            if same_question(req["question_zh"], other["question_zh"]):
+                other["dimension_codes"] = sorted(
+                    {*other["dimension_codes"], *req["dimension_codes"]}
+                )
+                other.setdefault("also_answers", []).append(key)
+                break
+        else:
+            kept[key] = req
+    return kept

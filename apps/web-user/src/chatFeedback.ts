@@ -13,10 +13,10 @@ export function conversationStamp(task: ConversationSnapshot): string {
 export function conversationSignal(task: Pick<ConversationSnapshot, 'status'>) {
   if (task.status === 'awaiting_user_facts') return { tone: 'amber', label: '有追问，请补充信息' }
   if (task.status === 'running') return { tone: 'blue', label: '正在分析' }
-  if (task.status === 'completed') return { tone: 'green', label: '报告已生成' }
-  if (task.status === 'partial_sample') return { tone: 'green', label: '报告已生成，部分维度有缺口' }
+  // 旧版八维度评估报告（已停用，合规文件和国家简报取代了它）：只读保留
+  if (task.status === 'completed' || task.status === 'partial_sample') return { tone: 'neutral', label: '旧版评估报告' }
   if (task.status === 'failed') return { tone: 'red', label: '评估暂未完成' }
-  return { tone: 'neutral', label: '等待您的回答' }
+  return { tone: 'neutral', label: '' } // 咨询对话：没有在进行的事，不挂状态
 }
 
 export function elapsedLabel(start: number, now: number): string {

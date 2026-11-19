@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.ingestion.archive import ArchiveIntegrityError
 from app.ingestion.bindings import normalized_identity
-from app.ingestion.models import Document, DocumentVersion
+from app.ingestion.models import NOT_CITABLE_STATUSES, Document, DocumentVersion
 from app.ingestion.safety import document_available, document_is_held, holds_for_documents
 from app.knowledge.history import payload_hash
 from app.knowledge.models import KnowledgeAuditRecord
@@ -40,7 +40,7 @@ async def _replacement(session, archive, held, record, current):
         or doc.relevance not in {"relevant", "related"}
         or version.state != "parsed"
         or version.review_status == "rejected"
-        or version.legal_status == "repealed"
+        or version.legal_status in NOT_CITABLE_STATUSES
         or await document_is_held(session, doc.id)
         or p.get("official_source_url") != doc.source_url
         or p.get("final_url") != version.final_url
@@ -58,7 +58,7 @@ async def _replacement(session, archive, held, record, current):
     ):
         return None
     try:
-        raw = archive.read(version.archive_path)
+        raw = archive.read(version.archive_path, expected_sha256=version.content_hash)
     except (OSError, ArchiveIntegrityError):
         return None
     if len(raw) != version.size_bytes or archive.sha256(raw) != version.content_hash:

@@ -15,18 +15,22 @@ from dataclasses import dataclass, field
 import pypdfium2 as pdfium
 from bs4 import BeautifulSoup
 
+from app.ingestion.clauses import is_article_heading
+from app.ingestion.egov_xml import EgovError, egov_lines, is_egov_xml
+from app.ingestion.pdf_columns import column_text
 from app.ingestion.source_layout import (
     is_english_page,
     is_reference_page,
     ltr_page,
     resolve_unmapped_hyphens,
 )
+from app.ingestion.word_text import WordError, is_doc, is_docx, word_paragraphs
 
 # 平均每页字符数低于此值,判定为扫描件(没有文字层)
 NEEDS_OCR_MIN_CHARS_PER_PAGE = 30
 
-# PDFium 不是线程安全的,所有调用串行化
-_PDFIUM_LOCK = threading.Lock()
+# PDFium 不是线程安全的,全进程所有 pdfium 调用共用同一把可重入锁串行化
+_PDFIUM_LOCK = threading.RLock()
 
 
 class ParseError(Exception):
@@ -54,6 +58,10 @@ def detect_kind(content: bytes, mime: str) -> str:
     head = content[:1024].lstrip()
     if head.startswith(b"%PDF"):
         return "pdf"
+    if is_docx(content) or is_doc(content):
+        return "word"
+    if is_egov_xml(content):
+        return "egov"
     lowered = head[:200].lower()
     if mime in ("text/html", "application/xhtml+xml") or lowered.startswith(
         (b"<!doctype html", b"<html")
@@ -102,6 +110,10 @@ def parse_pdf(content: bytes, *, layout_events: list[dict] | None = None) -> lis
                                         layout_events.append({"page_number": i + 1, **layout})
                             except ValueError as exc:
                                 raise ParseError(f"参考文献页 {i + 1} 版面核验失败: {exc}") from exc
+                        else:
+                            ordered = column_text(page, text_page)
+                            if ordered:
+                                text = _normalise_pdf_text(ordered)
                         pages.append(text)
                     finally:
                         text_page.close()
@@ -144,6 +156,48 @@ def _norm_furniture(line: str) -> str:
     return _DIGITS.sub("#", " ".join(line.split())).strip()
 
 
+# 官方公报的报头行（“公报名 + 期号/日期/页码”）：名称是各语种“官方公报”的通用说法，
+# 新增国家只需补词，不针对某个国家或文件。
+GAZETTE_NAMES = (
+    "الجريدة الرسمية",
+    "الوقائع المصرية",
+    "Journal Officiel",
+    "Bulletin Officiel",
+    "Official Gazette",
+    "Gazzetta Ufficiale",
+    "Amtsblatt",
+    "Boletín Oficial",
+)
+_MASTHEAD = re.compile(
+    r"^\s*(?:(?:N°|No\.?|Page|صفحة|عدد)?\s*[0-9٠-٩]{1,5}\s+)*"
+    r"(?:" + "|".join(re.escape(n) for n in GAZETTE_NAMES) + r")\b"
+    r"(?=[^\n]{0,60}?(?:العدد|N°|No\.|Page|Seite|[—–-]))[^\n.]{0,100}$",
+    re.IGNORECASE,
+)
+_PAGE_NO_ONLY = re.compile(r"^\s*[0-9٠-٩]{1,4}\s*$")
+
+
+def strip_gazette_mastheads(text: str) -> tuple[str, int]:
+    """Remove running gazette mastheads from a text (page or clause): a short line that starts with
+    the gazette's name and carries an issue number, date or page number. A page number on its own
+    line right next to a masthead goes with it. Returns (text, mastheads removed). A sentence that
+    merely cites the gazette ("publié au Journal Officiel n° 12 du …") is long or ends with a full
+    stop and stays."""
+    lines = text.splitlines()
+    drop: set[int] = set()
+    found = 0
+    for i, line in enumerate(lines):
+        if len(line.strip()) <= 120 and _MASTHEAD.match(line):
+            drop.add(i)
+            found += 1
+            for j in (i - 1, i + 1):
+                if 0 <= j < len(lines) and _PAGE_NO_ONLY.match(lines[j]):
+                    drop.add(j)
+    if not drop:
+        return text, 0
+    return "\n".join(ln for i, ln in enumerate(lines) if i not in drop), found
+
+
 def strip_running_headers(pages: list[str]) -> tuple[list[str], list[str]]:
     """去掉 PDF 里每页重复出现的页眉/页脚/页码(例如"Page 3 of 20"、文件名)。
 
@@ -151,34 +205,42 @@ def strip_running_headers(pages: list[str]) -> tuple[list[str], list[str]]:
     长度不超过 120 字符。返回 (处理后的页面, 被移除的行模式),被移除内容会写进处理事件,便于核对。
     原文件始终保留在归档中,这里只影响条款文本。
     """
+    masthead_pages = [strip_gazette_mastheads(p) for p in pages]
+    removed_mastheads = sum(n for _, n in masthead_pages)
+    pages = [p for p, _ in masthead_pages]
+    marker = ["公报报头"] if removed_mastheads else []
     if len(pages) < 3:
-        return pages, []
+        return pages, marker
     split_pages = [p.splitlines() for p in pages]
     counts: Counter[str] = Counter()
     for lines in split_pages:
         nonblank = [i for i, ln in enumerate(lines) if ln.strip()]
-        edge = nonblank[:_EDGE_LINES] + nonblank[-_EDGE_LINES:]
+        edge_n = 3 if len(nonblank) >= 8 else _EDGE_LINES
+        edge = nonblank[:edge_n] + nonblank[-edge_n:]
         seen = {
             _norm_furniture(lines[i])
             for i in set(edge)
-            if len(lines[i].strip()) <= _MAX_FURNITURE_LEN
+            if len(lines[i].strip()) <= _MAX_FURNITURE_LEN and not is_article_heading(lines[i])
         }
         counts.update(s for s in seen if s)
     # 奇偶页页眉不同的文件里,每种页眉只出现在约一半的页面上,所以阈值取 40%
     threshold = max(3, int(len(pages) * 0.4))
     furniture = {s for s, c in counts.items() if c >= threshold}
     if not furniture:
-        return pages, []
+        return pages, marker
 
     cleaned: list[str] = []
     for lines in split_pages:
         nonblank = [i for i, ln in enumerate(lines) if ln.strip()]
-        edge = set(nonblank[:_EDGE_LINES] + nonblank[-_EDGE_LINES:])
+        edge_n = 3 if len(nonblank) >= 8 else _EDGE_LINES
+        edge = set(nonblank[:edge_n] + nonblank[-edge_n:])
         keep = [
-            ln for i, ln in enumerate(lines) if not (i in edge and _norm_furniture(ln) in furniture)
+            ln
+            for i, ln in enumerate(lines)
+            if not (i in edge and _norm_furniture(ln) in furniture and not is_article_heading(ln))
         ]
         cleaned.append("\n".join(keep))
-    return cleaned, sorted(furniture)
+    return cleaned, marker + sorted(furniture)
 
 
 _MARGIN_NO = re.compile(r"^(?:(?P<body>.*\S)\s+)?(?P<n>\d{1,2})$")  # 行尾数字,或单独成行的数字
@@ -312,4 +374,14 @@ def parse_document(content: bytes, mime: str) -> ParsedDocument:
         return ParsedDocument(kind, parse_pdf(content, layout_events=events), events)
     if kind == "html":
         return ParsedDocument(kind, parse_html(content))
+    if kind == "egov":
+        try:
+            return ParsedDocument(kind, [chr(10).join(egov_lines(content))])
+        except EgovError as exc:
+            raise ParseError(str(exc)) from exc
+    if kind == "word":
+        try:
+            return ParsedDocument(kind, [chr(10).join(word_paragraphs(content))])
+        except WordError as exc:
+            raise ParseError(str(exc)) from exc
     return ParsedDocument(kind, [_decode(content)])

@@ -102,11 +102,11 @@ async def test_pending_table_graph_records_evidence_without_activating_or_inheri
         assert record_payload(old_edge) == before
         damaged = copy.deepcopy(result.payload)
         damaged["blocks"][1]["relations"][0]["quote_span"]["start"] += 1
-        with pytest.raises(ValueError, match="span differs"):
+        with pytest.raises(ValueError, match="引文区间不一致"):
             parsed_graph.validate_cached_result(damaged, source, prepared)
         damaged = copy.deepcopy(result.payload)
         damaged["blocks"][1] = damaged["blocks"][0]
-        with pytest.raises(ValueError, match="duplicated"):
+        with pytest.raises(ValueError, match="重复或乱序"):
             parsed_graph.validate_cached_result(damaged, source, prepared)
 
 

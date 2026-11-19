@@ -229,3 +229,153 @@ async def test_transport_restores_private_tokens_or_fails_quality(monkeypatch, k
     result = await translator._call_llm_translate(original, "en", [], [])
     assert ("person@example.com" in result[0]) is keep_marker
     assert translator.verify_translation(original, result[0], [])[0] is keep_marker
+
+
+async def test_the_same_passage_is_translated_once_and_reused_after_it_passes(
+    session_factory, monkeypatch
+):
+    calls = []
+
+    async def good(chunk, *args, **kwargs):
+        calls.append(chunk)
+        return "组织必须保护个人数据并依法通知监管机构处理泄露。", "fake", 10, 20, 5
+
+    monkeypatch.setattr(translator, "_call_llm_translate", good)
+    text = "Organisations must protect personal data and notify the regulator of a breach."
+    async with session_factory() as session:
+        _, _, clauses = await make_document(session, [text, text])
+        first = await translator.translate_clause(session, clauses[0], "SG", [])
+        second = await translator.translate_clause(session, clauses[1], "SG", [])
+        await session.commit()
+    assert len(calls) == 1  # 第二条相同原文直接复用
+    assert second.quality_check_passed and second.tokens_in == 0
+    assert second.translated_text == first.translated_text
+
+
+async def test_a_long_clause_only_redoes_the_passage_that_failed(session_factory, monkeypatch):
+    sentence = "Each organisation shall protect the personal data held in its possession. "
+    first_part = sentence * 22
+    second_part = "Every operator shall keep an audit record of access to the system. " * 22
+    text = first_part + "\n" + second_part
+    seen: dict[str, int] = {}
+    second_fails = {"on": True}
+
+    async def fake(chunk, *args, **kwargs):
+        seen[chunk] = seen.get(chunk, 0) + 1
+        if "audit record" in chunk and second_fails["on"]:
+            return "still English only", "fake", 1, 1, 1
+        zh = (
+            "每个组织都应当保护其持有的个人数据。"
+            if "organisation" in chunk
+            else "每个运营者都应当保存系统访问的审计记录。"
+        )
+        return zh * 12, "fake", 5, 5, 1
+
+    monkeypatch.setattr(translator, "_call_llm_translate", fake)
+    async with session_factory() as session:
+        _, _, clauses = await make_document(session, [text])
+        failed = await translator.translate_clause(session, clauses[0], "SG", [])
+        await session.commit()
+        assert not failed.quality_check_passed
+        passing_chunk_calls = sum(n for c, n in seen.items() if "organisation" in c)
+        second_fails["on"] = False
+        again = await translator.translate_clause(session, clauses[0], "SG", [])
+        await session.commit()
+    assert again.quality_check_passed
+    # 第一轮通过的块没有再请求模型
+    assert sum(n for c, n in seen.items() if "organisation" in c) == passing_chunk_calls
+
+
+def _attempt(clause, text, *, current, passed=False, prompt=translator.PROMPT_VERSION):
+    from datetime import UTC, datetime
+
+    return ClauseTranslation(
+        clause_id=clause.id,
+        is_current=current,
+        translated_text=text,
+        engine="llm",
+        model_name="fake",
+        prompt_version=prompt,
+        glossary_hits=[],
+        unmatched_terms=[],
+        quality_check_passed=passed,
+        quality_issues=[] if passed else ["旧规则下未通过"],
+        review_status="machine_translated" if passed else "translation_failed",
+        updated_at=datetime.now(UTC),
+    )
+
+
+async def test_reverify_restores_translations_the_current_rules_accept_and_keeps_the_rest_failed(
+    session_factory,
+):
+    from app.cli import reverify_translations
+
+    async with session_factory() as session:
+        _, _, clauses = await make_document(
+            session,
+            [
+                "Contact the Commission by e-mail contact@cndp.ma or on www.cndp.ma, "
+                "or visit the office in Rabat during working hours.",
+                "The organisation must notify the Commission of a data breach without delay.",
+            ],
+        )
+        # 旧规则把网址、邮箱算进“未译部分”而误判；现行规则只看该翻的文字
+        toc_text = "请通过电子邮件 contact@cndp.ma 或网站 www.cndp.ma 联系委员会，或在办公时间到拉巴特的办公室。"
+        toc = _attempt(clauses[0], toc_text, current=True)
+        untouched = _attempt(
+            clauses[1], "The organisation must notify the Commission of a breach.", current=True
+        )
+        session.add_all([toc, untouched])
+        await session.commit()
+    stats = await reverify_translations("SG", sf=session_factory)
+    assert stats["restored"] == 1 and stats["still_failing"] == 1
+    async with session_factory() as session:
+        rows = {
+            r.translated_text: r for r in (await session.scalars(select(ClauseTranslation))).all()
+        }
+    restored = rows[toc_text]
+    assert restored.quality_check_passed and restored.review_status == "machine_translated"
+    bad = rows["The organisation must notify the Commission of a breach."]
+    assert not bad.quality_check_passed and bad.review_status == "translation_failed"
+
+
+async def test_a_clause_that_keeps_failing_is_not_retried_forever(session_factory, monkeypatch):
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("an exhausted clause must not reach the model")
+
+    monkeypatch.setattr(translator, "_call_llm_translate", forbidden)
+    async with session_factory() as session:
+        _, _, clauses = await make_document(
+            session, ["Organisations must protect personal data.", "Operators must keep logs."]
+        )
+        session.add_all(
+            [_attempt(clauses[0], "bad", current=i == 2) for i in range(3)]
+            + [_attempt(clauses[1], "bad", current=True)]
+        )
+        await session.commit()
+    stats = await batch_translate("SG", only_missing=True, sf=session_factory, dry_run=True)
+    assert stats["retry_exhausted"] == 1 and stats["total"] == 1
+    again = await batch_translate(
+        "SG", only_missing=True, sf=session_factory, dry_run=True, max_attempts=0
+    )
+    assert again["retry_exhausted"] == 0 and again["total"] == 2
+
+
+async def test_documents_outside_the_three_businesses_are_not_translated(session_factory):
+    async with session_factory() as session:
+        doc, _, _ = await make_document(
+            session, [f"Clause {i}: Protect personal data." for i in range(5)]
+        )
+        doc.relevance = "out_of_scope"
+        await session.commit()
+    stats = await batch_translate("SG", sf=session_factory, dry_run=True)
+    assert stats["total"] == 0
+    async with session_factory() as session:
+        doc = (
+            await session.scalars(
+                select(__import__("app.ingestion.models", fromlist=["Document"]).Document)
+            )
+        ).first()
+        doc.relevance = "relevant"
+        await session.commit()
+    assert (await batch_translate("SG", sf=session_factory, dry_run=True))["total"] == 5

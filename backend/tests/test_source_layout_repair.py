@@ -159,7 +159,7 @@ def test_partition_corruption_cannot_be_hidden(mutation):
         prepared["literal_fields"].reverse()
     else:
         prepared["translation_units"][0]["source_spans"][0]["end"] += 1
-    with pytest.raises(ValueError, match="partition"):
+    with pytest.raises(ValueError, match="分区校验不一致"):
         source_repairs.verify_prepared(prepared)
 
 
@@ -199,7 +199,7 @@ async def test_linguistic_units_keep_strict_checks_and_literal_copy_is_not_trans
     assert all(field["rendered_text"] == field["source_text"] for field in result["literal_fields"])
     corrupt = copy.deepcopy(result)
     corrupt["literal_fields"][1]["rendered_text"] = "$999"
-    with pytest.raises(ValueError, match="literal source"):
+    with pytest.raises(ValueError, match="字面源数据"):
         source_repairs.verify_bilingual(prepared, corrupt)
 
 
@@ -268,7 +268,7 @@ async def test_append_repair_preserves_approved_sources_attempts_and_proposals(
             assert record_payload(row) == expected
         assert archive.read(path) == blob
         assert await session.scalar(select(func.count()).select_from(KnowledgeAuditRecord)) == 2
-        with pytest.raises(ValueError, match="identity differs"):
+        with pytest.raises(ValueError, match="哈希或原始条款不一致"):
             await source_repairs.append_page_repair(
                 session, archive, clause.id, 1, hashlib.sha256(b"wrong").hexdigest()
             )

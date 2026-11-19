@@ -1,4 +1,5 @@
 """Delivery checks use synthetic multilingual evidence, never a business database."""
+
 import copy
 import uuid
 from datetime import UTC, datetime
@@ -11,19 +12,44 @@ from app.analysis.report_exporter import build_report_docx, build_report_pdf
 
 
 def sample():
-    task = SimpleNamespace(id=uuid.uuid4(), created_at=datetime.now(UTC), title="导出检查",
-                           country_code="ZZ", vehicle_model="示例", findings_json=[])
-    dims = [{"dimension_code": "D3", "dimension_title": "跨境与范围", "risk_level": "待核对",
-             "content_markdown": "中文：业务事实不足；France : données à caractère personnel.",
-             "citations": [{"document_title": "Synthetic evidence", "clause_number": "17",
-                            "version_no": 4, "quote_original": "المادة ١٧: حماية البيانات 2026.",
-                            "quote_zh": "第17条：数据保护。", "language": "ar",
-                            "source_url": "https://example.invalid/<img src='file:///secret'>",
-                            "source_review_status": "pending", "translation_review_status": "pending"}],
-             "findings": []}]
-    rv = SimpleNamespace(version_no=3, dimensions_json=dims, regulatory_updates=[],
-                         executive_summary="未经人工复核 <script>alert(1)</script>",
-                         citation_policy="allow_machine_with_notice", is_partial_sample=True)
+    task = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_at=datetime.now(UTC),
+        title="导出检查",
+        country_code="ZZ",
+        vehicle_model="示例",
+        findings_json=[],
+    )
+    dims = [
+        {
+            "dimension_code": "D3",
+            "dimension_title": "跨境与范围",
+            "risk_level": "待核对",
+            "content_markdown": "中文：业务事实不足；France : données à caractère personnel.",
+            "citations": [
+                {
+                    "document_title": "Synthetic evidence",
+                    "clause_number": "17",
+                    "version_no": 4,
+                    "quote_original": "المادة ١٧: حماية البيانات 2026.",
+                    "quote_zh": "第17条：数据保护。",
+                    "language": "ar",
+                    "source_url": "https://example.invalid/<img src='file:///secret'>",
+                    "source_review_status": "pending",
+                    "translation_review_status": "pending",
+                }
+            ],
+            "findings": [],
+        }
+    ]
+    rv = SimpleNamespace(
+        version_no=3,
+        dimensions_json=dims,
+        regulatory_updates=[],
+        executive_summary="未经人工复核 <script>alert(1)</script>",
+        citation_policy="allow_machine_with_notice",
+        is_partial_sample=True,
+    )
     return task, rv
 
 
@@ -44,8 +70,9 @@ def test_pdf_selectable_multilingual_and_snapshot_unchanged():
 
 def test_pdf_content_is_text_not_active_markup():
     task, rv = sample()
-    html = report_html(task, rv, dimension="D3", context="fixture", country="未知",
-                       notices=["待核对", "免责声明"])
+    html = report_html(
+        task, rv, dimension="D3", context="fixture", country="未知", notices=["待核对", "免责声明"]
+    )
     assert "<script>" not in html and "<img " not in html
     assert "المادة ١٧: حماية البيانات 2026." in html
     assert 'dir="rtl"' in html and 'dir="ltr"' in html and "hyphens:none" in html

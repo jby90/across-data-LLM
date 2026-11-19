@@ -1,9 +1,10 @@
+# ruff: noqa: E501
 import base64
 import uuid
 from datetime import UTC, date, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +44,7 @@ class VersionOut(BaseModel):
     ocr_confidence: float | None
     ocr_required: bool = False
     review_status: str = "pending_review"
+    check_note: str | None = None
     official_number: str | None
     version_label: str | None
     published_date: date | None
@@ -72,6 +74,8 @@ class DocumentOut(BaseModel):
     relevance: str = "relevant"
     relevance_note: str | None = None
     relevance_source: str = "rule"
+    news_marked_at: datetime | None = None
+    has_date: bool = False  # 最新版有公布或施行日期（没有的首次入库不推送，可由管理员标记为新法规）
     latest_version: VersionOut | None = None
 
 
@@ -157,7 +161,9 @@ async def list_documents(
     if country_code:
         stmt = stmt.where(Document.country_code == country_code.upper())
     if site_id:
-        stmt = stmt.where(Document.site_id == site_id)
+        from app.sources.router import site_document_filter
+
+        stmt = stmt.where(await site_document_filter(session, site_id))
     docs = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
     versions = await _versions_by_doc(session, [d.id for d in docs])
     holds = await holds_for_documents(session, [d.id for d in docs])
@@ -176,7 +182,7 @@ async def list_documents(
     "/documents/upload",
     response_model=DocumentDetail,
     status_code=status.HTTP_201_CREATED,
-    summary="手动上传官方原文(WAF 拦截时的兜底入口)",
+    summary="手动上传官方原文",
 )
 async def upload_document_version(
     body: ManualUploadIn,
@@ -185,9 +191,9 @@ async def upload_document_version(
 ):
     try:
         raw_bytes = base64.b64decode(body.content_base64, validate=True)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, f"文件 base64 解码失败: {e}"
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "上传文件内容编码解析失败，请重新选择文件"
         ) from None
     settings = get_settings()
     if not raw_bytes or len(raw_bytes) > settings.crawl_max_bytes:
@@ -202,7 +208,7 @@ async def upload_document_version(
         if body.site_id is None or not body.source_url:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "新建文档上传必须指定所属站点(site_id)与官方原文链接(source_url)",
+                "新建文档上传必须选择所属采集站点并填写官方原文链接",
             )
         site = await session.get(SourceSite, body.site_id)
         if site is None:
@@ -247,10 +253,13 @@ async def upload_document_version(
     digest = ArchiveStore.sha256(raw_bytes)
     existing = (
         await session.execute(
-            select(DocumentVersion).where(
+            select(DocumentVersion)
+            .where(
                 DocumentVersion.document_id == doc.id,
                 DocumentVersion.content_hash == digest,
             )
+            .order_by(DocumentVersion.version_no.desc())
+            .limit(1)
         )
     ).scalar_one_or_none()
     if existing is None:
@@ -286,10 +295,12 @@ async def upload_document_version(
                 version_id=version.id,
                 step="upload",
                 status="ok",
-                message=f"管理员手动上传官方原文,{len(raw_bytes)} 字节,sha256={stored_digest[:12]}",
+                message="管理员手动上传官方原文，已完成归档校验",
             )
         )
-        ocr = OcrEngine(settings.tesseract_cmd, settings.tessdata_dir, settings.ocr_dpi)
+        ocr = OcrEngine(
+            settings.tesseract_cmd, settings.tessdata_dir, settings.ocr_dpi, settings.paddle_python
+        )
         await parse_version(session, archive, version, doc.language, ocr)
         await session.commit()
     else:
@@ -305,6 +316,62 @@ async def upload_document_version(
     )
 
 
+@router.get("/quality-cards/references", summary="指向已不存在条文的引用有几处")
+async def dangling_references(
+    _: Principal = Depends(require_admin_side),
+    session: AsyncSession = Depends(get_session),
+):
+    from app.ingestion.ref_check import scan
+
+    return {"dangling": await scan(session, cached=True)}
+
+
+@router.post("/quality-cards/references/repair", summary="把指向已不存在条文的引用改指向现存条文")
+async def repair_references(
+    _: Principal = Depends(require_platform_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    from app.ingestion.ref_check import repair, scan
+
+    done = await repair(session)
+    await session.commit()
+    return {**done, "dangling": await scan(session)}
+
+
+@router.get("/quality-cards", summary="入库质量：哪些法规可以用、哪些还要处理")
+async def quality_cards(
+    country_code: str | None = None,
+    only_failing: bool = False,
+    _: Principal = Depends(require_admin_side),
+    session: AsyncSession = Depends(get_session),
+):
+    from app.ingestion.quality_card import cards_in
+
+    rows = await cards_in(session, country_code)
+    out = []
+    for row in rows:
+        card = row["card"]
+        if only_failing and card.passed:
+            continue
+        out.append(
+            {
+                "country_code": row["country"],
+                "title": row["title"],
+                "language": row["language"],
+                "clauses": card.clauses,
+                "readable": card.readable,
+                "number_continuity": card.number_continuity,
+                "translated": card.translated,
+                "problems": card.problems,
+                "scope_note": card.scope_note,
+                "document_id": row["document_id"],
+                "todo": row["todo"],
+                "passed": card.passed and not row["todo"],
+            }
+        )
+    return out
+
+
 @router.get("/documents/{document_id}", response_model=DocumentDetail, summary="文档详情与全部版本")
 async def get_document(
     document_id: uuid.UUID,
@@ -318,10 +385,59 @@ async def get_document(
     base = DocumentOut.model_validate(doc)
     version_out = [VersionOut.model_validate(v) for v in versions]
     return DocumentDetail(
-        **base.model_dump(exclude={"latest_version"}),
+        **base.model_dump(exclude={"latest_version", "has_date"}),
+        has_date=bool(versions and (versions[0].effective_date or versions[0].published_date)),
         latest_version=version_out[0] if version_out else None,
         versions=version_out,
     )
+
+
+class MarkNewIn(BaseModel):
+    published_date: date | None = None  # 官方公布日期（选填）：填了就写进这部法规最新版的公布日期
+
+
+@router.post("/documents/{document_id}/mark-new", summary="标记为新法规：推送给订阅的企业一次")
+async def mark_document_new(
+    document_id: uuid.UUID,
+    body: MarkNewIn,
+    request: Request,
+    principal: Principal = Depends(require_admin_side),
+    session: AsyncSession = Depends(get_session),
+):
+    """A law first collected without a publication or effective date is not pushed. The administrator
+    confirms it is newly issued: it is pushed once to the subscribed enterprises like any newly
+    collected law (impact and what to do written for it). One law can be marked only once."""
+    from app.audit.service import set_detail
+    from app.updates import subscriptions as subs
+
+    doc = await session.get(Document, document_id, with_for_update=True)
+    if doc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
+    if doc.news_marked_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "这部法规已经标记过一次，不会再推送")
+    version = await session.scalar(
+        select(DocumentVersion).where(DocumentVersion.document_id == doc.id, DocumentVersion.state == "parsed").order_by(DocumentVersion.version_no.desc()).limit(1)
+    )
+    if version is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "这部法规还没有解析完成，解析后才能标记")
+    if doc.relevance not in subs.SHOWN_RELEVANCE:
+        raise HTTPException(status.HTTP_409_CONFLICT, "这部法规与汽车数据和准入业务无关，不向企业展示，不能推送")
+    if body.published_date and body.published_date > datetime.now(UTC).date():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "公布日期不能晚于今天")
+    if body.published_date:
+        version.published_date = body.published_date
+    doc.news_marked_at, doc.news_marked_by = datetime.now(UTC), principal.user_id
+    await session.flush()
+    await subs.ensure_advice(session, f"doc:{doc.id}", doc)  # 影响说明和要做的事先排上，订阅的企业打开通知时已写好
+    set_detail(
+        request,
+        summary=f"把《{doc.title_zh or doc.title}》标记为新法规" + (f"，公布日期 {body.published_date.isoformat()}" if body.published_date else ""),
+        before=None,
+        after={"news_marked": True, "published_date": body.published_date.isoformat() if body.published_date else None},
+    )
+    await session.commit()
+    subs.schedule_writing()
+    return {"id": str(doc.id), "news_marked_at": doc.news_marked_at}
 
 
 @router.get("/documents/{document_id}/provenance", summary="只读来源与归档完整性核验")
@@ -349,15 +465,15 @@ async def document_provenance(
     for version in versions:
         error = None
         try:
-            raw = archive.read(version.archive_path)
+            raw = archive.read(version.archive_path, expected_sha256=version.content_hash)
             integrity_ok = (
                 archive.sha256(raw) == version.content_hash and len(raw) == version.size_bytes
             )
             if not integrity_ok:
-                error = "归档与登记的哈希或长度不一致"
-        except (OSError, ArchiveIntegrityError) as exc:
+                error = "归档原文与入库校验记录不一致"
+        except (OSError, ArchiveIntegrityError):
             integrity_ok = False
-            error = type(exc).__name__ + ": 归档不可读或完整性检查未通过"
+            error = "归档原文不可读或完整性核验未通过"
         events = (
             await session.scalars(
                 select(PipelineEvent)
@@ -380,6 +496,10 @@ async def document_provenance(
         receipt = registered[0] if len({r["source_nature"] for r in registered}) == 1 else None
         if acquisition == "legacy_or_unrecorded" and receipt is not None:
             acquisition = "registered_download"
+        if acquisition == "legacy_or_unrecorded" and version.metadata_source == "manual_import":
+            acquisition = "official_import"  # 官方站点下载后经来源锁导入
+        if acquisition == "legacy_or_unrecorded" and not receipts and integrity_ok and (version.final_url or "").startswith("http"):
+            acquisition = "official_site"  # 没留下载记录，但有官方网址、原文与入库时一致：按官方网站下载算
         rows.append(
             {
                 "version_id": str(version.id),
@@ -450,27 +570,182 @@ async def _version_or_404(session: AsyncSession, version_id: uuid.UUID) -> Docum
 @router.get("/versions/{version_id}/original", summary="下载经完整性核验的归档原文")
 async def download_original(
     version_id: uuid.UUID,
+    inline: bool = False,
     _: Principal = Depends(require_admin_side),
     session: AsyncSession = Depends(get_session),
 ):
+    import re
+    from urllib.parse import quote
+
+    from app.analysis.workflow_engine import COUNTRY_NAMES_ZH
+
     version = await _version_or_404(session, version_id)
     try:
         archive = ArchiveStore(get_settings().archive_dir)
-        raw = archive.read(version.archive_path)
+        raw = archive.read(version.archive_path, expected_sha256=version.content_hash)
     except (OSError, ArchiveIntegrityError):
         raise HTTPException(409, "归档原文不存在或完整性异常，已拒绝下载") from None
     if archive.sha256(raw) != version.content_hash or len(raw) != version.size_bytes:
-        raise HTTPException(409, "归档与登记的内容哈希或长度不一致，已拒绝下载")
-    extension = ".pdf" if version.mime_type == "application/pdf" else ".bin"
+        raise HTTPException(409, "归档原文与入库校验记录不一致，已拒绝下载")
+    doc = await session.get(Document, version.document_id)
+    cc_zh = COUNTRY_NAMES_ZH.get(doc.country_code if doc else "", "官方")
+    raw_title = (doc.title_zh or doc.title) if doc else "法规文件"
+    safe_title = re.sub(r'[\\/:*?"<>|\r\n]+', "_", raw_title).strip()[:60] or "法规文件"
+    mime_low = (version.mime_type or "").lower()
+    arch_low = (version.archive_path or "").lower()
+    if mime_low == "application/pdf" or arch_low.endswith(".pdf"):
+        extension = ".pdf"
+    elif "wordprocessingml" in mime_low or arch_low.endswith(".docx"):
+        extension = ".docx"
+    elif mime_low == "application/msword" or arch_low.endswith(".doc"):
+        extension = ".doc"
+    elif "spreadsheetml" in mime_low or arch_low.endswith(".xlsx"):
+        extension = ".xlsx"
+    elif "html" in mime_low or arch_low.endswith((".html", ".htm")):
+        extension = ".html"
+    elif mime_low.startswith("text/plain") or arch_low.endswith(".txt"):
+        extension = ".txt"
+    else:
+        extension = ".bin"
+    utf8_name = quote(f"{cc_zh}_{safe_title}_官方原文{extension}")
+    show = inline and extension == ".pdf"  # 对照原文：在浏览器里直接打开到对应页
+    disp_mode = "inline" if show else "attachment"
+    media_type = (
+        "application/pdf"
+        if show
+        else (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            if extension == ".docx"
+            else "application/octet-stream"
+        )
+    )
     return Response(
         raw,
-        media_type="application/octet-stream",
+        media_type=media_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{version.id}{extension}"',
+            "Content-Disposition": f"{disp_mode}; filename=\"official_original{extension}\"; filename*=UTF-8''{utf8_name}",
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "no-store",
         },
     )
+
+
+def _archive_pdf(version) -> bytes:
+    try:
+        archive = ArchiveStore(get_settings().archive_dir)
+        raw = archive.read(version.archive_path, expected_sha256=version.content_hash)
+    except (OSError, ArchiveIntegrityError):
+        raise HTTPException(409, "原文文件打不开") from None
+    if archive.sha256(raw) != version.content_hash:
+        raise HTTPException(409, "原文文件与入库时不一致")
+    return raw
+
+
+@router.get("/versions/{version_id}/check-items", summary="扫描件待核对的段落")
+async def check_items(
+    version_id: uuid.UUID,
+    _: Principal = Depends(require_admin_side),
+    session: AsyncSession = Depends(get_session),
+):
+    """可能识别错的每一段：识别出的文字、在第几页、是否已处理、改过的话改成了什么。"""
+    from app.ingestion.models import ClauseReading
+
+    version = await _version_or_404(session, version_id)
+    items = version.check_items or []
+    ids = [uuid.UUID(i["clause_id"]) for i in items]
+    clauses = {c.id: c for c in (await session.scalars(select(Clause).where(Clause.id.in_(ids)))).all()} if ids else {}
+    readings = dict((await session.execute(select(ClauseReading.clause_id, ClauseReading.reading_text).where(ClauseReading.clause_id.in_(ids)))).all()) if ids else {}
+    out = []
+    for i in items:
+        c = clauses.get(uuid.UUID(i["clause_id"]))
+        if c is None:
+            continue
+        out.append({**i, "clause_number": c.clause_number, "text": readings.get(c.id) or c.original_text})
+    return {"note": version.check_note, "review_status": version.review_status, "items": out}
+
+
+class SettleIn(BaseModel):
+    text: str | None = Field(default=None, max_length=50000)
+
+
+@router.post("/versions/{version_id}/check-items/{clause_id}", summary="核对一段扫描件文字")
+async def settle_check_item(
+    version_id: uuid.UUID,
+    clause_id: uuid.UUID,
+    body: SettleIn,
+    _: Principal = Depends(require_platform_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """“没错”（不带 text）或“改一下”（带改好的文字）。全部处理完，这份扫描件记为已核对。"""
+    from app.ingestion.ocr_check import settle_item
+
+    version = await _version_or_404(session, version_id)
+    try:
+        await settle_item(session, version, clause_id, body.text)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from None
+    await session.commit()
+    return {"review_status": version.review_status, "note": version.check_note}
+
+
+@router.post("/versions/{version_id}/pages/{page}/reread", summary="重新识别扫描件的某一页")
+async def reread_page(
+    version_id: uuid.UUID,
+    page: int,
+    _: Principal = Depends(require_platform_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """更高分辨率、按原文语言再读这一页；读通的段落自动处理掉。"""
+    from app.ingestion.ocr_check import reread_pages
+
+    version = await _version_or_404(session, version_id)
+    done = await reread_pages(session, version, [page])
+    await session.commit()
+    return {**done, "review_status": version.review_status, "note": version.check_note}
+
+
+@router.get("/versions/{version_id}/pages/{page}.png", summary="原文某一页的图")
+async def page_image(
+    version_id: uuid.UUID,
+    page: int,
+    _: Principal = Depends(require_admin_side),
+    session: AsyncSession = Depends(get_session),
+):
+    import io
+
+    import pypdfium2 as pdfium
+
+    version = await _version_or_404(session, version_id)
+    if version.mime_type != "application/pdf":
+        raise HTTPException(404, "这份原文不是 PDF")
+    pdf = pdfium.PdfDocument(_archive_pdf(version))
+    if not 1 <= page <= len(pdf):
+        raise HTTPException(404, "没有这一页")
+    image = pdf[page - 1].render(scale=1.6).to_pil()
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "private, max-age=600"})
+
+
+class VersionCheckIn(BaseModel):
+    approve: bool
+    note: str = Field(default="", max_length=1000)
+
+
+@router.post("/versions/{version_id}/check", summary="扫描件原文核对")
+async def check_version(
+    version_id: uuid.UUID,
+    body: VersionCheckIn,
+    user: Principal = Depends(require_admin_side),
+    session: AsyncSession = Depends(get_session),
+):
+    """管理员核对扫描件识别出的文字：记为识别无误（或有误）。"""
+    from app.knowledge.version_check import apply_version_check
+
+    version = await _version_or_404(session, version_id)
+    await apply_version_check(session, version.id, body.approve)
+    await session.commit()
+    return {"submitted": False, "review_status": version.review_status}
 
 
 @router.get("/versions/{version_id}/clauses", response_model=list[ClauseOut], summary="版本条款")

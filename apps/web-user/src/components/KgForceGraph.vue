@@ -32,7 +32,7 @@ function buildOption(): echarts.EChartsOption {
     animationDurationUpdate: 180,
     tooltip: {
       renderMode: 'richText',
-      textStyle: { fontSize: 12 },
+      textStyle: { fontSize: 13 },
       confine: true,
       formatter: (p: any) => {
         if (p.dataType === 'edge') return `${p.data.name}`
@@ -139,7 +139,7 @@ onUnmounted(() => {
   border: 1px solid #dce4ed;
   border-radius: 7px;
   padding: 7px 12px;
-  font-size: 12px;
+  font-size: 13px;
   color: #64798a;
 }
 .reset-view:hover {

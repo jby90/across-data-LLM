@@ -5,3 +5,24 @@
 @import '@fontsource/noto-naskh-arabic/400.css';
 @import '@fontsource/noto-naskh-arabic/600.css';
 @import '../../../packages/shared/src/ui/theme.css';
+
+/* 第 7.5 项二轮 规则 9：用户端页头不显示副标题，解释系统怎么运作的话放在使用帮助 */
+.app-content .page-heading > div > p,
+.app-content .page-heading > div > .page-description {
+  display: none;
+}
+
+/* 第 7.5 项二轮 规则 18：法规链接全站一个样式——主色、不加下划线，鼠标移上去才有下划线 */
+.app-content a[href^='/knowledge']:not(.quick-link) {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+.app-content a[href^='/knowledge']:not(.quick-link):hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 第 7.5 项二轮：全站最小字号 13px，避免原生 small 缩放至 12px 以下 */
+small {
+  font-size: 13px;
+}

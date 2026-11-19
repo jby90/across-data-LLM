@@ -20,6 +20,10 @@ const paths: Record<string, string> = {
   search: 'M10 3a7 7 0 1 0 0 14a7 7 0 1 0 0-14 M15 15l6 6',
   file: 'M5 2h9l5 5v15H5z M14 2v6h5 M8 12h8 M8 16h8',
   shield: 'M12 2l9 4v6c0 5-9 10-9 10S3 17 3 12V6z M8 12l3 3 5-6',
+  user: 'M12 12a4 4 0 1 0 0-8a4 4 0 0 0 0 8 M5 20c0-3.3 3.1-5.5 7-5.5s7 2.2 7 5.5',
+  'chevron-down': 'M6 9l6 6 6-6',
+  'chevron-up': 'M6 15l6-6 6 6',
+  'arrow-left': 'M20 12H4 M10 6l-6 6 6 6',
 }
 </script>
 <template>

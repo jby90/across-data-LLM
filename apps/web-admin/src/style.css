@@ -5,3 +5,28 @@
 @import '@fontsource/noto-naskh-arabic/400.css';
 @import '@fontsource/noto-naskh-arabic/600.css';
 @import '../../../packages/shared/src/ui/theme.css';
+
+/* 页头下一行：这一页的改动在用户端怎么生效 */
+.sync-note{margin:4px 0 0;font-size:13px;color:var(--el-color-primary-dark-2, #337ecc)}
+
+/* 管理端页头说明自适应完整换行展示，避免窄屏省略截断 */
+.app-content .page-heading > div > p {
+  max-width: 960px;
+  white-space: normal;
+  line-height: 1.65;
+}
+.app-content .page-heading > div > p + p {
+  margin-top: 4px;
+}
+
+/* 全屏汇报模式激活时锁定底层壳容器并隐藏侧栏与顶栏，防止底层滚动条与幽灵层干扰 */
+html.cy-cockpit-fullscreen,
+html.cy-cockpit-fullscreen body {
+  height: 100vh;
+  overflow: hidden;
+}
+html.cy-cockpit-fullscreen .app-sidebar,
+html.cy-cockpit-fullscreen .app-topbar {
+  visibility: hidden;
+  pointer-events: none;
+}

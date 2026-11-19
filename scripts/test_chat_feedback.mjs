@@ -3,7 +3,7 @@ import test from 'node:test'
 import {conversationStamp, conversationSignal, elapsedLabel, receiveExport} from '../apps/web-user/src/chatFeedback.ts'
 
 test('conversation signals distinguish follow-up, ready report, running and failure without country rules', () => {
-  for (const [status, tone] of [['awaiting_user_facts','amber'],['completed','green'],['partial_sample','green'],['running','blue'],['failed','red']]) {
+  for (const [status, tone] of [['awaiting_user_facts','amber'],['completed','neutral'],['partial_sample','neutral'],['running','blue'],['failed','red']]) {
     assert.equal(conversationSignal({status}).tone, tone)
     assert(conversationSignal({status}).label.length > 0)
   }

@@ -81,7 +81,7 @@ def system_scope(reason):
 def principal_identity(principal):
     role = str(principal.role)
     scope = (
-        "platform" if role == "platform_admin" else "reviewer" if role == "reviewer" else "tenant"
+        "platform" if role in ("platform_admin", "ops_admin") else "tenant"
     )
     return DatabaseIdentity(scope, principal.org_id, principal.user_id)
 

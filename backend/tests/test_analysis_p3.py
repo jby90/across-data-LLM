@@ -66,19 +66,25 @@ async def _seed_sg_corpus(session_factory):
         )
         s.add(ver)
         await s.flush()
+        from app.knowledge.models import ClauseTranslation
+
+        zh = {"26": "第26条 组织不得将个人数据转移至新加坡境外，除非依照本法规定的要求，确保接收方提供与本法相当的保护标准。",
+              "48J": "第48J条 委员会可就违反本法的行为处以财务罚款，罚款不超过订明的最高金额。"}
         for i, (num, text) in enumerate(
             [("26", TRANSFER_TEXT), ("48J", PENALTY_TEXT), (None, TOC_TEXT)]
         ):
-            s.add(
-                Clause(
-                    version_id=ver.id,
-                    ordinal=i,
-                    clause_number=num,
-                    original_text=text,
-                    text_hash=str(i) * 64,
-                    language="en",
-                )
+            clause = Clause(
+                version_id=ver.id,
+                ordinal=i,
+                clause_number=num,
+                original_text=text,
+                text_hash=str(i) * 64,
+                language="en",
             )
+            s.add(clause)
+            if num in zh:  # 已核验的中文译文（引用时只用中文，缺译文的条文不作依据）
+                await s.flush()
+                s.add(ClauseTranslation(clause_id=clause.id, translated_text=zh[num], engine="llm", model_name="fake"))
         await s.commit()
 
 
@@ -147,7 +153,6 @@ async def _wait_done(client, hdr, task_id, timeout=20):
 
 async def test_workflow_config_export_import_and_admin_only(client, seed):
     admin = bearer(await login(client, "admin", "admin@example.com"))
-    reviewer = bearer(await login(client, "admin", "reviewer@example.com"))
 
     wf = (await client.get("/api/admin/agent-studio/workflow", headers=admin)).json()
     assert wf["readonly_locked"] is True and len(wf["nodes"]) == 7
@@ -159,17 +164,9 @@ async def test_workflow_config_export_import_and_admin_only(client, seed):
     dsl = (await client.get("/api/admin/agent-studio/workflow/export", headers=admin)).json()
     dsl["workflow"]["graph"]["nodes"][0]["readonly_locked"] = False
     body = {"dsl_payload": dsl, "change_note": "单测", "activate_immediately": False}
-    # 复核员可以查看,但不能导入或激活
-    deny = await client.post("/api/admin/agent-studio/workflow/import", headers=reviewer, json=body)
-    assert deny.status_code == 403
     ok = await client.post("/api/admin/agent-studio/workflow/import", headers=admin, json=body)
     assert ok.status_code == 201
     assert all(n["readonly_locked"] for n in ok.json()["nodes"])
-    deny2 = await client.post(
-        f"/api/admin/agent-studio/workflow/versions/{wf['version_no']}/activate",
-        headers=reviewer,
-    )
-    assert deny2.status_code == 403
 
 
 async def test_fact_followup_blocks_analysis_without_model(client, seed):
@@ -354,7 +351,8 @@ async def test_chat_collects_everything_then_runs_and_reports(
     # 答非所问:不推进,重新追问同一个问题
     d = await _send(client, hdr, tid, "随便聊聊天气")
     q = _last_assistant(d)
-    assert q["slot"] == "country_code" and "没有识别出国家" in q["content"]
+    assert q["slot"] == "country_code"  # 先说明范围，再把同一个问题发一次
+    assert "没有识别出国家" in d["messages"][-2]["content"]  # 这条测试没有模型：走降级路径，如实说没认出国家
 
     d = await _send(client, hdr, tid, "新加坡 (SG)")
     assert d["country_code"] == "SG" and _last_assistant(d)["slot"] == "vehicle_model"
@@ -367,7 +365,7 @@ async def test_chat_collects_everything_then_runs_and_reports(
 
     # 太简短的回答被要求补充,不会被当作事实
     d = await _send(client, hdr, tid, "有")
-    assert "简略" in _last_assistant(d)["content"]
+    assert "简略" in " ".join(m["content"] for m in d["messages"][-3:] if m["role"] == "assistant")
     assert d["facts"] == {}
 
     for text in FACTS.values():
@@ -394,7 +392,7 @@ async def test_chat_collects_everything_then_runs_and_reports(
 async def test_chat_llm_extraction_must_quote_user_words(client, seed, monkeypatch):
     import types
 
-    from app.analysis import chat
+    from app.analysis import chat_intent, chat_reply
 
     text = "我们打算把 CYS-Pilot L4 自动驾驶 SUV 拿到新加坡做公共道路自动驾驶路测,请帮忙评估合规"
 
@@ -403,12 +401,14 @@ async def test_chat_llm_extraction_must_quote_user_words(client, seed, monkeypat
 
         return LlmResult(
             data={
-                "slots": {
+                "intents": ["provide_info"],
+                "facts": {
                     "country_code": "新加坡",
                     "vehicle_model": "CYS-Pilot L4 自动驾驶 SUV",
                     "scenario_type": "公共道路自动驾驶路测",
                     "retention_and_blackbox": "这句话用户根本没说过",
-                }
+                },
+                "answer_kind": "answer",
             },
             prompt_tokens=1,
             completion_tokens=1,
@@ -416,8 +416,8 @@ async def test_chat_llm_extraction_must_quote_user_words(client, seed, monkeypat
             model="fake",
         )
 
-    monkeypatch.setattr(chat, "call_llm_json", fake)
-    monkeypatch.setattr(chat, "get_settings", lambda: types.SimpleNamespace(llm_api_key="x"))
+    monkeypatch.setattr(chat_intent, "call_llm_json", fake)
+    monkeypatch.setattr(chat_reply, "get_settings", lambda: types.SimpleNamespace(llm_api_key="x"))
     hdr = bearer(await login(client, "user", "a-member@example.com"))
     created = (await client.post("/api/analysis/chats", headers=hdr)).json()
     d = await _send(client, hdr, created["id"], text)
@@ -449,7 +449,6 @@ async def test_conversation_id_admin_history_live_monitor_and_stage_outputs(
 
     user_hdr = bearer(await login(client, "user", "a-member@example.com"))
     admin_hdr = bearer(await login(client, "admin", "admin@example.com"))
-    reviewer_hdr = bearer(await login(client, "admin", "reviewer@example.com"))
 
     # 1. 新建对话即返回唯一可读的 conversation_code,且问候消息中包含该对话 ID
     chat_res = (await client.post("/api/analysis/chats", headers=user_hdr)).json()
@@ -520,12 +519,196 @@ async def test_conversation_id_admin_history_live_monitor_and_stage_outputs(
         == "node_dimension_analyst"
     )
 
-    # 6. 管理员可删除测试对话记录(复核员无删除权限)
-    deny_del = await client.delete(
-        f"/api/admin/agent-studio/tasks/{chat_res['id']}", headers=reviewer_hdr
-    )
-    assert deny_del.status_code == 403
+    # 6. 管理员可删除测试对话记录
     ok_del = await client.delete(
         f"/api/admin/agent-studio/tasks/{chat_res['id']}", headers=admin_hdr
     )
     assert ok_del.status_code == 200 and ok_del.json()["deleted"] is True
+
+
+async def test_guided_start_prefills_three_slots_and_asks_the_rest(client, seed):
+    hdr = bearer(await login(client, "user", "a-member@example.com"))
+    body = {
+        "country_code": "SG",
+        "vehicle_model": "CYS-Pilot L4 自动驾驶 SUV",
+        "scenario_type": "autonomous_trial",
+        "business_scene": "rnd_testing",
+    }
+    r = await client.post("/api/analysis/chats", headers=hdr, json=body)
+    assert r.status_code == 201, r.text
+    d = r.json()
+    assert d["country_code"] == "SG" and d["scenario_type"] == "autonomous_trial"
+    assert "CYS-Pilot" in d["title"]
+    last = _last_assistant(d)
+    assert last["slot"] == "exterior_video_and_gnss"  # 前三项已选，直接问第一个业务事实
+    assert "引导页的选择" in d["messages"][0]["content"]
+    assert "研发与试验阶段" in d["messages"][0]["content"]  # 业务场景与功能分开记录
+    assert d["facts"]["business_scene"].startswith("研发与试验阶段")
+    # 之后与自由对话共用同一流程：简略回答照样被要求补充
+    d = await _send(client, hdr, d["id"], "有")
+    assert "简略" in " ".join(m["content"] for m in d["messages"][-3:] if m["role"] == "assistant")
+
+
+async def test_guided_start_rejects_unknown_country_or_scenario(client, seed):
+    hdr = bearer(await login(client, "user", "a-member@example.com"))
+    ok = {
+        "country_code": "SG",
+        "vehicle_model": "某车型",
+        "scenario_type": "autonomous_trial",
+        "business_scene": "rnd_testing",
+    }
+    for bad in (
+        {"country_code": "ZZ"},
+        {"scenario_type": "nope"},
+        {"vehicle_model": " "},
+        {"business_scene": "nope"},
+        {"business_scene": None},
+    ):
+        r = await client.post("/api/analysis/chats", headers=hdr, json={**ok, **bad})
+        assert r.status_code in (422,), (bad, r.status_code)
+
+
+async def test_guided_options_come_from_the_workflow(client, seed):
+    hdr = bearer(await login(client, "user", "a-member@example.com"))
+    r = await client.get("/api/analysis/chats/guided-options", headers=hdr)
+    assert r.status_code == 200
+    d = r.json()
+    assert {c["code"] for c in d["countries"]} == {"SG", "EG", "TN", "MA", "LB"}
+    from app.analysis.workflow_engine import SCENARIO_LABELS
+
+    # 业务用途 11.08 按用户要求扩到 9 项：与平台的用途表一致，不写死个数
+    assert [f["key"] for f in d["functions"]] == list(SCENARIO_LABELS) and len(d["scenes"]) == 4
+
+
+async def test_empty_body_is_a_plain_free_chat(client, seed):
+    hdr = bearer(await login(client, "user", "a-member@example.com"))
+    r = await client.post("/api/analysis/chats", headers=hdr, json={})
+    assert r.status_code == 201, r.text
+    d = r.json()
+    assert d["status"] == "collecting_facts" and _last_assistant(d)["slot"] == "country_code"
+
+
+async def _give_versions_a_real_archive(session_factory):
+    from sqlalchemy import select
+
+    from app.core.config import get_settings
+    from app.core.rls import system_scope
+    from app.ingestion.archive import ArchiveStore
+    from app.ingestion.models import DocumentVersion
+
+    store = ArchiveStore(get_settings().archive_dir)
+    with system_scope("test archive"):
+        async with session_factory() as s:
+            for version in (await s.scalars(select(DocumentVersion))).all():
+                raw = f"fixture archive {version.id}".encode()
+                version.content_hash, version.archive_path = store.put(raw)
+                version.size_bytes = len(raw)
+            await s.commit()
+
+
+async def test_after_the_report_a_changed_fact_updates_only_its_dimension_and_adds_a_version(
+    client, seed, session_factory, monkeypatch
+):
+    from app.analysis import pipeline
+
+    await _seed_sg_corpus(session_factory)
+    await _give_versions_a_real_archive(session_factory)  # 沿用其他维度结果前要核对原文归档
+    monkeypatch.setattr(pipeline, "call_llm_json", _fake_llm_factory(bad_first=False))
+    hdr = bearer(await login(client, "user", "a-member@example.com"))
+    created = (await client.post("/api/analysis/chats", headers=hdr)).json()
+    tid = created["id"]
+    for text in ("新加坡 (SG)", "CYS-Pilot L4 自动驾驶 SUV", "L3/L4 自动驾驶公共道路测试与远程监控回传", *FACTS.values()):
+        await _send(client, hdr, tid, text)
+    done = await _wait_done(client, hdr, tid)
+    assert done["status"] in ("completed", "partial_sample")
+    assert len(done["report_versions"]) == 1
+    before_messages = len(done["messages"])
+
+    # 没认出任何要改的事实：只给说明，不重跑
+    d = await _send(client, hdr, tid, "谢谢")
+    assert "新的报告版本" in _last_assistant(d)["content"] and d["status"] == done["status"]
+
+    # 报告完成后说明一项事实变化：只更新这一项、重新分析受影响的维度、新增版本
+    new_text = "改成车端不再做模糊处理，原始视频直接回传研发中心"
+
+    from . import chat_fakes
+
+    chat_fakes.install(
+        monkeypatch,
+        rules=[(("不再做模糊",), {"intents": ["correct_info"], "corrections": {"exterior_video_and_gnss": new_text}})],
+    )
+    d = await _send(client, hdr, tid, new_text)
+    assert d["facts"]["exterior_video_and_gnss"] == new_text
+    assert d["facts"]["cross_border_mechanism"] == FACTS["cross_border_mechanism"]  # 其他事实不动
+    assert "新的报告版本" in _last_assistant(d)["content"]
+    again = await _wait_done(client, hdr, tid)
+    assert again["status"] in ("completed", "partial_sample")
+    assert len(again["report_versions"]) == 2  # 历史版本保留
+    assert len(again["messages"]) > before_messages  # 对话历史保留，同一个窗口继续用
+
+    # 第二次运行真的只分析了受影响的维度（D2 对应“采集的数据与匿名化”），其余沿用
+    import uuid
+
+    from sqlalchemy import select
+
+    from app.analysis.models import AnalysisStepTrace
+    from app.core.rls import system_scope
+
+    with system_scope("test traces"):
+        async with session_factory() as s:
+            rows = (
+                await s.scalars(
+                    select(AnalysisStepTrace)
+                    .where(AnalysisStepTrace.task_id == uuid.UUID(tid), AnalysisStepTrace.phase == "analysis")
+                    .order_by(AnalysisStepTrace.seq_no)
+                )
+            ).all()
+    assert len(rows) >= 2
+    first, last = rows[0].output_snapshot_json, rows[-1].output_snapshot_json
+    assert len(first["dimensions_analysed"]) > len(last["dimensions_analysed"])
+    assert "D2" in last["dimensions_analysed"]
+
+
+async def test_a_user_who_does_not_know_how_to_begin_is_helped_not_refused(client, seed, monkeypatch):
+    import types
+
+    from app.analysis import chat_reply
+
+    from . import chat_fakes
+
+    chat_fakes.install(monkeypatch)
+    monkeypatch.setattr(chat_reply, "get_settings", lambda: types.SimpleNamespace(llm_api_key=""))  # 求助回复用固定说明
+    hdr = bearer(await login(client, "user", "a-member@example.com"))
+    created = (await client.post("/api/analysis/chats", headers=hdr)).json()
+    d = await _send(client, hdr, created["id"], "我不太懂，不知道怎么开始")
+    last = _last_assistant(d)
+    said = " ".join(m["content"] for m in d["messages"][-3:] if m["role"] == "assistant")
+    assert "汽车数据出境合规" in said and "不确定" in said
+    assert "不作回答" not in said  # 不是“与评估无关，不回答”
+    assert last["slot"] == "country_code" and len(last["options"]) == 5  # 说明之后，问题单独再发一次，给出选项
+    assert d["facts"] == {} and d["country_code"] == "--"  # 什么也没有被当成事实记下
+
+
+async def test_a_one_off_model_failure_is_retried_and_does_not_lose_the_message(monkeypatch):
+    from app.analysis import chat, chat_intent
+    from app.analysis.llm import LlmResult, LlmUnavailableError
+
+    calls = {"n": 0}
+
+    async def flaky(messages, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LlmUnavailableError("偶发失败")
+        return LlmResult(
+            data={"intents": ["provide_info"], "facts": {"vehicle_model": "L4 自动驾驶 SUV"}, "answer_kind": "answer"},
+            prompt_tokens=1, completion_tokens=1, duration_ms=1, model="fake",
+        )
+
+    monkeypatch.setattr(chat_intent, "call_llm_json", flaky)
+    ctx = chat_intent.IntentCtx(
+        stage="collecting", slot="vehicle_model", question="车型？", files=[], recent=[],
+        slots={"vehicle_model": {"describe": "车型", "filled": False, "value": ""}},
+    )
+    u = await chat_intent.understand("我们的车型是 L4 自动驾驶 SUV，打算在摩洛哥做公共道路测试", ctx, match_country=chat.match_country, match_scenario=chat.match_scenario)
+    assert u.ok and u.via == "model" and u.facts == {"vehicle_model": "L4 自动驾驶 SUV"} and calls["n"] == 2
+    assert chat.match_scenario("在摩洛哥做公共道路测试") == "autonomous_trial"  # 常见说法也能识别为功能

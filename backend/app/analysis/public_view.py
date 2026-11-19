@@ -56,6 +56,10 @@ CITATION_FIELDS = {
 }
 
 
+# 模型名、用量、提示词版本和校验诊断只给管理端
+CONSULTING_INTERNAL = {"model", "tokens", "prompt_version", "validation"}
+
+
 class PublicTaskDetail(AnalysisTaskDetailOut):
     model_config = ConfigDict(from_attributes=True)
     step_traces: list = Field(exclude=True)
@@ -89,6 +93,10 @@ class PublicTaskDetail(AnalysisTaskDetailOut):
                     {k: v for k, v in citation.items() if k in CITATION_FIELDS}
                     for citation in dimension["citations"]
                 ]
+            if data.get("consulting"):
+                data["consulting"] = {
+                    k: v for k, v in data["consulting"].items() if k not in CONSULTING_INTERNAL
+                }
             result.append(data)
         return result
 
@@ -103,19 +111,30 @@ class PublicTaskDetail(AnalysisTaskDetailOut):
     @property
     def progress(self) -> list[dict[str, str]]:
         stages = {}
-        boundary = max((
-            i for i, tr in enumerate(self.step_traces)
-            if (tr.phase if hasattr(tr, "phase") else tr.get("phase")) == "fact_check"
-        ), default=0)
+        boundary = max(
+            (
+                i
+                for i, tr in enumerate(self.step_traces)
+                if (tr.phase if hasattr(tr, "phase") else tr.get("phase")) == "fact_check"
+            ),
+            default=0,
+        )
         for tr in self.step_traces[boundary:]:
             phase = tr.phase if hasattr(tr, "phase") else tr.get("phase")
             status = tr.status if hasattr(tr, "status") else tr.get("status")
             if phase in PHASES:
-                stages[phase] = {"label": PHASES[phase], "state": (
-                    "failed" if status == "failed" else
-                    "waiting" if status == "awaiting_user_facts" else
-                    "warning" if status in {"warning", "backtracked"} else "complete"
-                )}
+                stages[phase] = {
+                    "label": PHASES[phase],
+                    "state": (
+                        "failed"
+                        if status == "failed"
+                        else "waiting"
+                        if status == "awaiting_user_facts"
+                        else "warning"
+                        if status in {"warning", "backtracked"}
+                        else "complete"
+                    ),
+                }
         result = list(stages.values())
         if self.status == "awaiting_user_facts":
             result.append({"label": "请补充业务信息", "state": "waiting"})

@@ -1,0 +1,89 @@
+{
+ "all": {
+  "n": 310,
+  "accuracy": 0.964516129032258,
+  "confusion": {
+   "high->high": 1,
+   "high->low": 1,
+   "low->high": 1,
+   "low->low": 282,
+   "low->medium": 1,
+   "medium->high": 1,
+   "medium->low": 7,
+   "medium->medium": 16
+  },
+  "recall": {
+   "high": {
+    "n": 2,
+    "recall": 0.5
+   },
+   "medium": {
+    "n": 24,
+    "recall": 0.6666666666666666
+   },
+   "low": {
+    "n": 284,
+    "recall": 0.9929577464788732
+   }
+  },
+  "agreed_n": 305,
+  "agreed_accuracy": 0.9672131147540983
+ },
+ "dev": {
+  "n": 130,
+  "accuracy": 0.9692307692307692,
+  "confusion": {
+   "high->high": 1,
+   "high->low": 1,
+   "low->low": 122,
+   "medium->high": 1,
+   "medium->low": 2,
+   "medium->medium": 3
+  },
+  "recall": {
+   "high": {
+    "n": 2,
+    "recall": 0.5
+   },
+   "medium": {
+    "n": 6,
+    "recall": 0.5
+   },
+   "low": {
+    "n": 122,
+    "recall": 1.0
+   }
+  },
+  "agreed_n": 129,
+  "agreed_accuracy": 0.9767441860465116
+ },
+ "test": {
+  "n": 180,
+  "accuracy": 0.9611111111111111,
+  "confusion": {
+   "low->high": 1,
+   "low->low": 160,
+   "low->medium": 1,
+   "medium->low": 5,
+   "medium->medium": 13
+  },
+  "recall": {
+   "medium": {
+    "n": 18,
+    "recall": 0.7222222222222222
+   },
+   "low": {
+    "n": 162,
+    "recall": 0.9876543209876543
+   }
+  },
+  "agreed_n": 176,
+  "agreed_accuracy": 0.9602272727272727
+ },
+ "not_graded": 0,
+ "label_distribution": {
+  "low": 284,
+  "high": 2,
+  "medium": 24
+ }
+}

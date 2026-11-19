@@ -69,12 +69,12 @@ export function groupByLaw<N extends DisplayNode, E extends DisplayEdge>(nodes: 
     if (!ids.size) {
       const fromClause = e.evidence_clause_id ? clauseGroups.get(e.evidence_clause_id) : undefined
       const fromTitle = e.document_title ? titles.get(e.document_title) : undefined
-      if (fromClause?.size === 1) ids = fromClause
-      else if (fromTitle?.size === 1) ids = fromTitle
+      if (fromClause?.size) ids = fromClause
+      else if (fromTitle?.size) ids = fromTitle
     }
     if (!ids.size) {
       if (!groups.has(UNASSIGNED_GROUP)) groups.set(UNASSIGNED_GROUP, {
-        id: UNASSIGNED_GROUP, name: '其他关联（法规归属待定位）', instrumentIds: [], edges: [],
+        id: UNASSIGNED_GROUP, name: '国家与监管体系总览（跨法规顶层关联）', instrumentIds: [], edges: [],
       })
       ids = new Set([UNASSIGNED_GROUP])
     }
@@ -132,7 +132,7 @@ export function projectOverviewNodes<N extends DisplayNode, E extends DisplayEdg
   }
   const instruments = new Set(groups.flatMap(g => g.instrumentIds))
   return nodes
-    .filter(n => degree.has(n.id) || (n.node_type === 'INSTRUMENT' && instruments.has(n.id)))
+    .filter(n => degree.has(n.id) || n.node_type === 'COUNTRY' || (n.node_type === 'INSTRUMENT' && instruments.has(n.id)))
     .map(n => ({ id: n.id, name: n.name_zh, type: n.node_type, degree: degree.get(n.id) || 0 }))
     .sort((a, b) => a.id.localeCompare(b.id))
 }

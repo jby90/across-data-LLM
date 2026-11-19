@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" width="960" height="620" font-family="Microsoft YaHei, PingFang SC, Noto Sans SC, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+  </defs>
+  <rect width="960" height="620" fill="#ffffff"/>
+
+  <!-- inputs -->
+  <rect x="40" y="16" width="360" height="56" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="220" y="40" text-anchor="middle" font-size="15" font-weight="600" fill="#0f172a">已核验的法律依据</text>
+  <text x="220" y="60" text-anchor="middle" font-size="12.5" fill="#475569">原文可追溯 · 来自检索与逐句核验</text>
+  <rect x="440" y="16" width="360" height="56" rx="8" fill="#f1f5f9" stroke="#94a3b8"/>
+  <text x="620" y="40" text-anchor="middle" font-size="15" font-weight="600" fill="#0f172a">客户的业务事实</text>
+  <text x="620" y="60" text-anchor="middle" font-size="12.5" fill="#475569">通过对话逐项收集 · 缺什么就问什么</text>
+  <line x1="220" y1="72" x2="220" y2="98" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="620" y1="72" x2="620" y2="98" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- L1 -->
+  <rect x="40" y="100" width="760" height="66" rx="8" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="60" y="126" font-size="15" font-weight="700" fill="#1e3a8a">一  证据封闭层</text>
+  <text x="60" y="150" font-size="13" fill="#334155">每条依据一个唯一编号，组成“证据账本”。模型能引用的法律知识，只有账本里的内容。</text>
+  <line x1="420" y1="166" x2="420" y2="190" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- L2 -->
+  <rect x="40" y="192" width="760" height="112" rx="8" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="60" y="218" font-size="15" font-weight="700" fill="#1e3a8a">二  分析层：八个方面并行成文</text>
+  <text x="60" y="238" font-size="13" fill="#334155">每个方面独立对照“法律要求 vs 客户现状”，给出判断、理由、整改建议</text>
+  <g font-size="12" fill="#1e3a8a" text-anchor="middle">
+    <rect x="60"  y="252" width="86" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="103" y="274">法规体系</text>
+    <rect x="154" y="252" width="86" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="197" y="274">数据定义分类</text>
+    <rect x="248" y="252" width="86" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="291" y="274">跨境传输</text>
+    <rect x="342" y="252" width="86" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="385" y="274">授权告知同意</text>
+    <rect x="436" y="252" width="86" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="479" y="274">存储留存销毁</text>
+    <rect x="530" y="252" width="86" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="573" y="274">违规处罚追责</text>
+    <rect x="624" y="252" width="86" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="667" y="274">市场准入</text>
+    <rect x="718" y="252" width="72" height="34" rx="6" fill="#ffffff" stroke="#93c5fd"/><text x="754" y="274">整改落地</text>
+  </g>
+  <line x1="420" y1="304" x2="420" y2="328" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- L3 -->
+  <rect x="40" y="330" width="760" height="76" rx="8" fill="#fefce8" stroke="#ca8a04"/>
+  <text x="60" y="356" font-size="15" font-weight="700" fill="#713f12">三  裁决层：模型提议，规则裁决</text>
+  <text x="60" y="380" font-size="13" fill="#334155">引用是否真实、数字是否有来源、是否照抄原文、风险是否由程序算出、依赖是否成环。</text>
+  <text x="60" y="398" font-size="13" fill="#334155">不通过：带着问题清单让模型重写；仍不通过：只隔离这一个方面，其余照常交付。</text>
+  <path d="M800,368 C838,368 838,262 806,262" fill="none" stroke="#ca8a04" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a)"/>
+  <text x="846" y="320" font-size="12" fill="#92400e">重写</text>
+  <line x1="420" y1="406" x2="420" y2="430" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- L4 -->
+  <rect x="40" y="432" width="760" height="76" rx="8" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="60" y="458" font-size="15" font-weight="700" fill="#1e3a8a">四  综合收敛层：把八份意见合成一份报告</text>
+  <text x="60" y="482" font-size="13" fill="#334155">总体判定与“先做三件事” · 同一件事合并为一条 · 先后依赖排序，分三阶段 · 风险按根因去重</text>
+  <text x="60" y="500" font-size="13" fill="#334155">参考文献编号统一分配，正文角标与文末一一对应</text>
+  <line x1="420" y1="508" x2="420" y2="532" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- L5 -->
+  <rect x="40" y="534" width="760" height="70" rx="8" fill="#f0fdf4" stroke="#16a34a"/>
+  <text x="60" y="558" font-size="15" font-weight="700" fill="#14532d">五  呈现层：一份内容，多种交付</text>
+  <text x="60" y="580" font-size="13" fill="#334155">先生成与格式无关的“内容块”，再分别渲染：</text>
+  <g font-size="12.5" fill="#14532d" text-anchor="middle">
+    <rect x="420" y="566" width="110" height="26" rx="6" fill="#ffffff" stroke="#86efac"/><text x="475" y="584">Word 文档</text>
+    <rect x="540" y="566" width="110" height="26" rx="6" fill="#ffffff" stroke="#86efac"/><text x="595" y="584">PDF</text>
+    <rect x="660" y="566" width="124" height="26" rx="6" fill="#ffffff" stroke="#86efac"/><text x="722" y="584">页面在线阅读</text>
+  </g>
+
+  <!-- side bar -->
+  <rect x="836" y="100" width="104" height="504" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="4 3"/>
+  <text x="888" y="132" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">贯穿全流程</text>
+  <g font-size="12.5" fill="#475569" text-anchor="middle">
+    <text x="888" y="164">版本快照</text><text x="888" y="184">历史可复现</text>
+    <text x="888" y="224">人工编辑保护</text><text x="888" y="244">重评估不覆盖</text>
+    <text x="888" y="284">审计轨迹</text><text x="888" y="304">被拒输出可追查</text>
+    <text x="888" y="344">功能开关</text><text x="888" y="364">可回到旧版</text>
+  </g>
+</svg>

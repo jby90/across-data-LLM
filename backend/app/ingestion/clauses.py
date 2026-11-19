@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """通用条款切分。
 
 识别的编号样式:
@@ -26,19 +27,36 @@ _CN_NUM = "一二三四五六七八九十百千零〇两"
 # 关键词式/中文/阿拉伯文编号:无需递增校验
 _KEYWORD_PATTERNS: list[re.Pattern[str]] = [
     re.compile(
-        r"^(?:Section|SECTION|Article|ARTICLE|Art\.|Regulation|REGULATION|Rule|RULE|Clause|CLAUSE)\s+"
-        r"(?P<num>\d+[A-Za-z]?(?:\.\d+)*|[Pp]remier|1er)\b[\s.:—–-]*(?P<rest>.*)$",
+        r"^(?:(?:Section|SECTION|Article|ARTICLE|Regulation|REGULATION|Rule|RULE|Clause|CLAUSE|Art|ART)\s+|(?:Art|ART)[.,]\s*)"
+        r"(?P<num>\d+[A-Za-z]?(?:\.\d+)*|[Pp]remier|PREMIER|1er)\b(?!\s*(?:Rev\.?\s*)?Ed\.?\b)[\s.:—–-]*(?P<rest>.*)$",
     ),
     re.compile(rf"^第(?P<num>[{_CN_NUM}\d]+)条[\s、.:：]*(?P<rest>.*)$"),
-    re.compile(rf"^(?:المادة|مادة)\s+(?P<num>[\d{_ARABIC_DIGITS}]+|\S+)[\s:：.\-–—]*(?P<rest>.*)$"),
+    # 德语区及其他大陆法系法条以“§ 12”“§ 12a”开头（编号后可接标题，也可单独成行）
+    re.compile(r"^§\s*(?P<num>\d+[a-z]?)\b[\s.:—–-]*(?P<rest>.*)$"),
+    # “المادة”偶尔被读成“المسادة”（书法拉长）或“املادة”（OCR 字母颠倒、夹 \ufffe/\ufffd），一并认作标题
+    re.compile(
+        rf"^(?:ال[\ufffe]*م(?:س)?|ام[\ufffe]*ل|م(?:س)?)[\ufffe]*ادة(?:\s+|\s*[:：]\s*)[\ufffe\ufffd]*(?P<num>[\d{_ARABIC_DIGITS}]+|\S+)[\s:：.\-–—]*(?P<rest>.*)$"
+    ),
+    # 突尼斯法律的条标题是“الفصل”加数字；后面不是数字的“الفصل الأول”是章标题，不在此列
+    re.compile(
+        rf"^(?:ال)?فصل[\s:：]*\(?(?P<num>[\d{_ARABIC_DIGITS}]+)\)?[\s:：.\-–—]*(?P<rest>.*)$"
+    ),
 ]
+# 突尼斯式法律把第一条写成“الفصل الأول :”。只有整份文件用“الفصل N”给条编号时才这样认：
+# 用“المادة N”编号的法律里，“الفصل الأول :”是章标题，认成第 1 条会把条号序列重置
+_FASL_FIRST = re.compile(r"^(?:ال)?فصل\s+(?P<num>الأول|الاول)\s*[:：](?P<rest>.*)$")
+_FASL_NUMBERED = re.compile(rf"^(?:ال)?فصل[\s:：]*\(?[\d{_ARABIC_DIGITS}]+\)?")
+_MADDA_NUMBERED = re.compile(rf"^(?:ال[\ufffe]*م(?:س)?|ام[\ufffe]*ل|م(?:س)?)[\ufffe]*ادة[\s:：]*\(?[\d{_ARABIC_DIGITS}]+\)?")
 # 新加坡法条:26.—(1) / 26A. In this ... / 15B. In proceedings ...
 # 点号后必须跟空格或破折号:避免把日期 31.12.2021 误当成第 31 条
-_SG_SECTION = re.compile(r"^(?P<num>\d{1,3}[A-Z]{0,3})\.(?:\s*[—–-]\s*|\s+)(?P<rest>\S.*)$")
-# 两级编号:1.1 text / 19.4(正文可在后面行)
-_DECIMAL = re.compile(r"^(?P<num>\d{1,3}\.\d{1,3}(?:\.\d{1,3})?)[.)]?(?:\s+(?P<rest>\S.*))?\s*$")
+_ARTICLE_HEAD = re.compile(r"^(?:(?:Article|ARTICLE|Art|ART)\s+|(?:Art|ART)[.,]\s*)(?:\d+|[Pp]remier|PREMIER)\b")
+_SECTION_WORD = re.compile(r"^(?:Section|SECTION)\s+\d")
+_AR_FIRST = ("الأول", "الاول")
+_SG_SECTION = re.compile(r"^(?P<num>\d{1,3}[A-Z]{0,3})\.(?:\s*[—–-]\s*|\s+)(?!(?:Rev\.?\s*)?Ed\.?\b)(?P<rest>\S.*)$")
+# 多级小数编号:1.1 text / 19.4 / 3.1.1.1(最多六级,正文可在后面行)
+_DECIMAL = re.compile(r"^(?P<num>\d{1,3}(?:\.\d{1,3}){1,5})[.)]?(?:\s+(?P<rest>\S.*))?\s*$")
 # 通用"1. Text"(要求首字母大写/引号/括号开头,减少误判)
-_SIMPLE = re.compile(r"^(?P<num>\d{1,3})[.)]\s+(?P<rest>[A-Z“\"(].*)$")
+_SIMPLE = re.compile(r"^(?P<num>\d{1,3})[.)]\s+(?!(?:Rev\.?\s*)?Ed\.?\b)(?P<rest>[A-Z“\"(].*)$")
 
 _PART = re.compile(
     r"^(?P<kind>PART|CHAPTER|DIVISION|Part|Chapter)\s+(?P<id>\d+[A-Z]?|[IVXLC]+[A-Z]?)\b"
@@ -89,21 +107,55 @@ def match_header(line: str) -> tuple[str, str | None] | None:
     return None
 
 
+def is_article_heading(line: str) -> bool:
+    """A line that opens an article by keyword (Article 5 / المادة (5) / 第5条 / الفصل 5).
+
+    Page-furniture detection must never treat such a line as a repeating page header: with the
+    digits normalised, every article heading of a law looks identical."""
+    stripped = line.strip()
+    return any(pattern.match(stripped) for pattern in _KEYWORD_PATTERNS)
+
+
 _AR_TO_ASCII = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 
 
-def _key(num: str) -> tuple[int, int, str]:
-    """编号的排序键:26A -> (26,0,'A');19.4 -> (19,4,'');15.12.3 取前两级;premier -> (1,0,'')。"""
-    num = num.translate(_AR_TO_ASCII)
-    if num.lower() in ("premier", "1er"):
-        return 1, 0, ""
+def clean_number(num: str | None) -> str | None:
+    """A clause number without the dash that right-to-left typesetting leaves beside it
+    (``المادة 1-`` is read as ``-1``) or the colon some gazettes print before it."""
+    if num is None:
+        return None
+    cleaned = num.strip().strip("-–—−").strip()
+    # “المادة :89” 这种排版把冒号留在编号前，条号是 89，不是 “:89”
+    cleaned = cleaned.lstrip(":：").strip()
+    return cleaned or None
+
+
+def article_number(num: str | None) -> int | None:
+    """The integer of a plain article number: ``12``, ``(12)``, ``-12``, Arabic-Indic digits.
+    Lettered (``12a``) and decimal (``1.2``) numbers are not plain article numbers."""
+    if not num:
+        return None
+    cleaned = num.strip().strip("()-–—−").strip().lstrip(":：").strip().translate(_AR_TO_ASCII)
+    if cleaned.lower() in ("premier", "première", "1er", "1ère") or cleaned in _AR_FIRST:
+        return 1  # 法文、阿文“第一条”
+    return int(cleaned) if cleaned.isascii() and cleaned.isdigit() and len(cleaned) <= 4 else None
+
+
+_SortKey = tuple[int, tuple[int, ...], str]
+
+
+def _key(num: str) -> _SortKey:
+    """编号的排序键:26A -> (26,(),'A');19.4 -> (19,(4,),'');3.1.1.1 -> (3,(1,1,1),'');premier -> (1,(),'')。"""
+    num = num.translate(_AR_TO_ASCII).strip("()")  # 条号头补全后写作“(120)”
+    if num.lower() in ("premier", "1er") or num in _AR_FIRST:
+        return 1, (), ""
     if "." in num:
-        parts = num.split(".")
-        return int(parts[0]), int(parts[1]), ""
+        parts = [int(p) for p in num.split(".")]
+        return parts[0], tuple(parts[1:]), ""
     m = re.match(r"^(\d+)([A-Z]*)$", num)
     if not m:
         raise ValueError(num)
-    return int(m.group(1)), 0, m.group(2)
+    return int(m.group(1)), (), m.group(2)
 
 
 def _numeric_header(line: str) -> tuple[str, str, str] | None:
@@ -172,7 +224,7 @@ def _toc_pages(pages: list[str]) -> set[int]:
     return toc
 
 
-def _longest_chain(cands: list[tuple[int, str, str, tuple[int, int, str], int]]) -> list[int]:
+def _longest_chain(cands: list[tuple[int, str, str, _SortKey, int]]) -> list[int]:
     """在候选(行号, 编号, 模式, 排序键, 段)中,选出最长的"严格递增且每步跳跃不大"的链,返回候选下标。
 
     比逐个判断更稳:修订法案里引用的"新增条文"(如 29A.—(1))编号会和正文编号交错,
@@ -199,7 +251,7 @@ def _longest_chain(cands: list[tuple[int, str, str, tuple[int, int, str], int]])
 
 def _choose_numeric(flat: list[tuple[int, str]], toc_pages: set[int]) -> tuple[set[int], int]:
     """决定哪些数字编号行是真正的条款开头。返回 (被接受的行下标集合, 接受的数量)。"""
-    cands: list[tuple[int, str, str, tuple[int, int, str], int]] = []
+    cands: list[tuple[int, str, str, _SortKey, int]] = []
     seg = 0
     for idx, (page_no, line) in enumerate(flat):
         if page_no in toc_pages:
@@ -255,6 +307,52 @@ class _Raw:
     seq: int  # 所属编号序列(目录/正文/附表各是一个序列)
 
 
+# 行中间的条标题：版面把几条排在同一行时（“……。الفصل 12 : يتولى ……”），条标题不在行首，
+# 按行首识别会把几条并成一条。只在“编号恰好接着上一条往下数”时才从行中拆开，
+# 前面是字母的“بالفصل 12”之类引用、没有冒号或破折号的“الفصل 12 من هذا القانون”都不会被拆
+_INLINE_HEADING = re.compile(
+    r"(?<![\w؀-ۿ])(?:(?:ال)?فصل|(?:ال[\ufffe]*م(?:س)?|ام[\ufffe]*ل|م(?:س)?)[\ufffe]*ادة|(?:Art|ART)(?:icle\b|[.,])?)\s*[:：]?\s*"
+    r"(?P<num>\d{1,3})\s*(?:[:：.]|\s[-–—]\s)"
+)
+_LEADING_NUMBER = re.compile(
+    r"^\s*(?:(?:ال)?فصل|(?:ال[\ufffe]*م(?:س)?|ام[\ufffe]*ل|م(?:س)?)[\ufffe]*ادة|(?:Art|ART)(?:icle\b|[.,])?)[\s:：]*\(?(?P<num>\d{1,3})\b"
+)
+_INLINE_MAX_SKIP = 2
+
+
+def split_inline_headings(pages: list[str]) -> list[str]:
+    """Break a line before an article heading that sits in the middle of it."""
+    last = 0
+    out: list[str] = []
+    for page in pages:
+        lines: list[str] = []
+        for line in page.splitlines():
+            lead = _LEADING_NUMBER.match(line)
+            if lead:
+                n = int(lead.group("num"))
+                if last < n <= last + _INLINE_MAX_SKIP + 1 or n == 1:
+                    last = n
+            cut = 0
+            while True:
+                found = next(
+                    (
+                        m
+                        for m in _INLINE_HEADING.finditer(line, cut + 1 if cut else 1)
+                        if last < int(m.group("num")) <= last + _INLINE_MAX_SKIP
+                    ),
+                    None,
+                )
+                if found is None:
+                    break
+                lines.append(line[: found.start()].rstrip())
+                line = line[found.start() :]
+                last = int(found.group("num"))
+                cut = 0
+            lines.append(line)
+        out.append("\n".join(x for x in lines if x.strip()))
+    return out
+
+
 def _split_numbered(pages: list[str]) -> list[_Raw]:
     raws: list[_Raw] = []
     current: _Raw | None = None
@@ -264,8 +362,8 @@ def _split_numbered(pages: list[str]) -> list[_Raw]:
     schedule_label: str | None = None
     toc_pages = _toc_pages(pages)
     toc_raw: _Raw | None = None
-    last_key: tuple[int, int, str] | None = None
-    kw_last: tuple[int, int, str] | None = None
+    last_key: _SortKey | None = None
+    kw_last: _SortKey | None = None
     seq = 0
 
     def compute_path() -> str | None:
@@ -295,6 +393,37 @@ def _split_numbered(pages: list[str]) -> list[_Raw]:
         if pg not in toc_pages and any(pat.match(ln.strip()) for pat in _KEYWORD_PATTERNS)
     )
     numeric_style = numeric_count >= 2 and numeric_count >= keyword_count
+    # 法国式法律：条用“Article N / ART. N”，章节用“Section 1. – De la …”。
+    # 文件里已有足够多的条标题时，
+    # “Section N”是章节标题，不是条——否则它把条号序列重置为 1，后面整段条被当成交叉引用丢掉
+    article_heads = sum(
+        1 for pg, ln in flat if pg not in toc_pages and _ARTICLE_HEAD.match(ln.strip())
+    )
+    sections_are_structure = article_heads >= 5
+    fasl_heads = sum(
+        1 for pg, ln in flat if pg not in toc_pages and _FASL_NUMBERED.match(ln.strip())
+    )
+    madda_heads = sum(
+        1 for pg, ln in flat if pg not in toc_pages and _MADDA_NUMBERED.match(ln.strip())
+    )
+    first_as_article = fasl_heads >= 5 and madda_heads < 5
+    # where each article number is headed in the text: a heading that jumps ahead is a reference to
+    # another article ("Article 34 of this Act") when the number that should come next still
+    # follows later in the text
+    heads_by_number: dict[int, list[int]] = {}
+    for idx, (pg, ln) in enumerate(flat):
+        if pg in toc_pages:
+            continue
+        for pat in _KEYWORD_PATTERNS:
+            hm = pat.match(ln.strip())
+            if hm:
+                try:
+                    hk = _key(hm.group("num"))
+                except ValueError:
+                    break
+                if not hk[2]:
+                    heads_by_number.setdefault(hk[0], []).append(idx)
+                break
 
     i = 0
     while i < len(flat):
@@ -392,15 +521,21 @@ def _split_numbered(pages: list[str]) -> list[_Raw]:
 
         # ---- 关键词/中文/阿拉伯文编号 ----
         header: tuple[str, str | None] | None = None
-        for pattern in _KEYWORD_PATTERNS:
+        for pattern in (*_KEYWORD_PATTERNS, *([_FASL_FIRST] if first_as_article else [])):
             m = pattern.match(s)
             if m:
                 rest = m.group("rest").strip()
                 header = (m.group("num"), rest if rest and len(rest) <= _MAX_HEADING_LEN else None)
                 break
+        if header is not None and sections_are_structure and _SECTION_WORD.match(s):
+            division_label = s
+            path = compute_path()
+            current = None
+            i += 1
+            continue
         if header is not None:
             try:
-                hkey: tuple[int, int, str] | None = _key(header[0])
+                hkey: _SortKey | None = _key(header[0])
             except ValueError:
                 hkey = None  # 中文数字等无法比较:不做递增校验
             ok = True
@@ -408,8 +543,11 @@ def _split_numbered(pages: list[str]) -> list[_Raw]:
                 ok = False  # 本文件用数字编号,行首的 "Article 29 of ..." 是交叉引用
             elif hkey is not None and kw_last is not None:
                 if hkey > kw_last and hkey[0] - kw_last[0] <= _MAX_JUMP:
-                    ok = True
-                elif hkey[0] == 1 and hkey[1] <= 1 and kw_last[0] > 3 and not hkey[2]:
+                    ok = not (
+                        hkey[0] - kw_last[0] > 1
+                        and any(j > i for j in heads_by_number.get(kw_last[0] + 1, ()))
+                    )
+                elif hkey[0] == 1 and hkey[1][:1] <= (1,) and kw_last[0] > 3 and not hkey[2]:
                     new_sequence()  # 回到 1:新的序列(如附件)
                 else:
                     ok = False  # 行首的交叉引用(如 "Article 29 of the GDPR ..."),不是新条款
@@ -481,7 +619,34 @@ def _chunk_by_size(pages: list[str]) -> list[ClauseDraft]:
     return drafts
 
 
+def _drop_stray_lead(raws: list[_Raw]) -> list[_Raw]:
+    """A note in the head of a document ("Art. 13 ... entered into force") can look like the
+    first article. When the numbering then restarts lower, in a sequence of its own, the first
+    block was not a clause: its text stays with the preamble and it loses the number."""
+    numbered = [i for i, r in enumerate(raws) if r.number is not None]
+    if len(numbered) < 3:
+        return raws
+    first, second = numbered[0], numbered[1]
+    try:
+        k1, k2 = _key(raws[first].number or ""), _key(raws[second].number or "")
+    except ValueError:
+        return raws
+    # a real sequence (a contents list before the body, an annex after it) has several members;
+    # a lone numbered block that is followed by a sequence restarting lower is a note
+    alone = all(r.seq != raws[first].seq for r in raws[first + 1 :] if r.number is not None)
+    if k2 >= k1 or not alone:
+        return raws
+    lead = raws[first]
+    if first > 0 and raws[first - 1].number is None:
+        raws[first - 1].lines.extend(lead.lines)
+        raws[first - 1].page_end = lead.page_end
+        return [r for i, r in enumerate(raws) if i != first]
+    lead.number, lead.heading = None, None
+    return raws
+
+
 def _build(raws: list[_Raw]) -> list[ClauseDraft]:
+    raws = _drop_stray_lead(raws)
     drafts: list[ClauseDraft] = []
     for r in raws:
         text = "\n".join(r.lines).strip()
@@ -490,7 +655,7 @@ def _build(raws: list[_Raw]) -> list[ClauseDraft]:
         drafts.append(
             ClauseDraft(
                 ordinal=len(drafts),
-                clause_number=r.number,
+                clause_number=clean_number(r.number),
                 heading=r.heading,
                 text=text,
                 page_start=r.page_start,
@@ -508,7 +673,7 @@ def split_clauses(
 
     paragraph_mode: 退化为段落切分时的依据,blank=空行(文本),line=每行(HTML)。
     """
-    raws = _split_numbered(pages)
+    raws = _split_numbered(split_inline_headings(pages))
     numbered = [r for r in raws if r.number is not None]
     if any(r.path and r.path.startswith(("TABLE /", "REFERENCE /")) for r in raws):
         return _build(raws), "layout"

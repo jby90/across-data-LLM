@@ -461,3 +461,54 @@ async def test_failed_retained_repair_keeps_checks_and_reports_actual_failure_st
             list((await session.execute(select(Clause.id, Clause.original_text))).all())
             == source_before
         )
+
+
+async def test_an_answer_to_a_merged_question_reaches_every_fact_key_it_stands_for(monkeypatch):
+    import uuid
+    from types import SimpleNamespace
+
+    from app.analysis import pipeline as pipe
+    from app.analysis import user_facts
+
+    async def no_trace(*args, **kwargs):
+        return None
+
+    async def no_message(*args, **kwargs):
+        return None
+
+    async def no_ask(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(pipe, "_add_trace", no_trace)
+    monkeypatch.setattr("app.analysis.chat.add_message", no_message)
+    monkeypatch.setattr(user_facts, "ask_next", no_ask)
+    qid = str(uuid.uuid4())
+    task = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="awaiting_user_facts",
+        workflow_version_id=uuid.uuid4(),
+        facts_json={"scenario": "x"},
+        fact_followup_history_json=[],
+        fact_followup_rounds=1,
+        pending_user_facts_json=[
+            {
+                "fact_key": "pdpc_cross_border_authorization",
+                "id": qid,
+                "dimension_codes": ["D1", "D3"],
+                "also_answers": ["cross_border_authorization_status"],
+            }
+        ],
+    )
+    task.analysis_checkpoint_json = {
+        "workflow_version_id": str(task.workflow_version_id),
+        "results": {},
+        "resume_dimensions": [],
+    }
+    key = "pdpc_cross_border_authorization"
+    try:
+        await user_facts.answer_user_facts(None, task, {key: "已取得许可"}, {key: qid})
+    except Exception:  # 收尾（恢复分析）不在本测试范围；只看事实写入
+        pass
+    assert task.facts_json[key] == "已取得许可"
+    assert task.facts_json["cross_border_authorization_status"] == "已取得许可"
+    assert "eg_legal_entity_status" not in task.facts_json

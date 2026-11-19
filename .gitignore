@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!deploy/.env.prod.example
 
 # 本机运维凭据和数据库备份
 credentials.json
@@ -34,6 +35,7 @@ dist-*/
 data/archive/
 data/tmp/
 backend/data/
+backend/app/forms/official/_auto_cache/
 backend/wheelhouse/*
 !backend/wheelhouse/.gitkeep
 *.log

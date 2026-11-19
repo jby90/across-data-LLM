@@ -1,3 +1,6 @@
+# ruff: noqa: E501
+import re
+import secrets
 import uuid
 
 from sqlalchemy import select
@@ -6,12 +9,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import (
     AUD_ADMIN,
-    burn_password_check,
+    AUD_USER,
+    burn_password_check_async,
     create_access_token,
-    hash_password,
-    verify_password,
+    hash_password_async,
+    verify_password_async,
+    verify_portal_ticket,
 )
 from app.iam.models import ADMIN_ROLES, USER_ROLES, Organization, Role, User
+
+TRIAL_ORG_MARKER = "（体验空间-"
+_TRIAL_ORG_SUFFIX_RE = re.compile(r"（体验空间-[0-9a-fA-F]{4,32}）$")
+
+
+def strip_trial_org_suffix(name: str | None) -> str:
+    """还原门户自助注册个人体验组织对外展示给本人的申报单位全称。"""
+    if not name:
+        return ""
+    return _TRIAL_ORG_SUFFIX_RE.sub("", name).strip()
+
+
+def is_trial_org_name(name: str | None) -> bool:
+    return bool(name and TRIAL_ORG_MARKER in name)
 
 
 class AuthError(Exception):
@@ -38,11 +57,11 @@ async def authenticate(
         await session.execute(select(User).where(User.email == email.lower()))
     ).scalar_one_or_none()
     if user is None:
-        burn_password_check(password)
+        await burn_password_check_async(password)
         raise AuthError
-    if not verify_password(password, user.password_hash):
+    if not await verify_password_async(password, user.password_hash):
         raise AuthError
-    if not user.is_active or Role(user.role) not in allowed:
+    if not user.is_active or user.role not in {r.value for r in allowed}:  # 已撤销的旧角色（如原律所审核员）不能登录
         raise AuthError
     if user.org_id is not None:
         org = await session.get(Organization, user.org_id)
@@ -54,8 +73,28 @@ async def authenticate(
     return user, token
 
 
+def full_name(name: str) -> str:
+    """One way of writing a company's full name: spaces collapsed, brackets in the full-width form
+    Chinese registrations use, so “某某（上海）有限公司” and “某某(上海)有限公司” are one company."""
+    text = re.sub(r"\s+", " ", (name or "").strip())
+    return text.replace("(", "（").replace(")", "）")
+
+
+async def company_by_full_name(session: AsyncSession, name: str) -> Organization:
+    """The company with this full name, created when there is none yet (not committed here)."""
+    clean = full_name(name)
+    if len(clean) < 2:
+        raise RuleError("请填写公司全称")
+    org = (await session.execute(select(Organization).where(Organization.name == clean))).scalar_one_or_none()
+    if org is None:
+        org = Organization(name=clean)
+        session.add(org)
+        await session.flush()
+    return org
+
+
 async def create_org(session: AsyncSession, name: str) -> Organization:
-    org = Organization(name=name.strip())
+    org = Organization(name=full_name(name))
     session.add(org)
     try:
         await session.commit()
@@ -73,9 +112,18 @@ async def create_user(
     password: str,
     role: Role,
     org_id: uuid.UUID | None,
+    org_name: str | None = None,
+    signup_source: str = "admin",
+    can_export: bool = False,
 ) -> User:
-    if role in ADMIN_ROLES and org_id is not None:
+    """Open an account. An enterprise user may be given the company's full name instead of an
+    existing company: the company is found by that name or created. Portal registration and the
+    administrator's manual opening go through here alike, so the company is always named by the
+    full name given when the account was opened."""
+    if role in ADMIN_ROLES and (org_id is not None or (org_name or "").strip()):
         raise RuleError("管理端角色不能属于企业")
+    if role in USER_ROLES and org_id is None and (org_name or "").strip():
+        org_id = (await company_by_full_name(session, org_name)).id
     if role in USER_ROLES:
         if org_id is None:
             raise RuleError("用户端角色必须指定所属企业")
@@ -84,9 +132,11 @@ async def create_user(
     user = User(
         email=email.lower(),
         display_name=display_name.strip(),
-        password_hash=hash_password(password),
+        password_hash=await hash_password_async(password),
         role=role.value,
         org_id=org_id,
+        signup_source=signup_source,
+        can_export=bool(can_export) and role == Role.VIEWER,
     )
     session.add(user)
     try:
@@ -95,3 +145,140 @@ async def create_user(
         await session.rollback()
         raise ConflictError("邮箱已被注册") from None
     return user
+
+
+async def register_portal_user(
+    session: AsyncSession,
+    *,
+    email: str,
+    display_name: str,
+    org_name: str,
+    password: str,
+) -> tuple[User, str]:
+    """普通用户自助注册体验账号：新建独立个人体验空间组织实现跨租户物理隔离，默认赋予无导出权限的普通查看者角色。"""
+    from app.core.rls import DatabaseIdentity, bind_identity
+
+    clean = strip_trial_org_suffix(full_name(org_name))
+    if len(clean) < 2:
+        raise RuleError("请填写公司全称")
+
+    await bind_identity(session, DatabaseIdentity(scope="system"))
+    norm_email = email.strip().lower()
+    existing = (
+        await session.execute(select(User.id).where(User.email == norm_email))
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise ConflictError("邮箱已被注册")
+
+    sandbox_name = f"{clean[:175]}{TRIAL_ORG_MARKER}{uuid.uuid4().hex[:8]}）"
+    org = Organization(name=sandbox_name, is_demo=True, is_active=True)
+    session.add(org)
+    await session.flush()
+    if not org.is_active:
+        raise RuleError("该单位账号已停用，请联系超级管理员")
+    user = await create_user(
+        session,
+        email=norm_email,
+        display_name=display_name,
+        password=password,
+        role=Role.VIEWER,
+        org_id=org.id,
+        signup_source="portal",
+        can_export=False,
+    )
+    token = create_access_token(
+        user_id=user.id, audience=AUD_USER, role=user.role, org_id=user.org_id
+    )
+    return user, token
+
+
+async def exchange_portal_ticket(
+    session: AsyncSession, *, ticket: str
+) -> tuple[User, str]:
+    """门户单点登录签名票据兑换平台访问令牌。"""
+    from app.core.rls import DatabaseIdentity, bind_identity
+
+    try:
+        data = verify_portal_ticket(ticket)
+    except ValueError as exc:
+        raise AuthError(str(exc)) from exc
+    email = str(data.get("email") or "").strip().lower()
+    display_name = str(data.get("display_name") or email.split("@")[0]).strip()
+    org_name = str(data.get("org_name") or "").strip()
+    tier = str(data.get("tier") or "standard").strip().lower()
+    target_role = Role.MEMBER if tier == "enterprise" else Role.VIEWER
+    if not email or "@" not in email or len(org_name) < 2:
+        raise RuleError("门户票据缺少有效的邮箱或单位全称")
+
+    await bind_identity(session, DatabaseIdentity(scope="system"))
+    user = (
+        await session.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if user is not None:
+        if not user.is_active or user.role not in {r.value for r in USER_ROLES}:
+            raise AuthError("该账号无法从用户端登录")
+        org = await session.get(Organization, user.org_id) if user.org_id else None
+        if org is None or not org.is_active:
+            raise AuthError("所属单位已停用")
+        if tier == "enterprise" and user.role == Role.VIEWER.value:
+            user.role = Role.MEMBER.value
+            user.can_export = False
+        if display_name and user.display_name != display_name:
+            user.display_name = display_name[:100]
+        await session.commit()
+    else:
+        org = await company_by_full_name(session, org_name)
+        if not org.is_active:
+            raise AuthError("所属单位已停用")
+        user = await create_user(
+            session,
+            email=email,
+            display_name=display_name[:100],
+            password=secrets.token_urlsafe(24),
+            role=target_role,
+            org_id=org.id,
+            signup_source="portal",
+            can_export=False,
+        )
+    token = create_access_token(
+        user_id=user.id, audience=AUD_USER, role=user.role, org_id=user.org_id
+    )
+    return user, token
+
+
+async def exchange_admin_ticket(
+    session: AsyncSession, *, ticket: str
+) -> tuple[User, str]:
+    """管理端单点登录签名票据兑换平台管理访问令牌（仅限已启用的管理端账号）。"""
+    from app.core.rls import DatabaseIdentity, bind_identity
+
+    try:
+        data = verify_portal_ticket(ticket)
+    except ValueError as exc:
+        raise AuthError(str(exc)) from exc
+    email = str(data.get("email") or "").strip().lower()
+    tier = str(data.get("tier") or "").strip().lower()
+    if tier != "admin" or not email or "@" not in email:
+        raise AuthError("管理端单点登录凭证无效")
+
+    await bind_identity(session, DatabaseIdentity(scope="system"))
+    user = (
+        await session.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if user is None or not user.is_active or user.role not in {r.value for r in ADMIN_ROLES}:
+        raise AuthError("该账号无权登录管理端")
+    token = create_access_token(
+        user_id=user.id, audience=AUD_ADMIN, role=user.role, org_id=user.org_id
+    )
+    return user, token
+
+
+async def change_own_password(
+    session: AsyncSession, *, user: User, old_password: str, new_password: str
+) -> None:
+    if not await verify_password_async(old_password, user.password_hash):
+        raise AuthError("当前密码不正确")
+    if old_password == new_password:
+        raise RuleError("新密码不能与当前密码相同")
+    user.password_hash = await hash_password_async(new_password)
+    await session.commit()

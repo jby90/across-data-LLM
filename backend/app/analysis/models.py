@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import uuid
@@ -64,6 +65,11 @@ class AnalysisTask(Base):
 
     __tablename__ = "analysis_tasks"
     citation_policy: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # 用户“删除”先进归档（可恢复）；在归档里再删除才是彻底删除
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    archived_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="chat", server_default="chat", index=True)  # chat 咨询对话 / documents 合规文件项目
+    title_custom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))  # 用户自己起的名字不会被自动标题覆盖
     __table_args__ = (
         CheckConstraint(
             "status IN ('collecting_facts','ready_to_run','running','completed',"
@@ -190,6 +196,8 @@ class ReportVersion(TenantOwnedMixin, Base):
     executive_summary: Mapped[str] = mapped_column(Text, nullable=False)
     dimensions_json: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
     stale_impacts_json: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
+    # 咨询层(结论、差距、风险、建议、参考文献);旧报告为空,按证据版展示
+    consulting_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

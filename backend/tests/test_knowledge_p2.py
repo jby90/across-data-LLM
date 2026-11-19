@@ -642,6 +642,7 @@ async def test_knowledge_extraction_glossary_review_points_and_version_linkage(
         ExtractedRelation,
         SemanticJudgeVerdict,
     )
+    from app.knowledge.modality import _EN_PROHIBIT
     from app.knowledge.models import NodeType, RelationType
 
     monkeypatch.setenv("CYSH_ARCHIVE_DIR", str(tmp_path / "archive"))
@@ -661,8 +662,12 @@ async def test_knowledge_extraction_glossary_review_points_and_version_linkage(
             for currency, value in amounts(original_text)
         )
         date_text = " / ".join(f"{y}年{m}月{d}日" for y, m, d in dates(original_text))
+        # 夹具不测译文质量，但不能把“不得”译丢：原文是禁止性规定时，译文也要是禁止性的，
+        # 否则会（正确地）被否定词校验判为译丢。
+        prohibited = bool(_EN_PROHIBIT.search(original_text))
+        duty = "不得违反" if prohibited else "应当严格履行"
         zh = (
-            f"根据本条规定，相关组织与数据处理主体应当严格履行【{terms_zh}】相关的跨境传输、"
+            f"根据本条规定，相关组织与数据处理主体{duty}【{terms_zh}】相关的跨境传输、"
             f"告知同意、安全保护与法定申报义务（保留法定数值与编号：{nums_str}；{units}；{date_text}）。"
         )
         return zh, "deepseek-flash", 110, 45, 220
@@ -829,7 +834,6 @@ async def test_knowledge_extraction_glossary_review_points_and_version_linkage(
 
     monkeypatch.setattr(extractor, "_call_llm_doc_relevance", _fake_doc_relevance)
     admin_hdr = bearer(await login(client, "admin", "admin@example.com"))
-    reviewer_hdr = bearer(await login(client, "admin", "reviewer@example.com"))
     member_hdr = bearer(await login(client, "user", "a-member@example.com"))
 
     # 1. 创建新加坡站点并上传包含出境、同意、数据中介、自动驾驶路测、罚则与修订条款的真实结构 PDF
@@ -914,10 +918,10 @@ async def test_knowledge_extraction_glossary_review_points_and_version_linkage(
     )
     assert up_amend.status_code == 201
 
-    # 2. 律所复核员触发新加坡知识图谱抽取与术语受控翻译
+    # 2. 平台管理员触发新加坡知识图谱抽取与术语受控翻译（会调用模型）
     ext = await client.post(
         "/api/admin/knowledge/extract?country_code=SG&translate_sample_per_doc=10",
-        headers=reviewer_hdr,
+        headers=admin_hdr,
     )
     assert ext.status_code == 200
     ext_data = ext.json()
@@ -927,7 +931,7 @@ async def test_knowledge_extraction_glossary_review_points_and_version_linkage(
 
     # 3. 检查两层术语库与译文中的术语命中 + 未入库专业词悬浮解释(telematics / black box)
     glossary_resp = await client.get(
-        "/api/admin/knowledge/glossary?country_code=SG", headers=reviewer_hdr
+        "/api/admin/knowledge/glossary?country_code=SG", headers=admin_hdr
     )
     assert glossary_resp.status_code == 200
     terms = glossary_resp.json()
@@ -937,58 +941,37 @@ async def test_knowledge_extraction_glossary_review_points_and_version_linkage(
 
     tr_resp = await client.get(
         f"/api/admin/knowledge/translations?country_code=SG&document_id={doc_id}",
-        headers=reviewer_hdr,
+        headers=admin_hdr,
     )
     assert tr_resp.status_code == 200
     translations = tr_resp.json()
     assert len(translations) == 4
-    # 未经律所复核前,一律标注"机器翻译，待核对",且 usable_as_legal_basis 为 False
+    # 未经人工复核前，统一标注"系统译文（已质检）"，且 usable_as_legal_basis 为 False
     assert all(not t["usable_as_legal_basis"] for t in translations)
-    assert all(t["status_badge"] == "机器翻译，待核对" for t in translations)
+    assert all(t["status_badge"] == "系统译文（已质检）" for t in translations)
     assert all(t["quality_check_passed"] is True for t in translations)
     # 第 3 条包含未入库词 telematics / black box,应输出 unmatched_terms 供前端悬浮解释
     clause3_tr = next(t for t in translations if t["clause_number"] == "3")
     unmatched_names = {u["source_term"] for u in clause3_tr["unmatched_terms"]}
     assert "telematics" in unmatched_names and "black box" in unmatched_names
 
-    # 4. 律所复核员复核通过第 2 条(跨境传输条款)译文
+    # 4. 管理员核对通过第 2 条(跨境传输条款)译文，直接生效
     clause2_tr = next(t for t in translations if t["clause_number"] == "2")
     rev_tr = await client.post(
         f"/api/admin/knowledge/translations/{clause2_tr['id']}/review",
-        headers=reviewer_hdr,
+        headers=admin_hdr,
         json={
             "decision": "approved",
             "reviewer_note": "已核对新加坡 PDPA 第 26 条个人数据出境同等保护义务译法",
         },
     )
     assert rev_tr.status_code == 200
-    assert rev_tr.json()["usable_as_legal_basis"] is True
-    assert rev_tr.json()["status_badge"] == "已复核(可作法律依据)"
+    after = (await client.get(f"/api/admin/knowledge/translations?country_code=SG&document_id={doc_id}", headers=admin_hdr)).json()
+    approved = next(t for t in after if t["clause_number"] == "2")
+    assert approved["usable_as_legal_basis"] is True
+    assert approved["status_badge"] == "已复核（可作法律依据）"
 
-    # 5. 检查《解读要点确认单》导出与律所回执批量导入
-    exp_resp = await client.get(
-        "/api/admin/knowledge/review-points/export?country_code=SG", headers=reviewer_hdr
-    )
-    assert exp_resp.status_code == 200
-    assert "SG-RP-001" in exp_resp.json()["markdown"]
-
-    imp_resp = await client.post(
-        "/api/admin/knowledge/review-points/import",
-        headers=reviewer_hdr,
-        json={
-            "items": [
-                {
-                    "point_code": "SG-RP-001",
-                    "status": "confirmed",
-                    "lawyer_reply": "确认:凡保留 VIN 且后台可关联车主的遥测与轨迹数据均须按个人数据履行第 26 条出境合规。",
-                }
-            ]
-        },
-    )
-    assert imp_resp.status_code == 200
-    assert imp_resp.json()["updated"] == 1
-
-    # 6. 检查六要素+十二关系知识图谱(管理端与用户端)
+    # 5. 检查六要素+十二关系知识图谱(管理端与用户端)
     graph_resp = await client.get("/api/knowledge/graph?country_code=SG", headers=member_hdr)
     assert graph_resp.status_code == 410
     graph_resp = await client.get("/api/admin/knowledge/graph?country_code=SG", headers=admin_hdr)
@@ -1045,12 +1028,59 @@ async def test_knowledge_extraction_glossary_review_points_and_version_linkage(
     tr_after = (
         await client.get(
             f"/api/admin/knowledge/translations?country_code=SG&document_id={doc_id}",
-            headers=reviewer_hdr,
+            headers=admin_hdr,
         )
     ).json()
     approved_v2 = [
         t for t in tr_after if t["clause_number"] == "2" and t["review_status"] == "approved"
     ]
-    stale_v1 = [t for t in tr_after if t["clause_number"] == "4" and t["review_status"] == "stale"]
-    assert len(approved_v2) >= 2  # v1 + 自动继承的 v2
-    assert len(stale_v1) == 1
+    # 审核队列只列现行版本：未变的第 2 条带着已复核译文进入新版本；改过的第 4 条不再沿用旧的已复核结论
+    assert len(approved_v2) == 1
+    assert not [t for t in tr_after if t["clause_number"] == "4" and t["review_status"] == "approved"]
+
+
+def test_missing_original_for_a_preserve_original_term_gets_an_accurate_hint():
+    # 译法对了、只是没在后面括号里带原词：提示必须说“补原词”，不能说“必须译为”（会让模型改译法而不是补原词）
+    from app.knowledge.translator import verify_translation
+
+    hit = {
+        "source_term": "البطاقة المصرفية",
+        "target_zh": "银行卡",
+        "preserve_original": True,
+        "concept_code": "term_bank_card",
+    }
+    source = "لا يتحمل صاحب البطاقة المصرفية النتائج المترتبة عن فقدان البطاقة"
+    _, issues, _ = verify_translation(source, "银行卡持有人不承担因银行卡丢失而产生的后果", [hit])
+    assert any("须保留原词" in i and "银行卡（البطاقة المصرفية）" in i for i in issues)
+    ok, issues, _ = verify_translation(
+        source, "银行卡（البطاقة المصرفية）持有人不承担因银行卡丢失而产生的后果", [hit]
+    )
+    assert not any("术语" in i for i in issues)
+
+
+def test_english_text_with_a_few_french_words_is_still_english_to_the_modality_check():
+    from app.knowledge import modality
+
+    english = (
+        "Annex C, Page 2 of 5. 12 Avenue de la Paix, Paris. In addition, the OBU Antenna should not "
+        "be installed at locations that could interfere with the signals. Rue des Fleurs, par la poste."
+    )
+    assert modality._lang(english) == "en"
+    assert modality.modality_issues(english, "此外，OBU 天线不应安装于可能干扰信号的位置。") == []
+    assert modality._lang("On ne peut préalablement renoncer au droit d’accès.") == "fr"
+
+
+async def test_graph_extraction_keeps_the_scope_the_library_already_decided(monkeypatch):
+    """入库时范围分拣（scope_triage）定过的文件，重抽图谱时沿用，不再问模型：
+    用户法规库里看得到的文件，图谱也照样抽取；不会因为模型某次判成范围外而清掉它的关系。"""
+    from types import SimpleNamespace
+
+    from app.knowledge import extractor
+
+    async def _must_not_ask(*_a, **_k):
+        raise AssertionError("不应再问模型")
+
+    monkeypatch.setattr(extractor, "_call_llm_doc_relevance", _must_not_ask)
+    doc = SimpleNamespace(title="Road Traffic (Amendment) Act 2021", document_type="LAW", source_url="https://x/14.pdf",
+                          country_code="SG", relevance="relevant", relevance_note="自动驾驶条款", relevance_source="scope_triage")
+    assert (await extractor.classify_document_relevance(doc, []))[0] == "relevant"

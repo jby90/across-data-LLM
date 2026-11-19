@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import enum
@@ -182,6 +183,8 @@ class LegalTermDefinition(Base):
     source_text_sha256: Mapped[str] = mapped_column(String(64))
     fingerprint: Mapped[str] = mapped_column(String(64))
     verification_status: Mapped[str] = mapped_column(String(32), default="source_matched")
+    # 与汽车数据跨境业务的关系（term_tags）：core 核心概念 / related 相关 / remote 关系较远；术语表按它排序
+    business_close: Mapped[str | None] = mapped_column(String(16), nullable=True)
     registration_origin: Mapped[str] = mapped_column(
         String(24), default="auto", server_default="auto"
     )
@@ -316,6 +319,10 @@ class KgNode(Base):
     review_status: Mapped[str] = mapped_column(
         String(24), default=GraphReviewStatus.PENDING_REVIEW.value, server_default="pending_review"
     )
+    # 自动核验的结果（见 graph_verify）：auto 已核验 / human_needed 需人工确认 / retired 两次核对不符已停用
+    verify_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    verify_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -365,4 +372,28 @@ class KgEdge(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verify_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    verify_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TranslationChunkCache(Base):
+    """A source passage whose translation already passed every check, keyed by its exact text.
+
+    The same passage (a repeated header, a boilerplate paragraph, a block of a long clause that
+    passed while its neighbour did not) is never paid for twice. A cached text is verified again
+    against the current rules before it is used.
+    """
+
+    __tablename__ = "translation_chunk_cache"
+    __table_args__ = (
+        UniqueConstraint("chunk_hash", "prompt_version", name="uq_translation_chunk_cache"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chunk_hash: Mapped[str] = mapped_column(String(64))
+    prompt_version: Mapped[str] = mapped_column(String(32))
+    language: Mapped[str] = mapped_column(String(8))
+    translated_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

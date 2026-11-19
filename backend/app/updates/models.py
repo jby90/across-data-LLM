@@ -1,9 +1,20 @@
+# ruff: noqa: E501
 """Content-change observations and operational reminders, separate from legal approvals."""
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -110,6 +121,7 @@ class UserNotification(Base):
     __table_args__ = (
         UniqueConstraint("task_id", "change_id", "user_id", name="uq_change_recipient"),
         Index("ix_notifications_user_created", "user_id", "created_at"),
+        Index("uq_notification_user_key", "user_id", "dedupe_key", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -119,14 +131,62 @@ class UserNotification(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), index=True
     )
-    impact_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("update_impacts.id"), index=True
+    impact_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("update_impacts.id"), index=True, nullable=True
     )
-    task_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), index=True
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), index=True, nullable=True
     )
-    change_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("version_changes.id"), index=True
+    change_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("version_changes.id"), index=True, nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 法规条文变化影响评估报告：source_change（上面三栏有值）；简报出新版：whitepaper；准入事项有变化：admission
+    kind: Mapped[str] = mapped_column(String(24), default="source_change", server_default="source_change")
+    title: Mapped[str] = mapped_column(Text, default="", server_default="")
+    body: Mapped[str] = mapped_column(Text, default="", server_default="")
+    link: Mapped[str] = mapped_column(String(512), default="", server_default="")
+    dedupe_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class UserSubscription(Base):
+    """需求 2.3：一个用户订阅哪些法规变化（国家、法规类型、业务领域；一栏不选 = 这一栏不限）。"""
+
+    __tablename__ = "user_subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    countries: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    doc_types: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    topics: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ChangeAdvice(Base):
+    """一次法规变化（修订或新收录）写给企业看的内容：变了的条文前后对照、影响说明、整改要做的事。
+    每次变化只写一次，所有提到这次变化的通知共用。state: pending / ready / failed。"""
+
+    __tablename__ = "change_advice"
+
+    # change:<version_changes.id>（已收录法规的修订）或 doc:<documents.id>（新收录的法规）
+    subject: Mapped[str] = mapped_column(String(80), primary_key=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    pairs: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    impact_zh: Mapped[str] = mapped_column(Text, default="", server_default="")
+    actions: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    state: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    model: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

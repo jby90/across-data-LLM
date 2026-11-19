@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class GlossaryTermCreate(BaseModel):
-    concept_code: str = Field(min_length=1, max_length=64)
+    concept_code: str = Field(default="", max_length=64)
     country_code: str | None = Field(default=None, min_length=2, max_length=2)
     language: str = Field(default="en", min_length=2, max_length=8)
     source_term: str = Field(min_length=1, max_length=255)
@@ -132,6 +132,8 @@ class KgNodeOut(BaseModel):
     document_id: uuid.UUID | None
     evidence_clause_id: uuid.UUID | None
     review_status: str
+    verification_status: str = "auto_verified"
+    verification_reason: str = ""
     model_config = {"from_attributes": True}
 
 
@@ -158,6 +160,8 @@ class KgEdgeOut(BaseModel):
     judge_reason: str | None = None
     is_structural: bool = False
     review_status: str
+    verification_status: str = "auto_verified"
+    verification_reason: str = ""
     usable_as_legal_basis: bool
 
 
@@ -178,6 +182,9 @@ class RegulationSummaryOut(BaseModel):
     id: uuid.UUID
     country_code: str
     title: str
+    title_zh: str | None = None
+    business_topic: str | None = None  # 汽车数据跨境业务类别（app.knowledge.business_topic）
+    business_weight: str | None = None  # core / supporting / peripheral
     document_type: str
     document_type_zh: str
     language: str
@@ -192,10 +199,19 @@ class RegulationSummaryOut(BaseModel):
     edges_count: int
     eight_attributes: dict[str, str]
     version_count: int
+    relations_count: int = 0  # 本版本可在“关系解读”里看到的关系数
+    primary: bool = False  # 该国数据合规的核心法律（打开国家时先显示它）
 
 
 class RegulationClauseItemOut(BaseModel):
     clause_id: uuid.UUID
+    # 按业务相关章节入库的文件：范围外的条文写明与汽车数据和准入无关（原文与已有译文照常显示）
+    scope_note: str | None = None
+    # 这一条由哪些存储行组成（超长条文曾被切成几段；第一个就是 clause_id）
+    part_ids: list[uuid.UUID] = []
+    # 第一条有条号的条文之前的段落（法案名、颁布说明等）
+    preamble: bool = False
+    position: int = 0  # 在全文中是第几条（按阅读顺序，从 1 起）
     ordinal: int
     clause_number: str | None
     heading: str | None
@@ -218,3 +234,33 @@ class RegulationDetailOut(BaseModel):
     versions: list[dict]
     clauses: list[RegulationClauseItemOut]
     mini_graph: GraphPayloadOut
+
+
+class NodeEditIn(BaseModel):
+    name_zh: str = Field(min_length=1, max_length=255)
+    summary: str | None = Field(default=None, max_length=4000)
+
+
+class NodeCreateIn(BaseModel):
+    country_code: str = Field(min_length=2, max_length=2)
+    node_type: str
+    name_zh: str = Field(min_length=1, max_length=255)
+    name_orig: str | None = Field(default=None, max_length=255)
+    summary: str | None = Field(default=None, max_length=4000)
+    evidence_clause_id: uuid.UUID | None = None
+
+
+class EdgeCreateIn(BaseModel):
+    source_node_id: uuid.UUID
+    target_node_id: uuid.UUID
+    relation_type: str
+    evidence_clause_id: uuid.UUID
+    evidence_quote: str = Field(min_length=1, max_length=4000)
+
+
+class EdgeRelationIn(BaseModel):
+    relation_type: str
+
+
+class RestoreIn(BaseModel):
+    audit_id: uuid.UUID

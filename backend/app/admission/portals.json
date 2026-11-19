@@ -1,0 +1,107 @@
+{
+ "note": "各国受理机构的官方办理入口（需求 2.6 申请入口、申报渠道、官方平台）。只收录核实过的官方网址；verified 为核实日期与方式。匹配：country + 受理机构名称里出现 aliases 之一；kind 与事项类别对应（export 跨境传输、declaration 处理申报、authorisation 事先授权/许可、any 通用）。",
+ "portals": [
+  {
+   "country": "MA",
+   "authority_zh": "摩洛哥国家个人数据保护监管委员会（CNDP）",
+   "aliases": [
+    "CNDP",
+    "个人数据保护监管委员会",
+    "个人数据保护委员会",
+    "数据保护委员会"
+   ],
+   "site": "https://www.cndp.ma/",
+   "links": [
+    {
+     "kind": "export",
+     "label": "数据跨境传输申请说明与表格",
+     "url": "https://www.cndp.ma/notifier-une-demande-de-transfert-a-letranger/"
+    },
+    {
+     "kind": "declaration",
+     "label": "处理申报类型与表格",
+     "url": "https://www.cndp.ma/notifier-une-declaration-type-de-declaration-formulaires/"
+    },
+    {
+     "kind": "authorisation",
+     "label": "事先授权申请说明与表格",
+     "url": "https://www.cndp.ma/notifier-une-demande-dautorisation-prealable/"
+    },
+    {
+     "kind": "any",
+     "label": "在线申报处理活动",
+     "url": "https://www.cndp.ma/notifier-un-traitement/"
+    }
+   ],
+   "verified": "2026-11-07 打开官网核对栏目与链接"
+  },
+  {
+   "country": "SG",
+   "authority_zh": "新加坡个人数据保护委员会（PDPC）",
+   "aliases": [
+    "PDPC",
+    "个人数据保护委员会"
+   ],
+   "site": "https://www.pdpc.gov.sg/",
+   "links": [
+    {
+     "kind": "any",
+     "label": "面向机构的办理指引",
+     "url": "https://www.pdpc.gov.sg/organisations"
+    }
+   ],
+   "verified": "2026-11-07 打开官网核对"
+  },
+  {
+   "country": "EG",
+   "authority_zh": "埃及进出口监管总局（GOEIC）",
+   "aliases": [
+    "GOEIC",
+    "الرقابة على الصادرات والواردات",
+    "出口与进口控制总局",
+    "出口和进口控制总局",
+    "进出口监管局",
+    "进出口监管总局",
+    "进出口管制总局"
+   ],
+   "site": "https://www.goeic.gov.eg/ar",
+   "links": [
+    {
+     "kind": "any",
+     "label": "在线申请服务与预约",
+     "url": "https://www.goeic.gov.eg/ar/service-request"
+    }
+   ],
+   "verified": "2026-11-11 打开官网核实（服务申请页在官网导航“طلب خدمة”下）"
+  },
+  {
+   "country": "EG",
+   "authority_zh": "埃及国家电信监管局（NTRA）",
+   "aliases": [
+    "NTRA",
+    "国家电信监管局",
+    "国家电信管理局",
+    "电信监管局",
+    "通信监管机构",
+    "电信监管机构",
+    "频谱主管机构",
+    "الجهاز القومي لتنظيم الاتصالات"
+   ],
+   "site": "https://www.tra.gov.eg/",
+   "links": [],
+   "verified": "2026-11-11 打开官网核实"
+  },
+  {
+   "country": "EG",
+   "authority_zh": "埃及个人数据保护中心（PDPC）",
+   "aliases": [
+    "PDPC",
+    "个人数据保护中心",
+    "（المركز）"
+   ],
+   "site": "https://pdpc.gov.eg/",
+   "links": [],
+   "verified": "2026-11-11 打开官网核实"
+  }
+ ]
+}

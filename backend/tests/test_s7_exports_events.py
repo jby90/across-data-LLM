@@ -3,12 +3,15 @@
 import asyncio
 import io
 import json
+import re
 import time
 import zipfile
+from urllib.parse import unquote
 
 import pytest
 from sqlalchemy import func, select
 
+from app.analysis.consulting import TOPIC_NAMES
 from app.analysis.events import append_event, close_hubs, stream_events
 from app.analysis.models import AnalysisEvent, AnalysisTask, ReportVersion
 from app.iam.deps import Principal
@@ -89,7 +92,11 @@ async def test_single_dimension_and_zip_keep_selected_version_only(
     for other in set(f"D{i}" for i in range(1, 9)) - {dimension}:
         assert "BODY_MARKER_" + other not in text and "HISTORICAL_FACT_" + other not in text
     assert "CONV-" in header and dimension in header and "v1" in header and "法律" in header
-    assert dimension in r.headers["content-disposition"]
+    disposition = r.headers["content-disposition"]
+    assert "filename*=UTF-8''" in disposition  # 中文文件名走 RFC 5987，旧浏览器有 ASCII 兜底名
+    shown = unquote(disposition.split("filename*=UTF-8''")[1])
+    assert shown.endswith(f"_{TOPIC_NAMES[dimension]}_v1.docx")
+    assert re.fullmatch(r"\d{8}_.+_汽车数据跨境合规评估_.+_v1\.docx", shown)
     if dimension == "D3":
         pdf = await client.get(url + "pdf?dimension=D3", headers=h)
         assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
@@ -100,7 +107,7 @@ async def test_single_dimension_and_zip_keep_selected_version_only(
             for name in z.namelist():
                 x, _ = doc_text(z.read(name))
                 assert "LATEST_TASK_SECRET" not in x
-                if "_D3_" in name:
+                if f"_{TOPIC_NAMES['D3']}_" in name:
                     assert "BODY_MARKER_D2" not in x
     async with session_factory() as s:
         current = await s.get(ReportVersion, rv.id)

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from pathlib import Path
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ArchiveIntegrityError(Exception):
@@ -38,12 +41,13 @@ class ArchiveStore:
                 raise
         return digest, rel
 
-    def read(self, rel: str) -> bytes:
-        """读取并复核哈希;文件名即期望哈希,不一致说明归档被篡改或损坏。"""
+    def read(self, rel: str, *, expected_sha256: str | None = None) -> bytes:
+        """读取并复核哈希;传入 expected_sha256 或文件名为64位哈希时校验完整性。"""
         path = (self._root / rel).resolve()
         if self._root not in path.parents:
             raise ArchiveIntegrityError(f"路径越界: {rel}")
         content = path.read_bytes()
-        if self.sha256(content) != path.name:
+        expected = expected_sha256 or (path.name if _HEX64.fullmatch(path.name) else None)
+        if expected is not None and self.sha256(content) != expected:
             raise ArchiveIntegrityError(f"归档文件哈希不一致: {rel}")
         return content

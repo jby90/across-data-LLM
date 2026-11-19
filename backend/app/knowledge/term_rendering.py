@@ -1,5 +1,7 @@
+# ruff: noqa: E501
 """Append Chinese reading aids to exact source definitions; never approve legal content."""
 
+import re
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +28,14 @@ class RenderingBatch(BaseModel):
     definitions: list[Rendering] = Field(max_length=10)
 
 
+_MARGIN = re.compile(r"(?m)^\s*(?:5|10|15|20|25|30|35|40)(?:\s+|$)")
+
+
+def _without_margin_numbers(text: str) -> str:
+    """新加坡公报每页左边印着 5、10、15…的行号，抽进定义原文里成了行首的数字：核对数字时不算它们。"""
+    return _MARGIN.sub("", text or "")
+
+
 async def append_rendering(session, source, rendering):
     if rendering.definition_id != source.id:
         raise ValueError("释义不属于所给来源")
@@ -49,7 +59,7 @@ async def append_rendering(session, source, rendering):
         concept_code=source.concept_code,
     )
     passed, issues, _ = verify_translation(
-        source.definition_original, rendering.definition_zh, [hit]
+        _without_margin_numbers(source.definition_original), rendering.definition_zh, [hit]
     )
     if not passed:
         raise ValueError("；".join(issues))

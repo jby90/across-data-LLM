@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """多智能体使用的内置工具(MCP 风格:有名称、入参、出参,每次调用都计时并留痕)。
 
 所有工具都直接读取 M1 法规知识库,不使用任何写死的条款。
@@ -18,7 +19,7 @@ from app.analysis.citation_policy import fully_reviewed
 from app.analysis.retrieval import RETRIEVAL_VERSION, ClauseIndex
 from app.core.config import get_settings
 from app.ingestion.layout_safety import layout_held_clause_ids
-from app.ingestion.models import Clause, Document, DocumentVersion
+from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
 from app.ingestion.safety import document_available
 from app.knowledge.graph_evidence import active_edge_filters
 from app.knowledge.models import ClauseTranslation, KgEdge, KgNode
@@ -151,6 +152,12 @@ class ClauseCandidate:
     instrument_role: str = ""
     text_source: str = "text_layer"
     source_nature: str = "unclassified"
+    instrument_kind: str = ""
+    # 范围核对的结果：relevant 直接属于三类业务；related 是汽车数据业务会受其约束的一般性文件
+    relevance: str = "relevant"
+    business_weight: str = ""
+    # 只用于检索的补充文本（来自双路核对的校读文本）；引用、证据、哈希仍然只认 text
+    search_text: str = ""
     source_review_status: str = "pending_review"
     translation_review_status: str = "not_translated"
     translation_id: str | None = None
@@ -223,6 +230,9 @@ def clause_relevance(candidate: ClauseCandidate, keywords: list[str]) -> tuple[f
 class ToolBox:
     """一次分析任务的工具箱;记录每次调用供「任务过程」展示。"""
 
+    # Older editions of an instrument left out of citation candidates (id -> reason).
+    superseded_documents: dict = {}
+
     def __init__(
         self,
         session: AsyncSession,
@@ -241,6 +251,7 @@ class ToolBox:
         self.calls: list[ToolCall] = []
         self._candidates_cache: list[ClauseCandidate] | None = None
         self._index: ClauseIndex | None = None
+        self._graph_tags: dict[str, set[str]] | None = None
         self.retrieval_tokens = 0
 
     def _record(
@@ -276,12 +287,18 @@ class ToolBox:
             .where(Document.country_code == self.country_code)
             .where(document_available())
             .where(Document.relevance.notin_(("irrelevant", "out_of_scope")))
+            # 与车辆数据业务关系较远的文件（谢绝来电登记、机构名单公告等）不作为依据
+            .where(or_(Document.business_weight.is_(None), Document.business_weight != "peripheral"))
             .where(DocumentVersion.state == "parsed")
             .execution_options(populate_existing=True)
         )
         if self.lock_reviews:
             source_query = source_query.with_for_update(read=True)
         rows = list((await self.session.execute(source_query)).all())
+        from app.analysis.clause_gate import superseded_titles
+
+        gone = superseded_titles(sorted({(doc.title_zh or doc.title or "") for _, _, doc in rows}))  # 颁布原文、历史指南、被同名新年份取代的
+        rows = [r for r in rows if (r[2].title_zh or r[2].title or "") not in gone]
         latest: dict[uuid.UUID, int] = {}
         for _, ver, doc in rows:
             latest[doc.id] = max(latest.get(doc.id, 0), ver.version_no)
@@ -319,6 +336,19 @@ class ToolBox:
         if self.lock_reviews:
             translation_query = translation_query.with_for_update(read=True)
         trs = list((await self.session.scalars(translation_query)).all()) if clause_ids else []
+        readings = {}
+        if clause_ids:
+            from app.ingestion.models import ClauseReading
+
+            readings = dict(
+                (
+                    await self.session.execute(
+                        select(ClauseReading.clause_id, ClauseReading.reading_text).where(
+                            ClauseReading.clause_id.in_(clause_ids)
+                        )
+                    )
+                ).all()
+            )
         by_clause = {}
         for t in trs:
             by_clause.setdefault(t.clause_id, []).append(t)
@@ -326,11 +356,27 @@ class ToolBox:
         # to choose an arbitrary approved translation from database row order.
         tr_map = {cid: values[0] for cid, values in by_clause.items() if len(values) == 1}
         out: list[ClauseCandidate] = []
+        from app.analysis.edition_currency import superseded_documents
+
+        self.superseded_documents = superseded_documents(
+            {
+                str(doc.id): (
+                    str(doc.id),
+                    doc.instrument_family,
+                    doc.instrument_kind,
+                    doc.title,
+                    ver.published_date,
+                )
+                for _, ver, doc in rows
+                if eligible(ver, doc)
+            }.values()
+        )
         for clause, ver, doc in rows:
             if (
                 not eligible(ver, doc)
+                or str(doc.id) in self.superseded_documents
                 or clause.id in layout_held
-                or ver.legal_status == "repealed"
+                or ver.legal_status in NOT_CITABLE_STATUSES
                 or ver.review_status == "rejected"
             ):
                 continue
@@ -370,6 +416,10 @@ class ToolBox:
                     section_path=clause.section_path,
                     translated_text=tr.translated_text if tr else "",
                     text_source=ver.text_source,
+                    instrument_kind=doc.instrument_kind or "",
+                    relevance=doc.relevance or "relevant",
+                    business_weight=doc.business_weight or "",
+                    search_text=readings.get(clause.id, ""),
                 )
             )
         # Derive navigation links only from the immutable, hash-checked archive.
@@ -505,6 +555,54 @@ class ToolBox:
         )
         return result
 
+    async def _graph_clauses(self, dimension: str) -> set[str]:
+        """Clauses that verified knowledge-graph statements tie to this dimension: the relation type
+        (cross-border restriction, penalty, admission) or the aspect a verified obligation or penalty
+        is tagged with (the same tags the country page uses; untagged nodes by the briefing's word
+        lists). Requirements tagged as unrelated to a vehicle-data business add nothing. Built once
+        per country."""
+        if self._graph_tags is None:
+            from app.knowledge.graph_evidence import active_edge_filters
+            from app.knowledge.whitepaper_graph import KEYWORDS
+
+            src, dst = KgNode.__table__.alias("s"), KgNode.__table__.alias("t")
+            rows = (
+                await self.session.execute(
+                    select(
+                        KgEdge.evidence_clause_id, KgEdge.relation_type,
+                        src.c.node_type, src.c.name_zh, src.c.attributes,
+                        dst.c.node_type, dst.c.name_zh, dst.c.attributes,
+                    )
+                    .join(src, src.c.id == KgEdge.source_node_id)
+                    .join(dst, dst.c.id == KgEdge.target_node_id)
+                    .where(KgEdge.country_code == self.country_code, KgEdge.is_structural.is_(False), *active_edge_filters())
+                )
+            ).all()
+            tags: dict[str, set[str]] = {}
+            by_relation = {"RESTRICTS_CROSS_BORDER": "D3", "PENALIZES": "D6", "REQUIRES_ADMISSION": "D7"}
+            by_aspect = {"transfer": "D3", "consent": "D4", "security": "D5", "admission": "D7", "penalty": "D6", "governance": "DG"}
+            for clause_id, relation, s_type, s_name, s_attr, t_type, t_name, t_attr in rows:
+                claims = [
+                    (n_type, n_name, ((attr or {}).get("claim_tag") or {}))
+                    for n_type, n_name, attr in ((s_type, s_name, s_attr), (t_type, t_name, t_attr))
+                    if n_type in ("OBLIGATION", "PENALTY")
+                ]
+                if any(tag.get("close") == "unrelated" for _, _, tag in claims):
+                    continue  # 交通违章、驾驶资格这类要求不为任何维度加权
+                bucket = tags.setdefault(str(clause_id), set())
+                if relation in by_relation:
+                    bucket.add(by_relation[relation])
+                for n_type, n_name, tag in claims:
+                    if tag.get("aspect") in by_aspect:
+                        bucket.add(by_aspect[tag["aspect"]])
+                    elif not tag:
+                        bucket.update(code for code, words in KEYWORDS.items() if any(w in (n_name or "") for w in words))
+                    if n_type == "PENALTY":
+                        bucket.add("D6")
+            self._graph_tags = tags
+        wanted = {"D8": {"D3", "D4", "D5", "D7", "DG"}}.get(dimension, {dimension})
+        return {cid for cid, t in self._graph_tags.items() if t & wanted}
+
     async def search_effective_clauses(
         self,
         dimension: str,
@@ -521,7 +619,7 @@ class ToolBox:
         from app.analysis.workflow_engine import EIGHT_DIMENSIONS_SPEC
 
         dimension_title = dict(EIGHT_DIMENSIONS_SPEC).get(dimension, "")
-        scored = self._index.rank(" ".join(kws) + " " + dimension_title, query)
+        scored = self._index.rank(" ".join(kws) + " " + dimension_title, query, graph=await self._graph_clauses(dimension))
         planning = {}
         if config and config.get("semantic_planning") and self._index.candidates:
             from app.analysis.retrieval_planner import planned_search
@@ -560,6 +658,7 @@ class ToolBox:
                 "query": query,
                 "retrieval_version": RETRIEVAL_VERSION,
                 "planning": planning,
+                "superseded_documents": self.superseded_documents,
             },
             (
                 f"可用 {len(self._index.candidates)} 条，"

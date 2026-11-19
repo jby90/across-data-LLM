@@ -19,7 +19,21 @@ const paths: Record<string, string> = {
   plus: 'M12 4v16 M4 12h16',
   search: 'M10 3a7 7 0 1 0 0 14a7 7 0 1 0 0-14 M15 15l6 6',
   file: 'M5 2h9l5 5v15H5z M14 2v6h5 M8 12h8 M8 16h8',
+  gauge: 'M12 21a9 9 0 1 1 0-18a9 9 0 1 1 0 18 M12 12l4-4 M7 16h10',
+  ruler: 'M3 17L17 3l4 4L7 21z M7 13l2 2 M10 10l2 2 M13 7l2 2',
+  translate: 'M4 5h9 M8.5 3v2 M11 5c-1 4-4 7-7 8 M6 9c1 2 3 4 6 5 M13 21l4-9 4 9 M14.5 18h5',
+  brief: 'M6 2h9l4 4v16H6z M15 2v4h4 M9 11h7 M9 15h7 M9 19h4',
+  clock: 'M12 21a9 9 0 1 1 0-18a9 9 0 1 1 0 18 M12 7v5l3 3',
+  wave: 'M2 12h3l3-7 4 14 3-7h7',
+  audit: 'M4 3h12l4 4v14H4z M8 9h8 M8 13h8 M8 17h5 M16 3v4h4',
+  template: 'M3 3h18v6H3z M3 13h8v8H3z M15 13h6v8h-6z',
   shield: 'M12 2l9 4v6c0 5-9 10-9 10S3 17 3 12V6z M8 12l3 3 5-6',
+  nodes: 'M3 5h6v4H3z M15 3h6v4h-6z M15 17h6v4h-6z M9 7h3v12h3 M12 5h3',
+  help: 'M12 21a9 9 0 1 1 0-18a9 9 0 1 1 0 18 M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.7 M12 17h.01',
+  user: 'M12 12a4 4 0 1 0 0-8a4 4 0 0 0 0 8 M5 20c0-3.3 3.1-5.5 7-5.5s7 2.2 7 5.5',
+  'chevron-down': 'M6 9l6 6 6-6',
+  'chevron-up': 'M6 15l6-6 6 6',
+  'arrow-left': 'M20 12H4 M10 6l-6 6 6 6',
 }
 </script>
 <template>

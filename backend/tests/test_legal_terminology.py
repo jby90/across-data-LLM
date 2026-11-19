@@ -438,3 +438,26 @@ def test_aliases_match_pdf_whitespace_and_arabic_clitics_without_source_rewritin
     raw = "وللمتحكم واجبات لحماية البيانات الشخصية."
     hits, _ = match_clause_glossary(raw, [t("ar", "المتحكم", "数据控制者")])
     assert hits[0]["source_term"] == "وللمتحكم"
+
+
+def test_a_definition_list_announced_in_the_middle_of_an_article_is_read_item_by_item():
+    """摩洛哥 09-08 号法第一条：先一段宗旨，再“on entend par :”，各项以“1- « … » :”开头。下一项的编号不算进上一项。"""
+    from app.knowledge.legal_terms import definition_spans
+
+    text = (
+        "Article premier\nL’informatique est au service du citoyen et évolue dans le cadre de la coopération internationale.\n"
+        "Pour l’application de la présente loi, on entend par :\n"
+        "1- « données à caractère personnel » : toute information concernant une personne physique identifiée ou identifiable ;\n"
+        "2- « responsable du traitement » : la personne physique ou morale qui détermine les finalités et les moyens du traitement ;\n"
+        "3- « sous-traitant » : la personne physique ou morale qui traite des données pour le compte du responsable."
+    )
+    spans = definition_spans(text, "")
+    assert [s["source_term"] for s in spans] == ["données à caractère personnel", "responsable du traitement", "sous-traitant"]
+    assert not spans[0]["quote"].rstrip().endswith("2-")
+
+
+def test_a_chinese_definition_taken_from_a_translated_list_stops_at_the_next_item():
+    from app.knowledge.legal_terms import _zh_definition
+
+    zh = "3- “敏感数据”：揭示种族或健康状况的个人数据； 4- “个人数据文件”（“文件”）：任何结构化的个人数据集合；"
+    assert _zh_definition(zh, "敏感数据") == "敏感数据”：揭示种族或健康状况的个人数据；"

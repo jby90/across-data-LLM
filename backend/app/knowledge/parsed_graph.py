@@ -26,12 +26,12 @@ def validate_cached_result(payload, source, prepared):
         payload["source_revision_id"] != str(source.id)
         or payload["source_hash"] != source.content_hash
     ):
-        raise ValueError("source revision/hash differs")
+        raise ValueError("源修订记录标识或哈希不一致")
     if payload["active"] or payload["usable_as_legal_basis"] or payload["human_reviewed"]:
-        raise ValueError("pending page graph cannot inherit legal approval")
+        raise ValueError("待审页面图谱提案不能直接继承人工法律审批状态")
     for number, block in enumerate(payload["blocks"]):
         if block["block_number"] != number:
-            raise ValueError("graph source blocks duplicated or reordered")
+            raise ValueError("图谱源文本块存在重复或乱序")
         original = prepared["blocks"][block["block_number"]]
         span = {k: original[k] for k in ("start", "end")}
         text = prepared["layout"]["text"][span["start"] : span["end"]]
@@ -40,9 +40,9 @@ def validate_cached_result(payload, source, prepared):
             or block["source_text"] != text
             or block["kind"] != original["kind"]
         ):
-            raise ValueError("graph block source differs")
+            raise ValueError("图谱文本块与源页面内容不一致")
         if original["kind"] != "table" and block["relations"]:
-            raise ValueError("non-normative block cannot contain legal relations")
+            raise ValueError("非规范性文本块不得抽取法律关系")
         if original["kind"] == "table" and block["status"] == "completed":
             extractor.ClauseExtractionPayload.model_validate(block["extraction_payload"])
         for row in block["relations"]:
@@ -51,7 +51,7 @@ def validate_cached_result(payload, source, prepared):
             if not evaluation.admitted:
                 continue
             if relation.type == RelationType.PENALIZES:
-                raise ValueError("fee schedule cannot establish penalties")
+                raise ValueError("收费附表不得作为行政处罚依据")
             quote = evaluation.aligned_quote
             if not (
                 quote
@@ -59,7 +59,7 @@ def validate_cached_result(payload, source, prepared):
                 and evaluation.judge_verdict == "yes"
                 and evaluation.judge_model
             ):
-                raise ValueError("cached relation lacks verified independent evidence")
+                raise ValueError("缓存关系缺少经独立核验的原文引证")
             ok, _ = extractor.validate_relation_type_constraints(
                 relation.type,
                 row["source_type"],
@@ -70,27 +70,27 @@ def validate_cached_result(payload, source, prepared):
                 payload["document_title"],
             )
             if not ok or text[row["quote_span"]["start"] : row["quote_span"]["end"]] != quote:
-                raise ValueError("cached relation type/quote span differs")
+                raise ValueError("缓存关系的类型约束或引文区间不一致")
     if len(payload["blocks"]) != len(prepared["blocks"]):
-        raise ValueError("graph source block omitted")
+        raise ValueError("图谱源文本块存在遗漏")
 
 
 async def propose_parsed_graph(session, source, archive):
     p = source.payload
     if source.action != "source_parse_revision" or payload_hash(p) != source.content_hash:
-        raise ValueError("immutable source revision checksum differs")
+        raise ValueError("不可变源修订记录校验和不一致")
     if (
         p["active"]
         or p["human_reviewed"]
         or p["usable_as_legal_basis"]
         or p["review_status"] != "pending_review"
     ):
-        raise ValueError("this path only accepts unactivated pending page repairs")
+        raise ValueError("仅允许对尚未激活的待审页面修复提案执行抽取")
     clause = await session.get(Clause, source.target_id)
     version = await session.get(DocumentVersion, clause.version_id)
     doc = await session.get(Document, version.document_id)
     if await document_is_held(session, doc.id):
-        raise ValueError("held document cannot supply proposed legal evidence")
+        raise ValueError("处于安全隔离状态的文档不能提供图谱证据提案")
     blob = archive.read(version.archive_path)
     if (
         p["version_id"] != str(version.id)
@@ -100,13 +100,13 @@ async def propose_parsed_graph(session, source, archive):
         or clause.original_text != p["original_clause_text"]
         or ArchiveStore.sha256(clause.original_text.encode()) != clause.text_hash
     ):
-        raise ValueError("original PDF/clause binding differs")
+        raise ValueError("原始 PDF 与条款绑定校验不一致")
     prepared = p["prepared"]
     verify_prepared(prepared)
     import asyncio
 
     if await asyncio.to_thread(prepare_page, blob, p["page_number"]) != prepared:
-        raise ValueError("fresh PDF reading differs from pending source repair")
+        raise ValueError("最新解析的 PDF 页面结果与待审修复记录不一致")
     settings = get_settings()
     key = payload_hash(
         dict(

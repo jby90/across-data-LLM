@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from pydantic import ConfigDict, Field, field_serializer
 
 from app.knowledge.schemas import (
@@ -31,6 +32,6 @@ class PublicRegulationDetail(RegulationDetailOut):
     @field_serializer("versions")
     def business_versions(self, values):
         return [
-            {key: row.get(key) for key in ("version_no", "legal_status", "fetched_at")}
+            {key: row.get(key) for key in ("version_no", "legal_status", "version_label", "published_date")}
             for row in values
         ]

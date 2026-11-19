@@ -85,6 +85,12 @@ async def run_due_once(
     while True:
         claimed = await claim_due_site(sf, now_fn())
         if claimed is None:
+            try:
+                from app.opinion.weekly_digest import run_due_digest_if_needed
+
+                await run_due_digest_if_needed(sf, now_fn())
+            except Exception:  # noqa: BLE001
+                log.exception("周报调度检查异常")
             return runs
         site_id, trigger = claimed
         try:

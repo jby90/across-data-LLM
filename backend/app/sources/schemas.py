@@ -1,11 +1,12 @@
 import re
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from app.ingestion.fetcher import validate_public_http_url
+from app.sources.attention import attention_of
 from app.sources.models import Strategy
 
 DocumentType = Literal["LAW", "REGULATION", "GUIDANCE", "STANDARD", "FORM", "OTHER"]
@@ -118,6 +119,20 @@ class SiteOut(BaseModel):
     terms_decided_at: datetime | None
     document_count: int = 0
     sample_titles: list[str] = Field(default_factory=list)
+    doc_types: list[str] = Field(default_factory=list)
+    latest_discovered_at: datetime | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def attention(self) -> str | None:
+        return attention_of(
+            enabled=self.enabled,
+            terms_status=self.terms_status,
+            consecutive_failures=self.consecutive_failures,
+            last_run_at=self.last_run_at,
+            interval_hours=self.interval_hours,
+            now=datetime.now(UTC),
+        )
 
 
 class RunOut(BaseModel):

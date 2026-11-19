@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """六要素+十二关系知识图谱抽取(S2 大模型结构化抽取 + 类型约束矩阵 + 原文逐字校验 + 语义裁判)、
 两层术语库与解读要点初始化、以及法规版本更新联动。
 
@@ -255,7 +256,7 @@ SEED_GLOSSARY_TERMS: list[dict] = [
     },
 ]
 
-# 解读要点确认单(只把法规没有直接定义、但直接影响车企结论的少数关键问题提交律所确认)
+# 解读要点(法规没有直接定义、但直接影响车企结论的少数关键问题，由管理员核对)
 SEED_REVIEW_POINTS: list[dict] = [
     {
         "country_code": "SG",
@@ -614,7 +615,9 @@ async def classify_document_relevance(
         doc.relevance_source = "rule"
         return det
 
-    if doc.relevance_source == "llm" and doc.relevance in ("relevant", "related", "out_of_scope"):
+    # 已有的判定（大模型判定，或入库时的范围分拣 scope_triage）直接沿用：用户法规库、检索和图谱用同一个范围。
+    # 之前范围分拣过的文件每次重抽都会再问一次模型，结论时有时无，判成范围外的那次还会清掉它已有的关系
+    if doc.relevance_source in ("llm", "scope_triage") and doc.relevance in ("relevant", "related", "out_of_scope"):
         return doc.relevance, doc.relevance_note or ""
 
     hint = _rule_relevance_hint(doc.title or "")
@@ -1841,6 +1844,7 @@ async def extract_knowledge_for_country(
         else:
             await transaction.commit()
     except Exception as exc:
+        logger.exception("knowledge extraction for %s failed", cc)
         await transaction.rollback()
         result = {
             "status": "failed",
@@ -1983,6 +1987,10 @@ async def _extract_knowledge_for_country_impl(
             .scalars()
             .all()
         )
+        # 按业务相关章节入库的文件：范围外的条文不进图谱
+        from app.ingestion.intake_scope import out_of_scope
+
+        clauses = [c for c in clauses if not out_of_scope(doc.intake_scope, ver.id, c.ordinal)]
         if not clauses:
             continue
 
@@ -2839,8 +2847,179 @@ async def handle_new_version_linkage(
                     stale_edges += 1
 
     await session.flush()
+    moved = await repoint_unchanged_evidence(session)
     return {
+        "graph_moved": moved["nodes_moved"] + moved["edges_moved"],
         "stale_translations": stale_tr,
         "stale_edges": stale_edges,
         "reused_translations": reused_tr,
     }
+
+
+async def repoint_unchanged_evidence(session, *, country: str | None = None) -> dict[str, int]:
+    """Point graph nodes and edges at the latest version of a clause whose text did not change.
+
+    A new parse of a document keeps the old clause rows as history; the graph then still cites the
+    old rows. Where the same text (same hash) exists in the document's latest parsed version, the
+    graph is moved to that row — the evidence is the same sentence, only its row is current. A
+    clause whose text changed is NOT moved: it is a different statement and goes through the review
+    path (stale), as ``handle_new_version_linkage`` does. Every move is snapshotted."""
+    from sqlalchemy import text
+
+    from app.knowledge.history import snapshot
+
+    stats = {"nodes_moved": 0, "edges_moved": 0, "unmatched_nodes": 0, "unmatched_edges": 0}
+    pairs = (
+        await session.execute(
+            text(
+                """select old.id, new.id from clauses old
+                join document_versions ov on ov.id=old.version_id
+                join documents d on d.id=ov.document_id
+                join document_versions nv on nv.document_id=ov.document_id and nv.state='parsed'
+                  and nv.version_no=(select max(version_no) from document_versions x
+                                     where x.document_id=ov.document_id and x.state='parsed')
+                join clauses new on new.version_id=nv.id and new.text_hash=old.text_hash
+                where ov.version_no < nv.version_no
+                  and (cast(:c as text) is null or d.country_code=cast(:c as text))
+                  and (exists (select 1 from kg_nodes n where n.evidence_clause_id=old.id
+                               and n.review_status<>'superseded')
+                    or exists (select 1 from kg_edges e where e.evidence_clause_id=old.id
+                               and e.review_status not in ('superseded','rejected')))"""
+            ),
+            {"c": country},
+        )
+    ).all()
+    seen: dict = {}
+    for old_id, new_id in pairs:
+        seen.setdefault(old_id, new_id)  # 同一文本在新版里出现多次时取第一处
+    for old_id, new_id in seen.items():
+        for node in (
+            await session.scalars(
+                select(KgNode).where(
+                    KgNode.evidence_clause_id == old_id, KgNode.review_status != "superseded"
+                )
+            )
+        ).all():
+            snapshot(session, node, "before_evidence_repoint")
+            node.evidence_clause_id = new_id
+            stats["nodes_moved"] += 1
+        for edge in (
+            await session.scalars(
+                select(KgEdge).where(
+                    KgEdge.evidence_clause_id == old_id,
+                    KgEdge.review_status.notin_(("superseded", "rejected")),
+                )
+            )
+        ).all():
+            snapshot(session, edge, "before_evidence_repoint")
+            edge.evidence_clause_id = new_id
+            stats["edges_moved"] += 1
+    await session.flush()
+    return stats
+
+
+async def relocate_changed_evidence(session, *, country: str | None = None) -> dict[str, int]:
+    """For graph nodes whose evidence clause was re-read (text changed) in a newer parse: move them
+    to the same-numbered clause of the latest version when that number is unique there, and put
+    them back into review — the sentence is no longer the one a reviewer approved. Nodes whose
+    clause number has no unique counterpart are left as they are and counted."""
+    from sqlalchemy import text
+
+    from app.knowledge.history import snapshot
+
+    rows = (
+        await session.execute(
+            text(
+                """select n.id, new.id from kg_nodes n
+                join clauses old on old.id=n.evidence_clause_id
+                join document_versions ov on ov.id=old.version_id
+                join documents d on d.id=ov.document_id
+                join document_versions nv on nv.document_id=ov.document_id and nv.state='parsed'
+                  and nv.version_no=(select max(version_no) from document_versions x
+                                     where x.document_id=ov.document_id and x.state='parsed')
+                join clauses new on new.version_id=nv.id and new.clause_number=old.clause_number
+                where ov.version_no < nv.version_no and n.review_status<>'superseded'
+                  and old.clause_number is not null
+                  and (cast(:c as text) is null or d.country_code=cast(:c as text))
+                  and (select count(*) from clauses y where y.version_id=nv.id
+                       and y.clause_number=old.clause_number)=1"""
+            ),
+            {"c": country},
+        )
+    ).all()
+    moved = 0
+    for node_id, new_id in rows:
+        node = await session.get(KgNode, node_id)
+        snapshot(session, node, "before_evidence_relocate")
+        node.evidence_clause_id = new_id
+        node.review_status = "pending_review"
+        node.attributes = {**(node.attributes or {}), "evidence_relocated": True}
+        moved += 1
+    await session.flush()
+    return {"nodes_relocated": moved}
+
+
+async def relocate_by_similarity(
+    session, *, country: str | None = None, min_ratio: float = 0.8, margin: float = 0.05
+) -> dict[str, int]:
+    """Last resort for nodes still citing an older parse whose clause number changed (the new cut
+    renumbered): use the clause of the latest version whose text is most similar, if it is clearly
+    the best (ratio >= min_ratio and ahead of the runner-up by ``margin``). Moved nodes go back to
+    review; nothing is moved on a weak or ambiguous match."""
+    import difflib
+
+    from sqlalchemy import text
+
+    from app.knowledge.history import snapshot
+
+    rows = (
+        await session.execute(
+            text(
+                """select n.id, old.original_text, nv.id from kg_nodes n
+                join clauses old on old.id=n.evidence_clause_id
+                join document_versions ov on ov.id=old.version_id
+                join documents d on d.id=ov.document_id
+                join document_versions nv on nv.document_id=ov.document_id and nv.state='parsed'
+                  and nv.version_no=(select max(version_no) from document_versions x
+                                     where x.document_id=ov.document_id and x.state='parsed')
+                where n.review_status<>'superseded' and ov.version_no<nv.version_no
+                  and (cast(:c as text) is null or d.country_code=cast(:c as text))"""
+            ),
+            {"c": country},
+        )
+    ).all()
+    cache: dict = {}
+    moved = ambiguous = 0
+    for node_id, old_text, version_id in rows:
+        if version_id not in cache:
+            cache[version_id] = (
+                await session.execute(
+                    text("select id, original_text from clauses where version_id=:v"),
+                    {"v": version_id},
+                )
+            ).all()
+        scored = sorted(
+            (
+                (
+                    difflib.SequenceMatcher(
+                        None, old_text[:1500], t[:1500], autojunk=False
+                    ).ratio(),
+                    i,
+                )
+                for i, t in cache[version_id]
+            ),
+            reverse=True,
+        )
+        if not scored or scored[0][0] < min_ratio:
+            continue
+        if len(scored) > 1 and scored[0][0] - scored[1][0] < margin:
+            ambiguous += 1
+            continue
+        node = await session.get(KgNode, node_id)
+        snapshot(session, node, "before_evidence_relocate")
+        node.evidence_clause_id = scored[0][1]
+        node.review_status = "pending_review"
+        node.attributes = {**(node.attributes or {}), "evidence_relocated": True}
+        moved += 1
+    await session.flush()
+    return {"nodes_relocated": moved, "ambiguous": ambiguous}

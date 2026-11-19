@@ -13,6 +13,7 @@ import {
   readerTypes,
 } from '@cyshuhe/shared/src/readerRelations'
 import type { ReaderPayload } from '@cyshuhe/shared/src/readerRelations'
+import { articleLabel } from '@cyshuhe/shared/src/articleLabel'
 import { api } from '../api'
 
 echarts.use([GraphChart, TooltipComponent, CanvasRenderer])
@@ -38,7 +39,57 @@ const view = computed(() =>
   ),
 )
 const evidence = computed(() => payload.value?.relations.find((r) => r.id === selected.value))
-const names = computed(() => new Map(payload.value?.nodes.map((n) => [n.id, n.name]) || []))
+
+function splitBilingualNodeName(rawName?: string | null, rawOrig?: string | null): { zh: string; orig: string } {
+  const s = (rawName || '').trim()
+  const extOrig = (rawOrig || '').trim()
+  const m = s.match(/^(.*[\u4e00-\u9fff])\s*[（(]\s*([A-Za-zÀ-ÿ\u0600-\u06FF][^）)]*)\s*[）)]$/)
+  if (m) {
+    return {
+      zh: m[1].trim(),
+      orig: extOrig && extOrig !== m[1].trim() ? extOrig : m[2].trim(),
+    }
+  }
+  return {
+    zh: s,
+    orig: extOrig && extOrig !== s ? extOrig : '',
+  }
+}
+
+const nodeMeta = computed(() => {
+  const map = new Map<string, { zh: string; orig: string; typeLabel: string }>()
+  for (const n of payload.value?.nodes || []) {
+    const { zh, orig } = splitBilingualNodeName(n.name, n.original_name)
+    map.set(n.id, {
+      zh,
+      orig,
+      typeLabel: readerTypes[n.type]?.label || n.type,
+    })
+  }
+  return map
+})
+
+const names = computed(() => new Map([...nodeMeta.value.entries()].map(([id, m]) => [id, m.zh])))
+
+function formatRelationClause(r: { clause_number: string | null }): string {
+  const v = (r.clause_number || '').trim()
+  if (!v) return ''
+  const artMatch = v.match(/^(?:Article|Art\.?|Section|Sec\.?)\s*(\d+[A-Za-z]?(?:\([^)]+\))*)$/i)
+  if (artMatch) return `第 ${artMatch[1]} 条`
+  const converted = articleLabel(v)
+  return converted.replace(/^第\s*(\d+[A-Za-z]?(?:\([^)]+\))*)\s*([条段节章])$/, '第 $1 $2')
+}
+
+const evidenceOrigNote = computed(() => {
+  if (!evidence.value) return ''
+  const sMeta = nodeMeta.value.get(evidence.value.source)
+  const tMeta = nodeMeta.value.get(evidence.value.target)
+  const parts: string[] = []
+  if (sMeta?.orig) parts.push(`${sMeta.zh}（${sMeta.orig}）`)
+  if (tMeta?.orig && tMeta.orig !== sMeta?.orig) parts.push(`${tMeta.zh}（${tMeta.orig}）`)
+  return parts.join('；')
+})
+
 const rows = computed(() =>
   (payload.value?.relations || []).slice((listPage.value - 1) * 6, listPage.value * 6),
 )
@@ -95,33 +146,49 @@ function draw() {
       if (event.dataType === 'edge') selected.value = event.data.evidenceIds[0]
     })
   }
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const positions = readerPositions(view.value.nodes, focus.value)
   const data = view.value.nodes.map((n) => {
     const position = positions.get(n.id)!
+    const meta = nodeMeta.value.get(n.id) || splitBilingualNodeName(n.name, n.original_name)
+    const labelPos = position.center
+      ? 'top'
+      : Math.abs(position.y) > Math.abs(position.x) * 1.45
+        ? position.y < 0
+          ? 'top'
+          : 'bottom'
+        : position.x < 0
+          ? 'left'
+          : 'right'
     return {
       id: n.id,
-      name: n.name,
-      x: position.x,
-      y: position.y,
+      name: meta.zh,
+      tooltipText: meta.orig
+        ? `${readerTypes[n.type]?.label || n.type} · ${meta.zh}\n外文原名：${meta.orig}`
+        : `${readerTypes[n.type]?.label || n.type} · ${meta.zh}`,
+      x: Math.round(position.x * 1.25),
+      y: Math.round(position.y * 1.2),
+      fixed: position.center,
       symbolSize: position.center ? 28 : 16,
       itemStyle: { color: readerTypes[n.type]?.color || '#718096' },
       label: {
         show: true,
-        formatter: readerLabel(n.name),
-        fontSize: 12,
-        lineHeight: 17,
-        position: position.center ? 'bottom' : position.x < -40 ? 'left' : 'right',
-        distance: 9,
+        formatter: readerLabel(meta.zh),
+        fontSize: 13,
+        lineHeight: 18,
+        position: labelPos,
+        distance: 8,
         color: '#34495d',
       },
     }
   })
   chart.setOption(
     {
-      animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      animation: !reducedMotion,
       tooltip: {
         renderMode: 'richText',
-        formatter: (p: any) => (p.dataType === 'node' ? p.name : p.data.fullLabel),
+        confine: true,
+        formatter: (p: any) => (p.dataType === 'node' ? p.data.tooltipText || p.name : p.data.fullLabel),
       },
       series: [
         {
@@ -130,23 +197,27 @@ function draw() {
           roam: true,
           draggable: true,
           nodeScaleRatio: 0,
-          left: '22%',
-          right: '22%',
-          top: 48,
-          bottom: 55,
+          labelLayout: {
+            hideOverlap: false,
+            moveOverlap: 'shiftY',
+          },
           data,
           links: view.value.lines.map((line, index) => ({
             source: line.source,
             target: line.target,
             evidenceIds: line.ids,
             fullLabel: `${line.label} · ${line.ids.length} 条依据`,
-            label: {
-              show: true,
-              formatter: line.label,
-              fontSize: 11,
-              color: '#50657b',
-              backgroundColor: '#ffffffdd',
-              padding: 3,
+            // 连线上的关系名默认不显示（斜着叠在一起读不清），悬停或点选时显示
+            label: { show: false, formatter: line.label },
+            emphasis: {
+              label: {
+                show: true,
+                formatter: line.label,
+                fontSize: 13,
+                color: '#1e3a8a',
+                backgroundColor: '#ffffff',
+                padding: 4,
+              },
             },
             lineStyle: {
               color: '#b5c7d8',
@@ -193,10 +264,9 @@ onBeforeUnmount(() => {
   <section class="relations-reader" v-loading="loading" aria-label="法规关系解读">
     <div class="relation-summary" aria-live="polite">
       <span
-        >全部关系 <strong>{{ payload?.total || 0 }}</strong></span
+        >这份法规共 <strong>{{ payload?.total || 0 }}</strong> 条关系</span
       >
-      <span>已加载 {{ payload?.relations.length || 0 }} 条</span>
-      <span>当前图中 {{ view.edges.length }} 条 · {{ view.lines.length }} 组连线</span>
+      <span>图中显示与所选对象直接相关的 {{ view.edges.length }} 条</span>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <el-button v-if="error" @click="load(!!payload)">重新加载</el-button>
@@ -212,7 +282,7 @@ onBeforeUnmount(() => {
           v-for="n in payload.nodes"
           :key="n.id"
           :value="n.id"
-          :label="`${readerTypes[n.type]?.label || n.type} · ${n.name}`"
+          :label="`${readerTypes[n.type]?.label || n.type} · ${names.get(n.id) || n.name}`"
         />
       </el-select>
       <el-button
@@ -229,14 +299,14 @@ onBeforeUnmount(() => {
       class="relation-graph"
       ref="host"
       role="img"
-      aria-label="法规局部语义关系图，点击节点展开，点击连线查看依据；也可使用下方关系目录"
+      aria-label="法规条文关联关系图"
     />
     <el-empty
       v-if="!loading && !error && !payload?.total"
       description="该版本暂无可展示的关系，可切换条款阅读查看原文"
     />
     <template v-if="payload?.relations.length">
-      <p class="graph-help">点击节点展开直接关联，点击连线查看依据。滚轮缩放，拖动调整位置。</p>
+      <p class="graph-help">把鼠标移到连线上可看关系名称；点击节点查看它的直接关联，点击连线查看条文依据。滚轮缩放，拖动调整位置。</p>
       <div class="relation-legend">
         <span v-for="(type, key) in readerTypes" :key="key"
           ><i :style="{ background: type.color }" />{{ type.label }}</span
@@ -253,8 +323,8 @@ onBeforeUnmount(() => {
             @click="chooseRelation(r.id)"
           >
             <span>{{ names.get(r.source) }}</span
-            ><em>{{ r.label }} →</em><span>{{ names.get(r.target) }}</span>
-            <small>{{ r.review_status === 'approved' ? '已复核' : '待核对' }}</small>
+            ><em>{{ r.label }} →</em><span>{{ names.get(r.target) }}</span
+            ><span v-if="formatRelationClause(r)" class="relation-clause-tag">{{ formatRelationClause(r) }}</span>
           </button>
           <el-pagination
             v-if="payload.relations.length > 6"
@@ -269,20 +339,17 @@ onBeforeUnmount(() => {
           <template v-if="evidence">
             <div class="evidence-heading">
               <h3>条款依据</h3>
-              <el-tag
-                :type="evidence.review_status === 'approved' ? 'success' : 'warning'"
-                size="small"
-                >{{ evidence.review_status === 'approved' ? '已复核' : '待核对' }}</el-tag
-              >
             </div>
             <p>
               {{ names.get(evidence.source) }}
               <strong>{{ evidence.label }}</strong>
               {{ names.get(evidence.target) }}
             </p>
-            <div class="basis-location">
-              归档版本 {{ payload.version_no }} · 条款
-              {{ evidence.clause_number || '编号未记录' }}
+            <div v-if="evidenceOrigNote" class="basis-orig">
+              外文原名：{{ evidenceOrigNote }}
+            </div>
+            <div v-if="evidence.clause_number" class="basis-location">
+              依据：{{ formatRelationClause(evidence) || articleLabel(evidence.clause_number) }}
             </div>
             <blockquote dir="auto">{{ evidence.quote }}</blockquote>
             <el-button type="primary" plain @click="emit('basis', evidence.clause_id)"
@@ -329,6 +396,9 @@ onBeforeUnmount(() => {
   max-width: 100%;
 }
 .relation-graph {
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
   width: 100%;
   height: 460px;
   margin-top: 16px;
@@ -338,12 +408,12 @@ onBeforeUnmount(() => {
 }
 .graph-help {
   color: #718096;
-  font-size: 12px;
+  font-size: 13px;
   margin: 12px 0;
 }
 .relation-legend {
   gap: 14px;
-  font-size: 12px;
+  font-size: 13px;
   color: #61758a;
   margin-bottom: 24px;
 }
@@ -392,8 +462,28 @@ h3 {
   color: #2565a6;
 }
 .relation-row small {
+  font-size: 13px;
   color: #7d8999;
   white-space: nowrap;
+}
+.relation-clause-tag {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.relation-row.active .relation-clause-tag {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.basis-orig {
+  color: #64748b;
+  font-size: 13px;
+  margin: -4px 0 6px;
 }
 .relation-evidence {
   background: #f7f9fc;
@@ -411,7 +501,7 @@ h3 {
 }
 .basis-location {
   color: #718096;
-  font-size: 12px;
+  font-size: 13px;
 }
 blockquote {
   margin: 14px 0 20px;

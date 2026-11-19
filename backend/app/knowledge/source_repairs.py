@@ -42,9 +42,9 @@ def verify_prepared(prepared):
     expected = partition_page(prepared["layout"]["text"])
     for field in ("blocks", "pieces", "translation_units", "literal_fields"):
         if prepared[field] != expected[field]:
-            raise ValueError(f"source partition {field} differs; refused")
+            raise ValueError(f"源页面分区校验不一致（{field}），已拒绝")
     if not prepared["layout"]["glyph_coverage_passed"]:
-        raise ValueError("PDF glyph coverage must pass")
+        raise ValueError("PDF 字符覆盖率校验未通过")
     return True
 
 
@@ -135,12 +135,12 @@ async def translate_prepared(prepared, effective_terms):
 def verify_bilingual(prepared, bilingual):
     verify_prepared(prepared)
     if len(bilingual["units"]) != len(prepared["translation_units"]):
-        raise ValueError("translation unit omitted or duplicated")
+        raise ValueError("双语翻译单元存在遗漏或重复")
     for source, translated in zip(prepared["translation_units"], bilingual["units"], strict=True):
         if any(translated[key] != value for key, value in source.items()):
-            raise ValueError("translation attached to a different source span")
+            raise ValueError("翻译结果关联的原文区间不匹配")
     if len(bilingual["literal_fields"]) != len(prepared["literal_fields"]):
-        raise ValueError("literal field omitted or duplicated")
+        raise ValueError("字面源数据字段存在遗漏或重复")
     for source, literal in zip(
         prepared["literal_fields"], bilingual["literal_fields"], strict=True
     ):
@@ -148,40 +148,40 @@ def verify_bilingual(prepared, bilingual):
             any(literal[key] != value for key, value in source.items())
             or literal["rendered_text"] != source["source_text"]
         ):
-            raise ValueError("literal source data changed or reassigned")
+            raise ValueError("字面源数据被篡改或错位")
         if literal["source_sha256"] != ArchiveStore.sha256(source["source_text"].encode()):
-            raise ValueError("literal source hash differs")
+            raise ValueError("字面源数据哈希校验不一致")
     if (
         bilingual["whole_clause_translation_passed"]
         or bilingual["active"]
         or bilingual["usable_as_legal_basis"]
         or bilingual["human_reviewed"]
     ):
-        raise ValueError("typed machine revision cannot claim whole-clause or legal approval")
+        raise ValueError("结构化机器修订记录不得直接标记为整条译文通过或人工审批生效")
     return True
 
 
 async def append_page_repair(session, archive, clause_id, page_number, expected_pdf_hash):
     clause = await session.get(Clause, uuid.UUID(str(clause_id)))
     if clause is None:
-        raise ValueError("unknown source clause")
+        raise ValueError("未找到对应的源条款记录")
     version = await session.get(DocumentVersion, clause.version_id)
     document = await session.get(Document, version.document_id)
     if await document_is_held(session, document.id):
-        raise ValueError("held source cannot be repaired as valid evidence")
+        raise ValueError("处于安全隔离状态的文档不可执行页面修复")
     if (
         clause.page_start is None
         or clause.page_end is None
         or not clause.page_start <= page_number <= clause.page_end
     ):
-        raise ValueError("repair page must intersect the original clause")
+        raise ValueError("待修复页码不在原条款所在页码范围内")
     blob = archive.read(version.archive_path)
     if (
         ArchiveStore.sha256(blob) != expected_pdf_hash
         or version.content_hash != expected_pdf_hash
         or ArchiveStore.sha256(clause.original_text.encode()) != clause.text_hash
     ):
-        raise ValueError("frozen PDF or original clause identity differs")
+        raise ValueError("冻结 PDF 哈希或原始条款不一致")
     prepared = await asyncio.to_thread(prepare_page, blob, page_number)
     verify_prepared(prepared)
     source_payload = dict(

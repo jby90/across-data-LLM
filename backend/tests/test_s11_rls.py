@@ -77,7 +77,10 @@ async def rls_data(rls_database):
     sf = async_sessionmaker(ordinary, expire_on_commit=False)
     with system_scope("isolated RLS fixture seed"):
         async with root.begin() as conn:
-            tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
+            # 审计表只增不改，数据库拒绝清空，本来就不该被测试清表
+            tables = ", ".join(
+                t.name for t in Base.metadata.sorted_tables if t.name != "audit_logs"
+            )
             await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
         async with root_sf() as s:
             org_a = await service.create_org(s, "RLS Alpha")
@@ -85,10 +88,9 @@ async def rls_data(rls_database):
             users = {}
             for key, email, user_role, org in [
                 ("admin", "admin@example.com", Role.PLATFORM_ADMIN, None),
-                ("reviewer", "reviewer@example.com", Role.REVIEWER, None),
-                ("a", "a-admin@example.com", Role.ORG_ADMIN, org_a.id),
+                ("a", "a-admin@example.com", Role.MEMBER, org_a.id),
                 ("a_member", "a-member@example.com", Role.MEMBER, org_a.id),
-                ("b", "b-admin@example.com", Role.ORG_ADMIN, org_b.id),
+                ("b", "b-admin@example.com", Role.MEMBER, org_b.id),
             ]:
                 users[key] = await service.create_user(
                     s, email=email, display_name=key, password=PASSWORD, role=user_role, org_id=org
@@ -271,7 +273,6 @@ async def test_authentication_is_bounded_and_http_cannot_choose_tenant(rls_data)
     a = bearer(await login(c, "user", "a-admin@example.com"))
     b = bearer(await login(c, "user", "b-admin@example.com"))
     admin = bearer(await login(c, "admin", "admin@example.com"))
-    reviewer = bearer(await login(c, "admin", "reviewer@example.com"))
     for headers, own, foreign in [(a, d["a_task"], d["b_task"]), (b, d["b_task"], d["a_task"])]:
         response = await c.get("/api/analysis/tasks", headers=headers)
         assert response.status_code == 200, response.text
@@ -284,10 +285,9 @@ async def test_authentication_is_bounded_and_http_cannot_choose_tenant(rls_data)
         response = await c.get(f"/api/analysis/tasks/{own.id}", headers=headers)
         assert response.status_code == 200, response.text
         assert response.json()["report_versions"][0]["executive_summary"].endswith(own.title)
-    for headers in (admin, reviewer):
-        response = await c.get("/api/admin/agent-studio/tasks", headers=headers)
-        assert response.status_code == 200, response.text
-        assert len(response.json()) == 2
+    response = await c.get("/api/admin/agent-studio/tasks", headers=admin)
+    assert response.status_code == 200, response.text
+    assert len(response.json()) == 2
     with database_scope():
         async with d["sf"]() as s:
             await bind_identity(s, DatabaseIdentity(scope="auth", auth_email="a-admin@example.com"))
@@ -449,3 +449,21 @@ async def test_concurrent_requests_do_not_reuse_another_tenant_or_admin_context(
     with database_scope():
         async with d["sf"]() as s:
             assert (await s.scalars(select(AnalysisTask))).all() == []
+
+
+async def test_briefing_notice_with_real_migrations_and_runtime_role(rls_data):
+    """简报出新版的提醒不挂评估报告：在真实迁移（含租户触发器）和运行角色下也能写入、只给本企业看。"""
+    from app.knowledge.whitepaper import CountryWhitepaper
+
+    d = rls_data
+    async with d["root_sf"]() as s:
+        s.add(CountryWhitepaper(country_code="XX", version_no=1, blocks=[], source_hash="x", report={}))
+        await s.commit()
+    a = bearer(await login(d["client"], "user", "a-admin@example.com"))
+    b = bearer(await login(d["client"], "user", "b-admin@example.com"))
+    got = await d["client"].get("/api/notifications", headers=a)
+    assert got.status_code == 200, got.text
+    assert [n["kind"] for n in got.json()["items"]] == ["whitepaper"]
+    other = await d["client"].get("/api/notifications", headers=b)
+    assert other.status_code == 200 and [n["kind"] for n in other.json()["items"]] == ["whitepaper"]  # 乙企业在 XX 也有项目
+    assert got.json()["items"][0]["id"] != other.json()["items"][0]["id"]

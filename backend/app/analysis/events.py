@@ -19,9 +19,11 @@ TERMINAL = {"completed", "partial_sample", "failed", "awaiting_user_facts"}
 
 
 async def append_event(session, task, event_type, payload=None):
-    await session.flush()
     # IDs must follow commit order; otherwise a slower transaction can be skipped on replay.
+    # Take this lock before flushing pending task changes: flushing first holds the task row while
+    # waiting here, and a transaction that holds this lock and then updates the same row deadlocks.
     await session.execute(text("SELECT pg_advisory_xact_lock(64042007)"))
+    await session.flush()
     event = AnalysisEvent(
         task_id=task.id, org_id=task.org_id, event_type=event_type, payload=payload or {}
     )
@@ -128,9 +130,16 @@ async def validate_reader(session, principal, task_id=None):
             raise HTTPException(401, "企业已停用")
     await bind_principal(session, principal)
     if task_id is not None:
+        from app.analysis.chat_advisor import viewer_owner
+
         task = await session.get(AnalysisTask, task_id, populate_existing=True)
-        if task is None or task.org_id != principal.org_id:
-            raise HTTPException(404, "合规分析任务不存在")
+        owner = viewer_owner(task) if task is not None else None
+        if (
+            task is None
+            or task.org_id != principal.org_id
+            or (owner is not None and owner != str(principal.user_id))
+        ):
+            raise HTTPException(404, "未找到该合规评估项目")
         return task
     return None
 

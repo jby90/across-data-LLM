@@ -102,3 +102,34 @@ async def test_pipeline_removes_furniture_from_clauses_and_logs_it(session_facto
         # 原文件在归档里完整保留,页眉页脚没有丢
         assert b"ACME Act 2012" in archive.read(v.archive_path)
     assert isinstance(archive, ArchiveStore)
+
+
+def test_gazette_mastheads_are_removed_even_in_a_two_page_text_but_cited_gazettes_stay():
+    from app.ingestion.parsing import strip_gazette_mastheads
+
+    cases_removed = [
+        "Page 3028 Journal Officiel de la République Tunisienne — 19 septembre 2008 N° 76",
+        "N° 49 Journal Officiel de la République Tunisienne — 16 avril 2024 Page 1261",
+        "الجريدة الرسمية - العدد ٥ مكرر (أ) في ٤ فبراير سنة ٢٠٠٩",
+        "٢٨ الجريدة الرسمية - العدد ٣٧ مكرر (ب) في ١٥ سبتمبر سنة ٢٠٢٠",
+        "الجريدة الرسمية - العدد ٤ - ٢٠٢٦/١/٢٢",
+    ]
+    for line in cases_removed:
+        out, n = strip_gazette_mastheads(f"نص قبل\n{line}\nنص بعد")
+        assert n == 1 and line not in out and "نص قبل" in out and "نص بعد" in out, line
+    # 页码单独成行紧挨报头：一并去掉；离得远的数字行不动
+    out, _ = strip_gazette_mastheads("a\n٢٥\nالجريدة الرسمية - العدد ٣٢ في ١٤ أغسطس سنة ٢٠١٨\nb\n٧\nc")
+    assert out == "a\nb\n٧\nc"
+    # 正文里引用公报的句子不是报头
+    for cite in [
+        "Cette loi a été publiée au Journal Officiel de la République Tunisienne n° 12 du 3 mars 2004.",
+        "نُشر القانون في الجريدة الرسمية العدد ١٢ بتاريخ ٣ مارس ٢٠٠٤ ويعمل به من اليوم التالي لنشره.",
+        "Vu le Journal Officiel",
+    ]:
+        assert strip_gazette_mastheads(cite) == (cite, 0), cite
+
+
+def test_running_headers_reports_the_masthead_pass_for_short_documents():
+    pages = ["Art. 1\ntext\nJournal Officiel de la République Tunisienne — 7 mai 2002 Page 1117", "Art. 2\ntext"]
+    cleaned, removed = strip_running_headers(pages)
+    assert removed == ["公报报头"] and all("Journal" not in p for p in cleaned)

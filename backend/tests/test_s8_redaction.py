@@ -188,16 +188,16 @@ async def test_tenant_terms_endpoints_authorize_and_keep_change_history(
     client, seed, session_factory
 ):
     admin = bearer(await login(client, "admin", "admin@example.com"))
-    reviewer = bearer(await login(client, "admin", "reviewer@example.com"))
     member = bearer(await login(client, "user", "a-member@example.com"))
-    org_admin = bearer(await login(client, "user", "a-admin@example.com"))
     url = f"/api/admin/orgs/{seed['org_b'].id}/redaction"
-    assert (
-        await client.patch(url, headers=reviewer, json={"terms": ["SECRET"]})
-    ).status_code == 403
     assert (await client.patch(url, headers=member, json={"terms": ["SECRET"]})).status_code == 401
+    # 调用外部模型时隐去的词只由超级管理员在“企业与账号”页按企业设置；用户端没有这个入口
     r = await client.patch(
-        "/api/user/organization/redaction", headers=org_admin, json={"terms": ["Project-Alpha"]}
+        "/api/user/organization/redaction", headers=member, json={"terms": ["Project-Alpha"]}
+    )
+    assert r.status_code in (404, 405)
+    r = await client.patch(
+        f"/api/admin/orgs/{seed['org_a'].id}/redaction", headers=admin, json={"terms": ["Project-Alpha"]}
     )
     assert r.status_code == 200 and r.json()["id"] == str(seed["org_a"].id)
     r = await client.patch(url, headers=admin, json={"terms": ["Project-Beta"]})
@@ -216,3 +216,16 @@ async def test_tenant_terms_endpoints_authorize_and_keep_change_history(
             ).all()
         )
         assert len(changes) == 2
+
+
+def test_year_ranges_and_section_numbers_are_not_bank_cards():
+    from app.core.redaction import Redactor
+
+    r = Redactor([]) if "aliases" in Redactor.__init__.__code__.co_varnames else Redactor()
+    text = "période 1986-1988 comme référence ; 1986-1988 1986-1988 1986-1988 1986-1988 ; 5.1.2.2 12 308"
+    out = r.redact(text)
+    out = out[0] if isinstance(out, tuple) else out
+    assert "1986-1988" in out
+    card = r.redact("carte 6222 0212 3456 7890")
+    card = card[0] if isinstance(card, tuple) else card
+    assert "6222" not in card

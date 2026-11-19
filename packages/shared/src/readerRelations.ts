@@ -115,17 +115,19 @@ export function readerLabel(text: string, width = 10, lines = 2) {
 /** Non-degenerate coordinates also for one/two neighbors (avoid cosine epsilon extents). */
 export function readerPositions(nodes: ReaderNode[], focus: string) {
   const neighbors = nodes.filter((n) => n.id !== focus)
+  const staggered = neighbors.length >= 6
   return new Map(
     nodes.map((n) => {
       const index = neighbors.findIndex((other) => other.id === n.id)
       const angle =
         (index / Math.max(1, neighbors.length)) * Math.PI * 2 -
         (neighbors.length <= 2 ? Math.PI / 4 : Math.PI / 2)
+      const ring = staggered ? (index % 2 === 0 ? 1.14 : 0.84) : 1
       return [
         n.id,
         {
-          x: index < 0 ? 0 : Math.round(Math.cos(angle) * 240),
-          y: index < 0 ? 0 : Math.round(Math.sin(angle) * 200),
+          x: index < 0 ? 0 : Math.round(Math.cos(angle) * 285 * ring),
+          y: index < 0 ? 0 : Math.round(Math.sin(angle) * 205 * ring),
           center: index < 0,
         },
       ]

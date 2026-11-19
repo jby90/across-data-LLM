@@ -20,6 +20,9 @@ dependencies = [
     "pillow>=13.0.0",
     "pytesseract>=0.3.13",
     "weasyprint==70.0",
+    "numpy>=2.5.4",
+    "olefile>=0.47",
+    "openpyxl>=3.1.5",
 ]
 
 [dependency-groups]
@@ -61,3 +64,4 @@ ignore = ["B008"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]  # 测试夹具里有长字符串
 "app/analysis/workflow_engine.py" = ["E501"]  # 八维度合规报告模板与 Dify 智能体提示词含长段落
+"app/analysis/consulting.py" = ["E501"]  # 咨询顾问提示词含长段落

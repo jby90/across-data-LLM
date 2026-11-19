@@ -1,4 +1,4 @@
-"""多智能体合规分析流水线:采集 → 检索 → 分析 → 核验(可退回补证)→ 编制 → 修订联动。
+"""多智能体合规评估流程:采集 → 检索 → 分析 → 核验(可退回补证)→ 编制 → 修订联动。
 
 每一步的耗时、Token、工具调用均为真实运行记录;每步完成即落库,前端据此实时展示进度。
 没有依据或模型不可用时,如实输出「待核查」,不编造法律结论。
@@ -20,6 +20,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.analysis.citation_policy import review_label, review_overview
+from app.analysis.consulting import (
+    ROADMAP_DIMENSION,
+    build_consulting,
+    consulting_budget,
+    render_dimension_markdown,
+    render_summary_text,
+)
 from app.analysis.events import append_event, trace_events
 from app.analysis.evidence_selection import (
     AnalysisResponse,
@@ -80,7 +87,7 @@ async def _guarded_run(
         try:
             await run_pipeline(session, task_id)
         except Exception as exc:  # noqa: BLE001 - 兜底:任何异常都要把任务标记为失败
-            log.exception("分析流水线异常")
+            log.exception("合规评估流程异常")
             await session.rollback()
             task = await session.get(AnalysisTask, task_id)
             if task is not None:
@@ -923,6 +930,9 @@ async def _pause_for_facts(session, task, results, dim_cands):
             if need["question_zh"] not in requests[key]["question_zh"]:
                 requests[key]["question_zh"] += "\n" + need["question_zh"]
                 requests[key]["why_needed"] += "\n" + need["why_needed"]
+    from app.analysis.user_facts import merge_same_questions
+
+    requests = merge_same_questions(requests)
     if not requests:
         return False
     if task.fact_followup_rounds >= MAX_FACT_ROUNDS:
@@ -1558,10 +1568,53 @@ async def _run_pipeline(session: AsyncSession, task_id: uuid.UUID) -> None:
     # ---- 5. 编制 ----
     await _phase_started(session, task, "node_report_compiler", "compilation")
     rv, cited_versions, full = await asyncio.wait_for(
-        _compile(session, task, tb, results, dim_cands, dim_titles),
-        timeout=runtime["node_report_compiler"]["timeout"],
+        _compile(
+            session,
+            task,
+            tb,
+            results,
+            dim_cands,
+            dim_titles,
+            consult_config=runtime["node_dimension_analyst"],
+        ),
+        timeout=runtime["node_report_compiler"]["timeout"]
+        + (
+            consulting_budget(runtime["node_dimension_analyst"])
+            if get_settings().consulting_enabled
+            else 0
+        ),
     )
     await _update_linkage(session, task, rv, cited_versions, full, runtime)
+    _keep_snapshot_for_followup(task, results, dim_cands)
+    await session.commit()
+
+
+def _keep_snapshot_for_followup(task: AnalysisTask, results: dict, dim_cands: dict) -> None:
+    """A finished report keeps what a later change needs: the facts and every dimension's result.
+
+    When the user later changes or adds a business fact in the same conversation, only the
+    dimensions that fact touches are run again (see ``chat.continue_after_report``); without this
+    snapshot the whole assessment is run again, which is also correct, only slower."""
+    if task.status not in ("completed", "partial_sample"):
+        return
+    snapshot = {
+        "workflow_version_id": str(task.workflow_version_id),
+        "country_code": task.country_code,
+        "vehicle_model": task.vehicle_model,
+        "scenario_type": task.scenario_type,
+        "facts": copy.deepcopy(task.facts_json),
+        "results": copy.deepcopy(results),
+        "candidate_bindings": {
+            code: [candidate_binding(c) for c in values] for code, values in dim_cands.items()
+        },
+        "resume_dimensions": [],
+    }
+    try:
+        json.dumps(snapshot)
+    except (TypeError, ValueError):
+        log.warning("报告完成时的断点快照无法序列化，后续修改将整体重跑", exc_info=True)
+        return
+    task.analysis_checkpoint_json = snapshot
 
 
 async def _compile(
@@ -1571,6 +1624,7 @@ async def _compile(
     results: dict[str, dict[str, Any]],
     dim_cands: dict[str, list[ClauseCandidate]],
     dim_titles: dict[str, str],
+    consult_config: dict[str, Any] | None = None,
 ) -> tuple[ReportVersion, dict[str, set[str]], bool]:
     if task.citation_policy == "reviewed_only":
         # Human review may change during a long model call. Recheck eligibility
@@ -1698,23 +1752,46 @@ async def _compile(
             gap = "分析技术失败（模型调用或格式错误），请重试；不能当作法源不足"
         elif r.get("user_fact_gap"):
             gap = r["gaps"]
-        elif r.get("repair_unresolved"):
+        elif r.get("repair_unresolved") and not good:
             gap = "仍有补证任务未完成；已有核验结果保留，不能标记为完整报告"
         elif not dim_cands.get(code):
             gap = (
-                "证据缺口（待律所复核）：严格策略下没有原文及译文均已复核的可用条款"
+                "证据缺口：严格策略下没有原文及译文均已核对的可用条款"
                 if tb.citation_policy == "reviewed_only"
                 else "已归档法源中未检索到与该维度相关的可用条款(待核查)"
             )
         elif not good:
             gap = r.get("gaps") or "模型未能给出可通过原文核验的结论(待核查)"
-        elif dropped:
-            gap = f"另有 {dropped} 条结论未通过原文核验,已剔除(待核查)"
+        # 已有通过核验的结论时，被剔除的条数只记在内部字段 dropped_findings，不写成用户可见的缺口：
+        # 报告里有什么依据就写什么，被剔除的结论本身始终不进入报告。
+        # 模型正常作答、没有任何条款被选中，并明确说明现有法源不适用于该场景：这是法源缺口，
+        # 不是分析技术失败；报告保留其余维度并如实标注缺口。选了却没通过核验、模型报错或
+        # 补证未完成，仍按技术失败处理。
+        declared_source_gap = bool(
+            dim_cands.get(code)
+            and not good
+            and not dropped
+            and not r.get("error")
+            and not r.get("repair_unresolved")
+            and not r.get("user_fact_gap")
+            and not r.get("findings")
+            and str(r.get("gaps") or "").strip()
+        )
+        if declared_source_gap:
+            gap = "已归档法源中没有与该场景直接对应的可核验条款：" + str(r["gaps"]).strip()
+        # 技术失败只在两种情况成立：模型/格式报错；选了依据却没有任何一条通过核验。
+        # 已经有通过核验的结论时，个别结论被剔除或补证没补出新结论，不让整份报告失败：
+        # 被剔除的结论始终不进入报告（核验不变），只在内部记录里保留条数，有依据的部分照常成文。
         technical_failure = bool(
             r.get("error")
             or (
                 not r.get("user_fact_gap")
-                and (r.get("repair_unresolved") or dropped or (dim_cands.get(code) and not good))
+                and not good
+                and (
+                    r.get("repair_unresolved")
+                    or dropped
+                    or (dim_cands.get(code) and not declared_source_gap)
+                )
             )
         )
         if technical_failure and not gap:
@@ -1752,6 +1829,7 @@ async def _compile(
                 ],
                 "citations": citations,
                 "missing_gap_note": gap,
+                "dropped_findings": max(dropped, 0),
             }
         )
     technical_failed = any(d["status"] == "ANALYSIS_ERROR" for d in dimensions)
@@ -1770,6 +1848,37 @@ async def _compile(
             else "尚有维度存在业务事实或可用法源缺口,已逐维标注,本报告为部分样稿。"
         )
     )
+    consulting = await _consulting_layer(
+        session, task, dimensions, findings, consult_config, technical_failed
+    )
+    if consulting is not None and consulting["status"] in ("ok", "partial"):
+        by_code = {d["code"]: d for d in consulting["dimensions"]}
+        for d in dimensions:
+            cd = by_code.get(d["dimension_code"])
+            if cd and d["dimension_code"] == ROADMAP_DIMENSION and consulting["roadmap"]:
+                # 落地方面本身就是整改路线图：即使这个方面没有自己的依据，也要把路线图写出来
+                if cd["status"] != "ok":
+                    cd = {**cd, "conclusion": consulting["roadmap_intro"]}
+                d["legacy_content_markdown"] = d["content_markdown"]
+                d["content_markdown"] = render_dimension_markdown(cd, consulting["roadmap"])
+                d["key_recommendations"] = [x["title"] for x in consulting["roadmap"]]
+                if d["status"] == "PARTIAL_GAP" and d["gap_kind"] == "source_gap":
+                    # 整改是对其他方面已核验义务的落实：路线图每一项都挂在这些义务上，
+                    # 依据就取这些方面已核验通过的条款；没有已核验条款可挂时仍按缺口处理
+                    basis = _roadmap_basis(dimensions)
+                    if basis:
+                        d["citations"] = basis
+                        d["status"], d["gap_kind"], d["missing_gap_note"] = "COMPLETE", None, ""
+            elif cd and cd["status"] == "ok":
+                d["legacy_content_markdown"] = d["content_markdown"]
+                d["content_markdown"] = render_dimension_markdown(cd, consulting["roadmap"])
+                d["key_recommendations"] = [x["action"] for x in cd["actions"]]
+        summary = render_summary_text(consulting) + "\n" + summary
+        if not full and all(d["status"] == "COMPLETE" for d in dimensions):
+            full = True  # 落地方面的依据补上后，八个方面都有依据了
+            summary = summary.replace(
+                "尚有维度存在业务事实或可用法源缺口,已逐维标注,本报告为部分样稿。", ""
+            )
     rvs = list(
         (await session.execute(select(ReportVersion).where(ReportVersion.task_id == task.id)))
         .scalars()
@@ -1785,10 +1894,16 @@ async def _compile(
         if full
         else "partial_sample",
         is_partial_sample=not full and not technical_failed,
-        change_note="多智能体协同自动编制(引用均经原文子串与数字核验)",
+        change_note="多智能体协同自动编制(引用均经原文子串与数字核验)"
+        + (
+            ";咨询层已生成"
+            if consulting is not None and consulting["status"] in ("ok", "partial")
+            else ""
+        ),
         executive_summary=summary,
         dimensions_json=dimensions,
         stale_impacts_json=[],
+        consulting_json=consulting,
         created_by=task.created_by,
     )
     session.add(rv)
@@ -1818,7 +1933,9 @@ async def _compile(
             + (
                 ";仍有分析或依据核验问题，当前记录未通过交付检查"
                 if technical_failed
-                else "" if full else ";缺依据的维度已标注缺口,报告为部分样稿"
+                else ""
+                if full
+                else ";缺依据的维度已标注缺口,报告为部分样稿"
             )
         ),
         calls=[comp],
@@ -1852,6 +1969,83 @@ async def _compile(
     )
 
     return rv, cited_versions, full
+
+
+def _roadmap_basis(dimensions: list[dict], limit: int = 12) -> list[dict]:
+    """落地方面的依据：其他方面已核验通过的条款，按出现顺序去重。"""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for d in dimensions:
+        if d["dimension_code"] == ROADMAP_DIMENSION or d["status"] != "COMPLETE":
+            continue
+        for c in d["citations"]:
+            key = str(c.get("clause_id") or c.get("citation_tag"))
+            if key not in seen:
+                seen.add(key)
+                out.append(c)
+    return out[:limit]
+
+
+async def _consulting_layer(
+    session: AsyncSession,
+    task: AnalysisTask,
+    dimensions: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    config: dict[str, Any] | None,
+    technical_failed: bool,
+) -> dict[str, Any] | None:
+    """在证据版报告之上生成咨询层。失败时返回 None 或失败记录，证据版报告照常交付。"""
+    if config is None or not get_settings().consulting_enabled or technical_failed or not findings:
+        return None
+    started = time.perf_counter()
+    try:
+        async with asyncio.timeout(consulting_budget(config)):
+            consulting = await build_consulting(
+                dimensions=dimensions,
+                facts=task.facts_json or {},
+                scenario={
+                    "country": task.country_code,
+                    "vehicle_model": task.vehicle_model,
+                    "scenario": task.scenario_type,
+                },
+                config=config,
+                llm=call_llm_json,
+            )
+    except Exception:  # noqa: BLE001 - 咨询层不能让已核验的证据版报告交付失败
+        log.exception("咨询层生成异常，保留证据版报告")
+        consulting = None
+    elapsed = int((time.perf_counter() - started) * 1000)
+    status = consulting["status"] if consulting else "failed"
+    label = {"ok": "已生成", "partial": "部分生成"}.get(status, "未生成")
+    reason = consulting["failure_reason"] if consulting else ""
+    call = ToolCall(
+        call_id="consulting-1",
+        tool_name="build_consulting_layer",
+        tool_label="咨询层：差距、风险与建议",
+        arguments={"dimensions": len(dimensions), "verified_findings": len(findings)},
+        result_summary=f"咨询层{label}" + (f"：{reason}" if reason else ""),
+        duration_ms=elapsed,
+    )
+    await _add_trace(
+        session,
+        task,
+        node="node_report_compiler",
+        name="咨询顾问：差距评估与建议",
+        phase="compilation",
+        status="passed" if status == "ok" else "warning",
+        summary=call.result_summary,
+        calls=[call],
+        tokens=int(consulting["tokens"]) if consulting else 0,
+        duration_ms=elapsed,
+        inp={"verified_findings_count": len(findings)},
+        out={
+            "status": status,
+            "risk_counts": consulting["risk_counts"] if consulting else {},
+            "rejected": consulting["validation"]["rejected"] if consulting else [],
+        },
+        commit=False,
+    )
+    return consulting
 
 
 async def _update_linkage(

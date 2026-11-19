@@ -31,11 +31,73 @@ COUNTRY_NAMES_ZH = {
     "LB": "黎巴嫩",
 }
 
+
+def country_name_zh(code: str | None) -> str:
+    """Resolve any ISO country/region code to its Chinese display name."""
+    from app.analysis.document_basis import NAMES
+
+    raw = (code or "").strip()
+    return NAMES.get(raw.upper(), raw)
+
+
+def is_overseas_country(code: str | None) -> bool:
+    """True when ``code`` is a valid overseas ISO country/region code (excludes CN/ZZ/--)."""
+    from app.analysis.document_basis import NAMES
+
+    c = (code or "").strip().upper()
+    return bool(c and c not in ("--", "CN", "ZZ") and c in NAMES)
+
+
+async def active_overseas_countries(session: AsyncSession) -> list[dict[str, str]]:
+    """Pilot overseas countries plus any additional overseas countries ingested into the library."""
+    from sqlalchemy import select
+
+    from app.ingestion.models import Document
+    from app.knowledge.whitepaper import CountryWhitepaper
+
+    rows = (
+        await session.scalars(
+            select(Document.country_code)
+            .where(Document.relevance.notin_(("out_of_scope", "irrelevant")))
+            .distinct()
+        )
+    ).all()
+    wp_rows = (
+        await session.scalars(select(CountryWhitepaper.country_code).distinct())
+    ).all()
+    extra = sorted(
+        {
+            c.upper()
+            for c in [*rows, *wp_rows]
+            if c and c.upper() not in COUNTRY_NAMES_ZH and c.upper() not in ("CN", "ZZ", "--")
+        }
+    )
+    ordered = [*COUNTRY_NAMES_ZH.keys(), *extra]
+    return [{"code": c, "name": country_name_zh(c)} for c in ordered]
+
+
+async def overseas_countries_map(session: AsyncSession) -> dict[str, str]:
+    """Ordered ``{code: name_zh}`` mapping of all active overseas countries."""
+    return {item["code"]: item["name"] for item in await active_overseas_countries(session)}
+
 SCENARIO_LABELS = {
     "autonomous_trial": "L3/L4 自动驾驶公共道路测试与远程监控回传",
     "connected_vehicle_cloud": "智能网联乘用车车联网遥测与跨境云平台同步",
     "ota_diagnostics": "跨境远程诊断、OTA 升级包分发与故障日志回传",
     "cockpit_biometrics": "智能座舱语音交互、DMS 驾驶员状态识别与个人数据出境",
+    "hd_mapping": "高精地图采集与测绘（车载激光雷达、摄像头采集道路与地理信息）",
+    "fleet_mobility": "车队管理、网约车与物流出行服务（车辆与司机、乘客数据）",
+    "sales_service": "整车销售、经销商与售后服务中的客户数据",
+    "insurance_ubi": "按驾驶行为定价的车险（UBI）与驾驶行为数据",
+    "charging_energy": "充电桩、换电与车网互动等能源服务",
+}
+
+# 业务场景：企业处于哪个业务阶段（与“功能”分开单选；功能见 SCENARIO_LABELS）
+BUSINESS_SCENES = {
+    "rnd_testing": "研发与试验阶段（样车、公共道路试验）",
+    "mass_operation": "量产车上市销售与运营",
+    "after_sales": "售后服务与远程运维",
+    "hq_backhaul": "数据回传总部或境外云平台做分析",
 }
 
 REQUIRED_FACTS_SPEC: list[dict[str, Any]] = [
@@ -75,7 +137,7 @@ REQUIRED_FACTS_SPEC: list[dict[str, Any]] = [
         "fact_key": "retention_and_blackbox",
         "dimension_code": "D5",
         "question_zh": "车载数据记录器（黑匣子/EDR）的故障与接管数据，目前或计划保存多久、存在哪里？云端个人数据采用什么到期销毁策略？不确定的期限可以说明尚未确定。",
-        "why_needed": "用于将您的保存计划与目标国家适用的记录保存、目的限制和销毁要求进行对照。",
+        "why_needed": "用于将你的保存计划与目标国家适用的记录保存、目的限制和销毁要求进行对照。",
         "suggested_options": [
             "车辆安全与接管日志在当地加密保存，具体期限尚待确定；研发诊断个人数据按业务需要设置到期销毁",
             "所有采集数据无固定留存期限，长期保存在云端对象存储中",
@@ -112,7 +174,7 @@ DEFAULT_WORKFLOW_NODES: list[dict[str, Any]] = [
         "parameters": {
             "strict_tenant_isolation": True,
             "supported_countries": ["SG", "EG", "TN", "MA", "LB"],
-            "require_auth_role": ["org_user", "org_admin", "platform_admin"],
+            "require_auth_role": ["member", "platform_admin"],
         },
         "system_prompt": "# 触发器节点（无 LLM 调用）\n接收企业用户提交的目标国家(country_code)、车型(vehicle_model)、业务场景(scenario_type)及初始事实字典(facts)，注入租户隔离上下文(org_id)。",
         "code_entrypoint": "app.analysis.workflow_engine:trigger_entry",
@@ -121,7 +183,7 @@ DEFAULT_WORKFLOW_NODES: list[dict[str, Any]] = [
             {
                 "name": "country_code",
                 "type": "string",
-                "desc": "目标出海国家二字码 (SG/EG/TN/MA/LB)",
+                "desc": "目标出海国家二字码（按法规库动态支持已入库国家）",
             },
             {"name": "vehicle_model", "type": "string", "desc": "受评智能网联/自动驾驶车型"},
             {"name": "scenario_type", "type": "string", "desc": "业务场景枚举"},
@@ -529,16 +591,76 @@ DEFAULT_WORKFLOW_EDGES: list[dict[str, Any]] = [
 ]
 
 
+def _doc_fact_fallback(key: str, facts: dict[str, Any]) -> str:
+    """Fallback resolver mapping ``doc_*`` compliance-project facts onto the 5 required fact slots."""
+    f = facts or {}
+
+    def _g(*names: str) -> str:
+        for nm in names:
+            v = str(f.get(nm) or f.get(f"doc_{nm}") or "").strip()
+            if v and not v.startswith("暂不确定"):
+                return v
+        return ""
+
+    if key == "exterior_video_and_gnss":
+        direct = _g("exterior_video_and_gnss")
+        if direct:
+            return direct
+        parts = [p for p in (_g("data_types"), _g("purpose"), _g("data_volume")) if p]
+        return "；".join(parts)
+    if key == "cross_border_mechanism":
+        direct = _g("cross_border_mechanism")
+        if direct:
+            return direct
+        src, dst = _g("source_country"), _g("recipient_country")
+        route_txt = f"跨境流向：{src} → {dst}" if (src or dst) else ""
+        rcp = _g("recipient")
+        onward = _g("onward_provision")
+        gov = _g("governing_law")
+        parts = [
+            p
+            for p in (
+                route_txt,
+                f"境外接收方：{rcp}" if rcp else "",
+                f"再转移限制：{onward}" if onward else "",
+                gov,
+            )
+            if p
+        ]
+        return "；".join(parts)
+    if key == "consent_and_notice":
+        return _g("consent_and_notice", "individual_rights", "security_officer")
+    if key == "retention_and_blackbox":
+        return _g("retention_and_blackbox", "storage_chain")
+    if key == "local_admission_and_safety_operator":
+        direct = _g("local_admission_and_safety_operator")
+        if direct:
+            return direct
+        parts = [
+            p
+            for p in (_g("risk_measures"), _g("effectiveness_proof"), _g("security_mgmt"))
+            if p
+        ]
+        return "；".join(parts)
+    return _g(key)
+
+
 def evaluate_fact_sufficiency(
     country_code: str, facts: dict[str, Any]
 ) -> tuple[int, list[dict[str, Any]]]:
     """根据八维度信息采集规范评估事实完备度，返回 (0-100 评分, 待追问列表)。"""
+    has_doc_facts = any(
+        k.startswith("doc_") and isinstance(v, str) and v.strip()
+        for k, v in (facts or {}).items()
+    )
     missing: list[dict[str, Any]] = []
     fulfilled_count = 0
     total_required = len(REQUIRED_FACTS_SPEC)
     for spec in REQUIRED_FACTS_SPEC:
         key = spec["fact_key"]
         val = str((facts or {}).get(key) or "").strip()
+        if not val and has_doc_facts:
+            val = _doc_fact_fallback(key, facts or {})
         is_ok = len(val) >= 4
         if is_ok:
             fulfilled_count += 1

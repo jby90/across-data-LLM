@@ -1,4 +1,4 @@
-/* Self-hosted OFL WOFF2 subsets; imported by each frontend. No font CDN. */
+/* Self-hosted OFL web font subsets; imported by each frontend. No font CDN. */
 :root {
   --cy-font: 'Inter', 'Noto Sans SC', 'Noto Naskh Arabic', sans-serif;
   --cy-ink: #20323f;
@@ -29,8 +29,12 @@
   --el-border-radius-base: 8px;
   --el-font-family: var(--cy-font);
   --el-font-size-base: 14px;
-  --el-component-size: 40px;
-  --el-component-size-small: 32px;
+  --el-font-size-small: 13px;
+  --el-font-size-extra-small: 13px;
+  --el-font-weight-primary: 600;
+  --el-checkbox-font-size: 13px;
+  --el-component-size: 36px;
+  --el-component-size-small: 28px;
 }
 * {
   box-sizing: border-box;
@@ -88,17 +92,33 @@ h4 {
   letter-spacing: -0.025em;
   line-height: 1.4;
 }
-h1,
+/* 第 7.5 项 规则 3、7：h1 页面主标题 24，h2 区块 18，h3 小标题 16 */
+h1 {
+  font-size: 24px;
+  font-weight: 600;
+}
 h2 {
-  font-size: 26px;
-  font-weight: 650;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 h3 {
-  font-size: 20px;
-  font-weight: 650;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 h4 {
-  font-size: 16px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+strong,
+b,
+th {
+  font-weight: 600;
+}
+small {
+  font-size: 13px;
 }
 .ui-icon {
   display: inline-block;
@@ -124,10 +144,14 @@ h4 {
 }
 .app-brand {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
   color: white;
-  padding: 0 10px 29px;
+  padding: 0 4px 28px;
+  text-decoration: none;
+}
+.app-brand:hover {
+  color: white;
 }
 .brand-mark {
   display: grid;
@@ -145,23 +169,25 @@ h4 {
 }
 .brand-name {
   font-size: 20px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.06em;
   line-height: 1.35;
+  white-space: nowrap;
 }
 .brand-caption {
-  font-size: 11px;
-  letter-spacing: 0.13em;
+  font-size: 13px;
+  letter-spacing: 0.02em;
   color: #8fa5b4;
   margin-top: 4px;
+  white-space: nowrap;
 }
 .nav-group {
   margin: 18px 0 8px;
 }
 .nav-group-label {
   margin: 0 14px 10px;
-  font-size: 11px;
-  letter-spacing: 0.12em;
+  font-size: 13px;
+  letter-spacing: 0.08em;
   color: #8298a8;
 }
 .nav-link {
@@ -182,6 +208,9 @@ h4 {
   background: #ffffff09;
   color: white;
 }
+.nav-link:focus:not(:focus-visible) {
+  outline: none;
+}
 .nav-link.is-active {
   color: white;
   background: #ffffff12;
@@ -194,58 +223,171 @@ h4 {
   margin-top: auto;
   padding: 24px 12px 0;
   color: #8298a8;
-  font-size: 12px;
+  font-size: 13px;
 }
 .sidebar-footer strong {
   display: block;
   color: #c0cdd6;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
 }
 .app-body {
   margin-left: 224px;
   min-width: 0;
 }
 .app-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
   display: flex;
-  height: 76px;
+  height: 64px;
   align-items: center;
   justify-content: space-between;
   padding: 0 36px;
-  background: #ffffffed;
+  background: #fffffff2;
+  backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--cy-line);
   gap: 16px;
+  max-width: 100%;
 }
 .topbar-context {
   display: flex;
-  gap: 12px;
+  flex: 1 1 0%;
+  gap: 10px;
   align-items: center;
   font-size: 13px;
   color: var(--cy-muted);
+  min-width: 0;
+  overflow: hidden;
 }
 .topbar-context strong {
   color: var(--cy-ink);
-  font-weight: 550;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .topbar-divider {
   color: #c6cdd4;
+  flex-shrink: 0;
+}
+.topbar-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  margin-right: 4px;
+  border: 1px solid #dbe3ec;
+  border-radius: 6px;
+  background: #fff;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: border-color 0.16s, background 0.16s, color 0.16s;
+}
+.topbar-back__short {
+  display: none;
+}
+.topbar-back .ui-icon {
+  width: 14px;
+  height: 14px;
+  color: #475569;
+}
+.topbar-back:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.topbar-back:hover .ui-icon {
+  color: #1d4ed8;
+}
+.topbar-crumb-home {
+  color: var(--cy-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.topbar-crumb-home:hover {
+  color: #1d4ed8;
+}
+.cy-fold-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 6px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1d4ed8;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.16s, background 0.16s;
+}
+.cy-fold-toggle .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+.cy-fold-toggle:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
 }
 .topbar-account {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   font-size: 13px;
 }
-.account-avatar {
-  width: 32px;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: #eaf0fa;
-  color: #506c91;
-  font-size: 13px;
+.account-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--cy-line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--cy-ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.account-pill:hover,
+.account-pill:focus-visible {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  outline: none;
+}
+.account-pill__icon {
+  width: 16px;
+  height: 16px;
+  color: #52667a;
+  flex: none;
+}
+.account-pill__name {
+  font-size: 14px;
   font-weight: 600;
+  color: #1e293b;
+  white-space: nowrap;
+}
+.account-pill__chevron {
+  width: 14px;
+  height: 14px;
+  color: #64748b;
+  flex: none;
 }
 .account-role {
   color: var(--cy-muted);
@@ -258,14 +400,15 @@ h4 {
 }
 .app-page {
   min-width: 0;
-  animation: page-enter 0.24s ease-out both;
+  /* backwards：动画结束后不留 transform，否则页内的抽屉、弹窗会以这一层为定位基准，高过屏幕、底部看不到 */
+  animation: page-enter 0.24s ease-out backwards;
 }
 .page-heading {
   display: flex;
   gap: 20px;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 26px;
+  margin-bottom: 24px;
 }
 .page-heading h1,
 .page-heading h2,
@@ -274,15 +417,15 @@ h4 {
 }
 .page-heading p,
 .page-description {
-  color: var(--cy-muted);
+  color: var(--cy-text-2, #4b5e6c);
   font-size: 14px;
   margin: 0;
   max-width: 760px;
 }
 .eyebrow {
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.15em;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
   color: var(--cy-muted);
   margin-bottom: 8px;
 }
@@ -318,11 +461,11 @@ h4 {
 .section-heading h2,
 .section-heading h3 {
   margin: 0;
-  font-size: 17px;
+  font-size: 18px;
 }
 .section-description {
   font-size: 13px;
-  color: var(--cy-muted);
+  color: var(--cy-text-2, #4b5e6c);
 }
 .ui-disclosure {
   margin: 16px 0;
@@ -369,21 +512,24 @@ h4 {
   display: none;
 }
 .el-button {
-  font-weight: 500;
-  padding: 10px 16px;
-  height: 40px;
+  font-weight: 400;
+  padding: 8px 16px;
+  height: 36px;
   transition:
     background-color 0.18s,
     border-color 0.18s,
     box-shadow 0.18s;
 }
+.el-button--primary:not(.is-link):not(.is-text) {
+  font-weight: 600;
+}
 .el-button + .el-button {
   margin-left: 0;
 }
 .el-button--small {
-  height: 32px;
+  height: 28px;
   font-size: 13px;
-  padding: 7px 11px;
+  padding: 5px 11px;
 }
 .el-button.is-link,
 .el-button.is-text {
@@ -403,12 +549,12 @@ h4 {
 }
 .el-input__wrapper,
 .el-select__wrapper {
-  min-height: 40px;
+  min-height: 36px;
   border-radius: 8px;
 }
 .el-input--small .el-input__wrapper,
 .el-select--small .el-select__wrapper {
-  min-height: 34px;
+  min-height: 30px;
 }
 .el-input__inner,
 .el-select__selected-item {
@@ -456,9 +602,9 @@ h4 {
 }
 .el-tag {
   height: auto;
-  min-height: 25px;
-  padding: 3px 8px;
-  font-size: 12px;
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: 13px;
   line-height: 1.4;
   border-radius: 5px;
   white-space: normal;
@@ -469,7 +615,10 @@ h4 {
 .el-tabs__item {
   height: 48px;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 400;
+}
+.el-tabs__item.is-active {
+  font-weight: 600;
 }
 .el-tabs__nav-wrap::after {
   height: 1px;
@@ -484,7 +633,7 @@ h4 {
   border-radius: 9px;
 }
 .el-alert__title {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.7;
 }
 .el-card {
@@ -498,7 +647,7 @@ h4 {
   padding: 22px;
 }
 .el-dialog {
-  max-width: calc(100vw - 32px);
+  max-width: min(95vw, calc(100vw - 24px));
   border-radius: 16px;
   padding: 28px;
 }
@@ -506,7 +655,7 @@ h4 {
 .el-drawer__title {
   font-weight: 600;
   color: var(--cy-ink);
-  font-size: 19px;
+  font-size: 18px;
 }
 .el-dialog__header {
   padding-bottom: 24px;
@@ -519,7 +668,7 @@ h4 {
   flex-wrap: wrap;
 }
 .el-drawer {
-  max-width: 100vw;
+  max-width: 95vw;
 }
 .el-drawer__header {
   margin-bottom: 0;
@@ -530,7 +679,7 @@ h4 {
   padding: 24px;
 }
 .el-descriptions__cell {
-  font-size: 13px !important;
+  font-size: 14px !important;
   padding: 12px 15px !important;
 }
 .el-pagination {
@@ -559,13 +708,11 @@ code {
 }
 .app-content .sub {
   font-size: 13px;
-  color: #758491;
+  color: var(--cy-text-2, #4b5e6c);
   line-height: 1.7;
 }
-.app-content [style*='font-size: 12px'],
-.app-content [style*='font-size: 11px'],
-.app-content [style*='font-size: 11.5px'] {
-  font-size: 13px !important;
+.el-checkbox__label {
+  font-size: 13px;
 }
 .app-content .bar {
   flex-wrap: wrap;
@@ -589,7 +736,7 @@ code {
 }
 .welcome-hero h1 {
   margin: 6px 0 12px;
-  font-size: 30px;
+  font-size: 24px;
 }
 .welcome-hero p {
   color: #70808e;
@@ -598,12 +745,12 @@ code {
 }
 .welcome-label {
   color: #607892;
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.08em;
 }
 .feature-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--cards, 3), minmax(0, 1fr));
   gap: 20px;
 }
 .feature-card {
@@ -647,7 +794,7 @@ code {
   align-items: center;
   gap: 8px;
   font-size: 14px;
-  font-weight: 550;
+  font-weight: 600;
 }
 .feature-card.is-planned {
   background: #fafbfc;
@@ -663,7 +810,7 @@ code {
 }
 .workflow-note strong {
   color: #4e6475;
-  font-weight: 500;
+  font-weight: 600;
 }
 .login-page {
   display: grid;
@@ -698,7 +845,7 @@ code {
   color: white;
   line-height: 1.4;
   margin: 22px 0;
-  font-weight: 550;
+  font-weight: 600;
   letter-spacing: -0.04em;
 }
 .login-story p {
@@ -708,7 +855,7 @@ code {
 }
 .login-story-footer {
   color: #8ba2b2;
-  font-size: 12px;
+  font-size: 13px;
   position: relative;
   z-index: 1;
 }
@@ -831,12 +978,13 @@ code {
   }
   .app-shell.is-nav-open .app-sidebar {
     transform: translateX(0);
+    z-index: 110;
   }
   .app-shell.is-nav-open .nav-scrim {
     display: block;
     position: fixed;
     inset: 0;
-    z-index: 29;
+    z-index: 100;
     background: #10253566;
     border: 0;
   }
@@ -856,9 +1004,11 @@ code {
     padding: 0 18px;
     height: 66px;
   }
-  h1,
+  h1 {
+    font-size: 24px;
+  }
   h2 {
-    font-size: 23px;
+    font-size: 18px;
   }
   .page-heading {
     gap: 14px;
@@ -870,7 +1020,7 @@ code {
     padding: 24px;
   }
   .welcome-hero h1 {
-    font-size: 25px;
+    font-size: 24px;
   }
   .login-page {
     grid-template-columns: 1fr;
@@ -895,10 +1045,11 @@ code {
     padding: 36px 24px;
   }
   .el-drawer {
-    width: min(100vw, 880px) !important;
+    max-width: 100vw !important;
   }
   .el-dialog {
     margin-top: 6vh;
+    padding: 20px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -943,13 +1094,13 @@ code {
 .login-description,
 .welcome-hero p,
 .feature-card p {
-  color: #657786;
+  color: var(--cy-text-2, #4b5e6c);
 }
 .el-table th.el-table__cell {
   color: #607281;
 }
 .app-content .sub {
-  color: #697d8b;
+  color: var(--cy-text-2, #4b5e6c);
 }
 
 @media (max-width: 800px) {
@@ -959,21 +1110,61 @@ code {
   .app-shell.is-nav-open .app-sidebar {
     visibility: visible;
   }
+  .app-topbar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+  .mobile-nav-button {
+    padding: 6px;
+    flex-shrink: 0;
+  }
+  .topbar-context {
+    gap: 6px;
+    flex: 1 1 0%;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .topbar-context .topbar-crumb-home,
   .topbar-context > span:first-of-type,
   .topbar-context .topbar-divider {
+    display: none !important;
+  }
+  .topbar-back {
+    padding: 0 8px;
+    margin-right: 0;
+    gap: 4px;
+  }
+  .topbar-back__full {
     display: none;
   }
+  .topbar-back__short {
+    display: inline;
+  }
   .topbar-context strong {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .topbar-account > span:not(.account-avatar) {
+  .topbar-account > .viewer-tag,
+  .topbar-account > .account-role-badge {
     display: none;
   }
   .topbar-account {
-    gap: 4px;
+    flex-shrink: 0;
+    gap: 6px;
   }
-  .topbar-account .el-button {
-    padding: 8px;
+  .account-pill {
+    padding: 0 9px;
+    gap: 5px;
+    max-width: 136px;
+  }
+  .account-pill__name {
+    max-width: 78px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .app-content .page-heading .page-actions {
     flex-shrink: 1;
@@ -983,4 +1174,864 @@ code {
   }
 }
 
-.demo-notice { margin: 0 0 18px; color: #64748b; font-size: 12px; line-height: 1.6; }
+.demo-notice { margin: 0 0 16px; color: #64748b; font-size: 13px; line-height: 1.6; }
+
+/* ======================================================================
+ * 第 7.5 项 共用布局规则（2026-11-11 追加）
+ * 规则全文与出处：内部交接/布局规则_7.5.md
+ * 只追加新变量（--cy-*）和新 class（.cy-*），不覆盖上面已有的规则；
+ * 页面改用这些 class 之后才生效。
+ * ====================================================================== */
+:root {
+  /* 规则 1：间距只用 8 的倍数（加 4、12 两个半格） */
+  --cy-space-1: 4px;
+  --cy-space-2: 8px;
+  --cy-space-3: 12px;
+  --cy-space-4: 16px;
+  --cy-space-5: 24px;
+  --cy-space-6: 32px;
+  --cy-space-7: 48px;
+  /* 规则 3、4、6：字号五级、行高、字重 */
+  --cy-fs-h1: 24px;
+  --cy-fs-h2: 18px;
+  --cy-fs-h3: 16px;
+  --cy-fs-body-l: 15px;
+  --cy-fs-body: 14px;
+  --cy-fs-aux: 13px;
+  --cy-lh-title: 1.4;
+  --cy-lh-body: 1.7;
+  --cy-fw-regular: 400;
+  --cy-fw-strong: 600;
+  /* 规则 5：文字三档 */
+  --cy-text-1: #20323f;
+  --cy-text-2: #4b5e6c;
+  --cy-text-3: #64748b;
+  --cy-surface: #ffffff;
+  --cy-surface-sunken: #f7f9fb;
+  /* 规则 15：状态色调（浅底深字；已完成只用绿字） */
+  --cy-tone-muted-fg: #4b5e6c;
+  --cy-tone-muted-bg: #eef1f5;
+  --cy-tone-active-fg: #244bc3;
+  --cy-tone-active-bg: #eef2fe;
+  --cy-tone-warn-fg: #a15c07;
+  --cy-tone-warn-bg: #fbf3e2;
+  --cy-tone-danger-fg: #a8323f;
+  --cy-tone-danger-bg: #fcf0f2;
+  --cy-tone-done-fg: #1d7465;
+  --cy-tone-done-bg: #edf7f4;
+  --cy-tone-neutral-fg: #64748b;
+  /* 规则 11、12、23：控件高度、状态列与操作列宽 */
+  --cy-control-h: 36px;
+  --cy-control-h-sm: 28px;
+  --cy-status-w: 128px;
+  --cy-actions-w: 176px;
+  /* 规则 17–19：三栏骨架 */
+  --cy-rail-w: 264px;
+  --cy-rail-collapsed-w: 56px;
+  --cy-aside-w: 380px;
+  --cy-aside-min: 320px;
+  --cy-aside-max: 560px;
+  --cy-aside-tab-w: 40px;
+  /* 规则 4、25：连续长文每行约 40–42 个汉字 */
+  --cy-prose-w: 42em;
+  --cy-radius: 8px;
+}
+
+/* ---------- 规则 3、7：标题层级 ---------- */
+.cy-h1 {
+  margin: 0;
+  font-size: var(--cy-fs-h1);
+  line-height: var(--cy-lh-title);
+  font-weight: var(--cy-fw-strong);
+  color: var(--cy-text-1);
+  letter-spacing: -0.01em;
+}
+.cy-h2 {
+  margin: 0;
+  font-size: var(--cy-fs-h2);
+  line-height: var(--cy-lh-title);
+  font-weight: var(--cy-fw-strong);
+  color: var(--cy-text-1);
+  letter-spacing: 0;
+}
+.cy-h3 {
+  margin: 0;
+  font-size: var(--cy-fs-h3);
+  line-height: var(--cy-lh-title);
+  font-weight: var(--cy-fw-strong);
+  color: var(--cy-text-1);
+  letter-spacing: 0;
+}
+.cy-body {
+  font-size: var(--cy-fs-body);
+  line-height: var(--cy-lh-body);
+  color: var(--cy-text-1);
+}
+.cy-text-2 {
+  color: var(--cy-text-2);
+}
+.cy-aux {
+  font-size: var(--cy-fs-aux);
+  line-height: 1.6;
+  color: var(--cy-text-3);
+}
+.cy-count {
+  margin-left: var(--cy-space-2);
+  font-size: var(--cy-fs-aux);
+  font-weight: var(--cy-fw-regular);
+  color: var(--cy-text-3);
+}
+
+/* ---------- 规则 25、35：页头（返回 / 主标题 + 唯一主操作） ---------- */
+.cy-back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cy-space-1);
+  margin-bottom: var(--cy-space-2);
+  font-size: var(--cy-fs-body);
+  color: var(--cy-text-2);
+}
+.cy-back:hover {
+  color: var(--el-color-primary);
+}
+.cy-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--cy-space-4);
+  margin-bottom: var(--cy-space-5);
+}
+.cy-page-head__title {
+  min-width: 0;
+}
+.cy-page-head__meta {
+  margin-top: var(--cy-space-1);
+  font-size: var(--cy-fs-body);
+  color: var(--cy-text-2);
+}
+.cy-page-head__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--cy-space-2);
+}
+
+/* ---------- 规则 1、7、8：区块 ---------- */
+.cy-section + .cy-section {
+  margin-top: var(--cy-space-5);
+}
+.cy-section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--cy-space-3);
+  margin-bottom: var(--cy-space-3);
+}
+.cy-section__head > .cy-h2,
+.cy-section__head > .cy-h3 {
+  display: flex;
+  align-items: baseline;
+}
+
+/* ---------- 规则 26：只用一层卡片 ---------- */
+.cy-card {
+  background: var(--cy-surface);
+  border: 1px solid var(--cy-line);
+  border-radius: var(--cy-radius);
+  padding: var(--cy-space-5);
+}
+.cy-card--compact {
+  padding: var(--cy-space-4);
+}
+.cy-divider {
+  height: 1px;
+  margin: var(--cy-space-5) 0;
+  border: 0;
+  background: var(--cy-line);
+}
+
+/* ---------- 规则 12、13：带状态的列表统一行 ----------
+ * <div class="cy-list">
+ *   <div class="cy-row">
+ *     <div class="cy-row__main"><div class="cy-row__name">名称</div><div class="cy-row__desc">一句说明</div></div>
+ *     <div class="cy-row__status"><span class="cy-status cy-status--muted">未开始</span></div>
+ *     <div class="cy-row__actions"><el-button size="small">准备材料</el-button></div>
+ *   </div>
+ * </div>
+ * 状态列固定宽、左对齐；操作列固定宽、右对齐，同一列表各行上下对齐。
+ */
+.cy-list {
+  --_status-w: var(--cy-status-w);
+  --_actions-w: var(--cy-actions-w);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--_status-w) var(--_actions-w);
+  column-gap: var(--cy-space-5);
+  border-top: 1px solid var(--cy-line);
+}
+.cy-list--card {
+  background: var(--cy-surface);
+  border: 1px solid var(--cy-line);
+  border-radius: var(--cy-radius);
+  padding: 0 var(--cy-space-4);
+}
+.cy-list--status-wide {
+  --_status-w: 168px;
+}
+.cy-list--actions-wide {
+  --_actions-w: 240px;
+}
+.cy-list--no-status {
+  grid-template-columns: minmax(0, 1fr) var(--_actions-w);
+}
+.cy-list--no-actions {
+  grid-template-columns: minmax(0, 1fr) var(--_status-w);
+}
+.cy-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+  min-height: 56px;
+  padding: var(--cy-space-3) 0;
+  border-bottom: 1px solid var(--cy-line);
+}
+.cy-list--card > .cy-row:last-child {
+  border-bottom: 0;
+}
+.cy-row--link {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.cy-row--link:hover {
+  background: var(--cy-surface-sunken);
+}
+.cy-row__main {
+  min-width: 0;
+}
+.cy-row__name {
+  font-size: var(--cy-fs-body-l);
+  line-height: 1.5;
+  font-weight: var(--cy-fw-strong);
+  color: var(--cy-text-1);
+  overflow-wrap: anywhere;
+}
+.cy-row__desc {
+  margin-top: 2px;
+  font-size: var(--cy-fs-aux);
+  line-height: 1.6;
+  color: var(--cy-text-2);
+}
+.cy-row__status {
+  justify-self: start;
+  min-width: 0;
+}
+.cy-row__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--cy-space-2);
+  min-width: 0;
+}
+/* 规则 31：未读行 */
+.cy-row--unread .cy-row__name::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--cy-space-2);
+  border-radius: 50%;
+  background: var(--el-color-primary);
+  vertical-align: 2px;
+}
+@supports not (grid-template-columns: subgrid) {
+  .cy-row {
+    grid-template-columns: minmax(0, 1fr) var(--_status-w) var(--_actions-w);
+    column-gap: var(--cy-space-5);
+  }
+  .cy-list--no-status > .cy-row {
+    grid-template-columns: minmax(0, 1fr) var(--_actions-w);
+  }
+  .cy-list--no-actions > .cy-row {
+    grid-template-columns: minmax(0, 1fr) var(--_status-w);
+  }
+}
+@media (max-width: 800px) {
+  .cy-list,
+  .cy-list--no-status,
+  .cy-list--no-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .cy-row__status {
+    grid-column: 1;
+    margin-top: var(--cy-space-1);
+  }
+  .cy-row__actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}
+
+/* ---------- 规则 14–16：状态标签（浅底深字，不做成按钮样） ---------- */
+.cy-status {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 2px var(--cy-space-3);
+  border-radius: 999px;
+  font-size: var(--cy-fs-aux);
+  line-height: 20px;
+  font-weight: var(--cy-fw-regular);
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+}
+.cy-status--muted {
+  color: var(--cy-tone-muted-fg);
+  background: var(--cy-tone-muted-bg);
+}
+.cy-status--active {
+  color: var(--cy-tone-active-fg);
+  background: var(--cy-tone-active-bg);
+}
+.cy-status--warn {
+  color: var(--cy-tone-warn-fg);
+  background: var(--cy-tone-warn-bg);
+}
+.cy-status--danger {
+  color: var(--cy-tone-danger-fg);
+  background: var(--cy-tone-danger-bg);
+}
+.cy-status--done {
+  background: transparent;
+  color: var(--cy-tone-done-fg);
+  padding-inline: 0;
+}
+.cy-status--neutral {
+  color: var(--cy-tone-neutral-fg);
+  background: transparent;
+}
+/* 表格里的状态列：列上加 class-name="cy-col-status"，不折行 */
+.el-table .cy-col-status .cell {
+  white-space: nowrap;
+}
+/* 规则 33：短列（编号、条款、日期）表头和内容不竖排 */
+.el-table .cy-col-nowrap .cell,
+.cy-table-nowrap {
+  white-space: nowrap;
+}
+
+/* ---------- 规则 9、10、32：操作 ---------- */
+.cy-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--cy-space-2);
+}
+/* 列表行里的删除：平时灰字，悬停才变红，不和状态抢眼 */
+.cy-danger-quiet.el-button.is-link,
+.cy-danger-quiet.el-button.is-text,
+a.cy-danger-quiet {
+  color: var(--cy-text-3);
+}
+.cy-danger-quiet.el-button.is-link:hover,
+.cy-danger-quiet.el-button.is-text:hover,
+a.cy-danger-quiet:hover {
+  color: var(--el-color-danger);
+}
+/* 文字链接一律主色，像能点的样子（“查看 / Word / PDF”） */
+.cy-links {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cy-space-3);
+  font-size: var(--cy-fs-body);
+}
+.cy-links a,
+.cy-links .el-button.is-link {
+  color: var(--el-color-primary);
+}
+
+/* ---------- 规则 24：空状态 ---------- */
+.cy-empty {
+  padding: var(--cy-space-6) var(--cy-space-4);
+  text-align: center;
+  font-size: var(--cy-fs-body);
+  line-height: var(--cy-lh-body);
+  color: var(--cy-text-2);
+}
+.cy-empty__title {
+  margin-bottom: var(--cy-space-3);
+  font-size: var(--cy-fs-body-l);
+  color: var(--cy-text-1);
+}
+.cy-empty--inline {
+  padding: var(--cy-space-4);
+  text-align: left;
+}
+
+/* ---------- 规则 17–21：三栏骨架（左栏可收起、主区最宽、右栏助手可收起可拖宽） ----------
+ * <div class="cy-split" :class="{ 'is-rail-collapsed': a, 'is-aside-collapsed': b }" :style="{ '--cy-aside-w': w + 'px' }">
+ *   <aside class="cy-split__rail">…</aside>
+ *   <main class="cy-split__main">…</main>
+ *   <aside class="cy-split__aside"><span class="cy-resize-handle" />…</aside>
+ * </div>
+ * 收起、拖宽的状态由页面记在 localStorage。
+ */
+.cy-split {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--cy-space-4);
+  min-width: 0;
+}
+.cy-split__rail {
+  position: sticky;
+  top: var(--cy-space-4);
+  flex: 0 0 var(--cy-rail-w);
+  width: var(--cy-rail-w);
+  max-height: calc(100vh - 108px);
+  overflow: auto;
+  transition:
+    flex-basis 0.2s,
+    width 0.2s;
+}
+.cy-split.is-rail-collapsed > .cy-split__rail {
+  flex-basis: var(--cy-rail-collapsed-w);
+  width: var(--cy-rail-collapsed-w);
+  overflow: hidden;
+}
+.cy-split__main {
+  flex: 1 1 0;
+  min-width: 0;
+  container-type: inline-size;
+  container-name: cy-main;
+}
+.cy-split__aside {
+  position: sticky;
+  top: var(--cy-space-4);
+  flex: 0 0 clamp(var(--cy-aside-min), var(--cy-aside-w), var(--cy-aside-max));
+  width: clamp(var(--cy-aside-min), var(--cy-aside-w), var(--cy-aside-max));
+  max-height: calc(100vh - 108px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.cy-split.is-aside-collapsed > .cy-split__aside {
+  flex-basis: var(--cy-aside-tab-w);
+  width: var(--cy-aside-tab-w);
+}
+/* 收起时的竖条按钮“助手” */
+.cy-aside-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--cy-space-2);
+  width: var(--cy-aside-tab-w);
+  padding: var(--cy-space-4) 0;
+  border: 1px solid var(--el-color-primary-light-7);
+  border-radius: var(--cy-radius);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: var(--cy-fs-body);
+  line-height: 1.4;
+  writing-mode: vertical-rl;
+  letter-spacing: 0.2em;
+  cursor: pointer;
+}
+.cy-aside-tab:hover {
+  background: var(--el-color-primary-light-8);
+}
+/* 右栏左边沿的拖拽条 */
+.cy-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -10px;
+  width: 12px;
+  cursor: col-resize;
+  z-index: 2;
+}
+.cy-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.cy-resize-handle:hover::after,
+.cy-resize-handle.is-dragging::after {
+  background: var(--el-color-primary-light-5);
+}
+/* 左栏收起按钮 */
+.cy-rail-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--cy-line);
+  border-radius: 6px;
+  background: var(--cy-surface);
+  color: var(--cy-text-2);
+  cursor: pointer;
+}
+.cy-rail-toggle:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-7);
+}
+@media (max-width: 1100px) {
+  .cy-split {
+    flex-wrap: wrap;
+  }
+  .cy-split__aside {
+    position: static;
+    flex: 1 1 100%;
+    width: auto;
+    max-height: none;
+  }
+}
+
+/* ---------- 规则 20：逐项填写——主区够宽时填写项和依据并排（约 2:1） ---------- */
+.cy-qa {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--cy-space-4);
+  align-items: start;
+}
+@container cy-main (min-width: 900px) {
+  .cy-qa {
+    grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
+    gap: var(--cy-space-5);
+  }
+}
+
+/* ---------- 规则 22、23：表单 ---------- */
+.cy-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--cy-space-4);
+}
+.cy-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cy-space-1);
+  min-width: 0;
+}
+.cy-field__label {
+  font-size: var(--cy-fs-body);
+  line-height: 1.5;
+  color: var(--cy-text-1);
+}
+.cy-field--short {
+  width: 200px;
+  max-width: 100%;
+}
+.cy-field--medium {
+  width: 360px;
+  max-width: 100%;
+}
+.cy-field--full {
+  width: 100%;
+}
+.cy-field--short .el-input,
+.cy-field--short .el-select,
+.cy-field--short .el-date-editor,
+.cy-field--medium .el-input,
+.cy-field--medium .el-select,
+.cy-field--medium .el-date-editor {
+  width: 100%;
+}
+
+/* ---------- 规则 4、25：连续长文限宽 ---------- */
+.cy-prose {
+  max-width: var(--cy-prose-w);
+  font-size: var(--cy-fs-body-l);
+  line-height: 1.8;
+  color: var(--cy-text-1);
+}
+
+/* ---------- 名称—内容对照（受理机构、在哪递交……） ---------- */
+.cy-dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--cy-space-2) var(--cy-space-5);
+  margin: 0;
+  font-size: var(--cy-fs-body);
+  line-height: 1.6;
+}
+.cy-dl > dt {
+  color: var(--cy-text-2);
+}
+.cy-dl > dd {
+  margin: 0;
+  color: var(--cy-text-1);
+  min-width: 0;
+}
+
+/* ---------- 规则 27：外文原文（阿拉伯文从右往左）单独成块，比中文弱一档 ---------- */
+.cy-original {
+  margin-top: var(--cy-space-2);
+  padding: var(--cy-space-3) var(--cy-space-4);
+  border-radius: 6px;
+  background: var(--cy-surface-sunken);
+  font-size: var(--cy-fs-aux);
+  line-height: 1.8;
+  color: var(--cy-text-2);
+}
+.cy-original[dir='rtl'],
+.cy-rtl {
+  direction: rtl;
+  text-align: right;
+  unicode-bidi: isolate;
+  font-family: 'Noto Naskh Arabic', var(--cy-font);
+}
+.cy-original--clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 混在中文行里的一小段外文：隔离方向，不打乱前后中文 */
+.cy-bidi {
+  unicode-bidi: isolate;
+}
+
+/* ---------- 规则 28：长抽屉、长表单的保存 / 取消固定在底部 ---------- */
+.cy-sticky-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--cy-space-2);
+  margin-top: var(--cy-space-5);
+  padding: var(--cy-space-3) 0;
+  border-top: 1px solid var(--cy-line);
+  background: var(--cy-surface);
+}
+
+/* ---------- 规则 29：入口卡片——几张就排几列，不留单张孤行 ---------- */
+.cy-cards {
+  display: grid;
+  grid-template-columns: repeat(var(--cy-cards-n, 3), minmax(0, 1fr));
+  gap: var(--cy-space-4);
+}
+@media (max-width: 1100px) {
+  .cy-cards {
+    grid-template-columns: repeat(min(var(--cy-cards-n, 3), 2), minmax(0, 1fr));
+  }
+}
+@media (max-width: 800px) {
+  .cy-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- 规则 30：筛选一行，概况另起一行 ---------- */
+.cy-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cy-space-3);
+}
+.cy-filter-summary {
+  margin: var(--cy-space-2) 0 var(--cy-space-4);
+  font-size: var(--cy-fs-aux);
+  line-height: 1.6;
+  color: var(--cy-text-2);
+}
+
+/* 第 7.5 项 规则 24：两端所有空状态统一——不放大插图，上下留白 32，文字用正文次要色 */
+.app-content .el-empty {
+  padding: 32px 16px;
+}
+.app-content .el-empty__image {
+  display: none;
+}
+.app-content .el-empty__description {
+  margin-top: 0;
+}
+.app-content .el-empty__description p {
+  font-size: 14px;
+  color: var(--cy-text-2);
+}
+.app-content .el-empty__bottom {
+  margin-top: 12px;
+}
+
+/* 第 7.5 项二轮 规则 9：禁用的按钮一律灰色描边，不保留主色 */
+.el-button.is-disabled,
+.el-button.is-disabled:hover,
+.el-button--primary.is-disabled,
+.el-button--primary.is-disabled:hover {
+  color: var(--el-text-color-placeholder);
+  background: #fff;
+  border-color: var(--el-border-color);
+  box-shadow: none;
+}
+.el-button.is-link.is-disabled,
+.el-button.is-text.is-disabled {
+  background: transparent;
+  border-color: transparent;
+}
+/* 二轮 规则 33：表格短表头不折行；表格放不下时横向滚动，不压住内容 */
+.el-table th.el-table__cell > .cell {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+.el-table .cy-clamp-2 .cell {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 二轮 规则 12：页面级切换（原分段按钮）统一显示成下划线标签页 */
+.cy-page-tabs.el-radio-group {
+  display: flex;
+  gap: 24px;
+  width: 100%;
+  border-bottom: 1px solid var(--cy-line);
+  margin-bottom: 20px;
+}
+.cy-page-tabs .el-radio-button__inner,
+.cy-page-tabs .el-radio-button:first-child .el-radio-button__inner,
+.cy-page-tabs .el-radio-button:last-child .el-radio-button__inner {
+  border: 0 !important;
+  border-bottom: 3px solid transparent !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 10px 2px;
+  margin-bottom: -1px;
+  font-size: 15px;
+  color: var(--cy-text-2);
+}
+.cy-page-tabs .el-radio-button.is-active .el-radio-button__inner {
+  color: var(--el-color-primary) !important;
+  border-bottom-color: var(--el-color-primary) !important;
+  font-weight: 600;
+}
+
+/* 第 7.5 项三轮 规则 12：切换控件只用三种——页级切换=下划线标签；2–3 个视图切换=分段按钮（默认样式）；筛选=胶囊 */
+.cy-pill-group.el-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cy-pill-group .el-radio-button__inner,
+.cy-pill-group .el-radio-button:first-child .el-radio-button__inner,
+.cy-pill-group .el-radio-button:last-child .el-radio-button__inner {
+  border: 1px solid var(--el-border-color) !important;
+  border-radius: 999px !important;
+  box-shadow: none !important;
+  padding: 6px 16px;
+  background: #fff !important;
+  color: var(--cy-text-2) !important;
+}
+.cy-pill-group .el-radio-button.is-active .el-radio-button__inner,
+.cy-pill-group .el-radio-button.is-active:first-child .el-radio-button__inner,
+.cy-pill-group .el-radio-button.is-active:last-child .el-radio-button__inner {
+  background: var(--el-color-primary-light-9) !important;
+  border-color: var(--el-color-primary-light-5) !important;
+  color: var(--el-color-primary) !important;
+  font-weight: 600 !important;
+}
+.el-check-tag {
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+/* 分页统一：底部留白，靠右 */
+.el-pagination {
+  margin-bottom: 24px;
+}
+/* 筛选栏按钮组固定在同一行 */
+.filters,
+.cy-filter-bar {
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filters > .el-button,
+.filters > form > .el-button {
+  flex: none;
+}
+.cy-page-tabs .el-radio-button__inner,
+.cy-page-tabs .el-radio-button:first-child .el-radio-button__inner,
+.cy-page-tabs .el-radio-button:last-child .el-radio-button__inner {
+  outline: none !important;
+}
+.cy-pill-group .el-radio-button__inner {
+  outline: none !important;
+}
+.cy-page-tabs .el-radio-button {
+  --el-radio-button-checked-bg-color: transparent;
+  --el-radio-button-checked-border-color: transparent;
+}
+
+/* 第 7.5 项四轮：表格列宽不够时容器内横向滚动，首列、操作列固定并加阴影；表头一律完整显示 */
+.el-table .el-table-fixed-column--right.is-first-column::before,
+.el-table .el-table-fixed-column--left.is-last-column::before {
+  box-shadow: none;
+}
+.el-table__body-wrapper .el-table-fixed-column--right.is-first-column {
+  box-shadow: -8px 0 12px -8px rgba(15, 23, 42, 0.18);
+}
+.el-table__header-wrapper th.el-table-fixed-column--right.is-first-column {
+  box-shadow: -8px 0 12px -8px rgba(15, 23, 42, 0.18);
+}
+.el-table__body-wrapper td.el-table-fixed-column--right,
+.el-table__body-wrapper td.el-table-fixed-column--left {
+  background-color: #ffffff;
+}
+.el-table__body-wrapper tr.hover-row > td.el-table-fixed-column--right,
+.el-table__body-wrapper tr:hover > td.el-table-fixed-column--right,
+.el-table__body-wrapper tr.hover-row > td.el-table-fixed-column--left,
+.el-table__body-wrapper tr:hover > td.el-table-fixed-column--left {
+  background-color: #f5f8ff;
+}
+.el-dropdown__popper,
+.el-popper.is-light {
+  z-index: 3200 !important;
+  background-color: #ffffff !important;
+}
+
+/* 第 7.5 项四轮：分页统一页码式，靠右，上下留白，不贴底 */
+.el-pagination,
+.cy-pager {
+  justify-content: flex-end;
+  margin: 16px 0 32px;
+  padding: 0;
+}
+.app-content {
+  padding-bottom: 72px;
+}
+
+/* 第 7.5 项五轮：状态标签全站统一胶囊 */
+.cy-status,
+.el-tag {
+  border-radius: 999px;
+}
+
+/* 第 7.5 项六轮：Element Plus 内置分页与开关标签字重统一归一为 400 / 600 */
+.el-pager li.is-active {
+  font-weight: 600 !important;
+}
+.el-switch__label {
+  font-weight: 400 !important;
+}
+.el-switch__label.is-active {
+  font-weight: 600 !important;
+}
+
+/* 第 7.5 项七轮 规则 14–16：已完成 / 已就绪 / 正常状态（success 标签）统一纯绿字、无底色、无边框 */
+.el-tag.el-tag--success {
+  background-color: transparent !important;
+  border-color: transparent !important;
+  color: var(--cy-tone-done-fg) !important;
+  padding-inline: 2px;
+}

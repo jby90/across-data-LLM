@@ -9,9 +9,9 @@ export interface LayoutNode {
   position_y: number
 }
 
-export const NODE_WIDTH = 260
-export const NODE_HEIGHT = 210
-export const NODE_GAP = 96
+export const NODE_WIDTH = 204
+export const NODE_HEIGHT = 172
+export const NODE_GAP = 64
 export const LAYOUT_LIMIT = 10000
 
 export function boundedPosition(x: number, y: number): NodePosition {
@@ -32,12 +32,12 @@ export function spacedLayout(nodes: LayoutNode[], heights: Record<string, number
   const columnHeights = groups.map(
     (group) => group.reduce((sum, node) => sum + heightOf(node), 0) + (group.length - 1) * NODE_GAP,
   )
-  const contentHeight = Math.max(520, ...columnHeights)
+  const contentHeight = Math.max(380, ...columnHeights)
   const positions: Record<string, NodePosition> = {}
   groups.forEach((group, column) => {
-    let y = 60 + (contentHeight - columnHeights[column]) / 2
+    let y = 48 + (contentHeight - columnHeights[column]) / 2
     group.forEach((node) => {
-      positions[node.node_id] = { x: 60 + column * (NODE_WIDTH + 116), y: Math.round(y) }
+      positions[node.node_id] = { x: 24 + column * (NODE_WIDTH + 44), y: Math.round(y) }
       y += heightOf(node) + NODE_GAP
     })
   })

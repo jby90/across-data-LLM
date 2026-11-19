@@ -53,7 +53,7 @@ async def main():
                 data = store.read(version.archive_path)
                 if len(data) != version.size_bytes:
                     raise RuntimeError("原文长度不匹配")
-            org_name = os.environ.get("CYSH_DEMO_ORG_NAME", "演示车企")
+            org_name = os.environ.get("CYSH_DEMO_ORG_NAME", "启衡智行汽车科技（上海）有限公司")
             org = await session.scalar(select(Organization).where(
                 Organization.name == org_name))
             if org is None:

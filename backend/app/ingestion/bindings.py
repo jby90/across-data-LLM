@@ -30,31 +30,31 @@ async def record_canonical_binding(
     held = await session.get(Document, held_document_id)
     version = await session.get(DocumentVersion, replacement_version_id)
     if not held or not version or not await document_is_held(session, held.id):
-        raise ValueError("an existing held document and replacement version are required")
+        raise ValueError("必须指定已隔离的待修复文档与有效的替换归档版本")
     replacement = await session.get(Document, version.document_id)
     if replacement.id == held.id or replacement.country_code != held.country_code:
-        raise ValueError("replacement must be a distinct document in the same jurisdiction")
+        raise ValueError("替换文档必须为同一法域下的独立法规记录")
     official_hosts = {"assets.egazette.gov.sg", "sso.agc.gov.sg"}
     source = urlsplit(replacement.source_url)
     final = urlsplit(version.final_url)
     if held.country_code != "SG" or any(
         url.scheme != "https" or url.hostname not in official_hosts for url in (source, final)
     ):
-        raise ValueError("replacement must use a registered Singapore official source")
+        raise ValueError("替换文档必须来自已登记的新加坡官方权威发布源")
     if await document_is_held(session, replacement.id):
-        raise ValueError("replacement is itself held")
-    raw = archive.read(version.archive_path)
+        raise ValueError("所选替换文档本身处于安全隔离状态，不可作为权威源")
+    raw = archive.read(version.archive_path, expected_sha256=version.content_hash)
     if archive.sha256(raw) != version.content_hash or len(raw) != version.size_bytes:
-        raise ValueError("replacement archive hash/size mismatch")
+        raise ValueError("替换归档文件哈希或字节大小校验不一致")
     parsed = parse_document(raw, version.mime_type)
     cover = parsed.pages[0] if parsed.pages else ""
     if not expected_identity or not expected_edition:
-        raise ValueError("explicit identity and edition required")
+        raise ValueError("必须明确填写预期的法规标识与版本信息")
     if any(
         normalized_identity(value) not in normalized_identity(cover)
         for value in (expected_identity, expected_edition)
     ):
-        raise ValueError("replacement cover does not prove the requested identity and edition")
+        raise ValueError("替换文本封面未能证明所要求的法规名称与版本")
     payload = dict(
         held_document_id=str(held.id),
         canonical_document_id=str(replacement.id),

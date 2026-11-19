@@ -57,7 +57,7 @@ async def test_binding_resolution_is_append_only_identity_checked_and_not_approv
             expected_edition="2020 REVISED EDITION",
             acquisition_note="official archive, review pending",
         )
-        with pytest.raises(ValueError, match="cover"):
+        with pytest.raises(ValueError, match="封面"):
             await record_canonical_binding(
                 session,
                 archive,

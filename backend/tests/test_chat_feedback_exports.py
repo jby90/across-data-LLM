@@ -54,7 +54,9 @@ def test_cache_bounded_ttl_singleflight_and_failure_retry():
     assert "failure" not in cache._pending
 
 
-async def test_pdf_cache_frozen_content_scope_and_guards(client, seed, session_factory, monkeypatch):
+async def test_pdf_cache_frozen_content_scope_and_guards(
+    client, seed, session_factory, monkeypatch
+):
     from app.analysis import export_cache
     from app.analysis.models import ReportVersion
 
@@ -78,9 +80,16 @@ async def test_pdf_cache_frozen_content_scope_and_guards(client, seed, session_f
     assert second.headers["cache-control"] == "private, no-store"
     assert (await client.get(url + "?dimension=D4", headers=auth)).status_code == 200
     assert len(calls) == 2
+
     async def changed_updates(*_):
-        return [{"change_id": "new-source-update", "document_title": "Synthetic update",
-                 "dimension_code": "D1", "state": "open"}]
+        return [
+            {
+                "change_id": "new-source-update",
+                "document_title": "Synthetic update",
+                "dimension_code": "D1",
+                "state": "open",
+            }
+        ]
 
     monkeypatch.setattr(router, "report_updates", changed_updates)
     assert (await client.get(url, headers=auth)).headers["x-export-cache"] == "miss"
@@ -112,12 +121,23 @@ async def test_actual_activity_uses_committed_events_not_internal_node_labels(
     async with session_factory() as s:
         current = await s.get(AnalysisTask, task.id)
         current.findings_json = []
-        s.add(AnalysisStepTrace(
-            task_id=task.id, seq_no=1, agent_node_id="PRIVATE_NODE", agent_name="PRIVATE_AGENT",
-            phase="verification", status="failed", business_summary="PRIVATE_REASON",
-        ))
-        await append_event(s, current, "phase_started", {"phase": "retrieval", "node_id": "PRIVATE_NODE"})
-        await append_event(s, current, "phase_started", {"phase": "analysis", "system_prompt": "PRIVATE_PROMPT"})
+        s.add(
+            AnalysisStepTrace(
+                task_id=task.id,
+                seq_no=1,
+                agent_node_id="PRIVATE_NODE",
+                agent_name="PRIVATE_AGENT",
+                phase="verification",
+                status="failed",
+                business_summary="PRIVATE_REASON",
+            )
+        )
+        await append_event(
+            s, current, "phase_started", {"phase": "retrieval", "node_id": "PRIVATE_NODE"}
+        )
+        await append_event(
+            s, current, "phase_started", {"phase": "analysis", "system_prompt": "PRIVATE_PROMPT"}
+        )
         await s.commit()
     auth = bearer(await login(client, "user", "a-member@example.com"))
     url = f"/api/analysis/tasks/{task.id}"

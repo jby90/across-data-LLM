@@ -146,11 +146,9 @@ async def test_patch_config_and_interval(client, seed):
 
 async def test_site_endpoints_forbidden_for_non_platform_admin(client, seed):
     user_h = bearer(await login(client, "user", "a-admin@example.com"))
-    reviewer_h = bearer(await login(client, "admin", "reviewer@example.com"))
     assert (
         await client.get("/api/admin/sites", headers=user_h)
     ).status_code == 401  # 用户端令牌不能用于管理端
-    assert (await client.get("/api/admin/sites", headers=reviewer_h)).status_code == 403
     assert (await client.post("/api/admin/sites", json=SITE)).status_code == 401
 
 
@@ -187,7 +185,7 @@ async def test_documents_api_after_real_ingest(client, seed, session_factory, tm
     assert sites_list[0]["document_count"] == 2
     assert set(sites_list[0]["sample_titles"]) == {"Data Act", "Guide page"}
 
-    reviewer_h = bearer(await login(client, "admin", "reviewer@example.com"))  # 复核员可读文档
+    reviewer_h = bearer(await login(client, "admin", "admin@example.com"))
     docs = (await client.get("/api/admin/documents?country_code=sg", headers=reviewer_h)).json()
     assert len(docs) == 2 and all(d["latest_version"]["state"] == "parsed" for d in docs)
     pdf = next(d for d in docs if d["source_url"].endswith("act.pdf"))

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Reversible in-memory redaction. Mappings never belong in logs or audit rows."""
 
 import ipaddress
@@ -65,7 +66,12 @@ class Redactor:
                     r"[A-Z][A-Z0-9]{5,6}(?![A-Z0-9])"
                 ),
             ),
-            ("BANK", re.compile(r"(?<!\d)(?:\d[ -]?){15,18}\d(?!\d)")),
+            (
+                "BANK",
+                # 银行卡号：连续 16–19 位，或 4 位一组的 4–5 组。不能用“任意数字夹空格或连字符”，
+                # 否则表格里的年份区间、条号串（如 1986-1988 1986-1988）会被当成卡号
+                re.compile(r"(?<![\d.-])(?:\d{16,19}|\d{4}(?:[ -]\d{4}){3,4})(?![\d.-])"),
+            ),
             (
                 "PHONE",
                 re.compile(
@@ -113,6 +119,12 @@ class Redactor:
                         ipaddress.ip_address(m.group())
                     except ValueError:
                         continue
+                    # 条号如 5.1.2.2 的写法与 IPv4 相同；各段都很小的是条号，不是地址
+                    parts = m.group().split(".")
+                    if len(parts) == 4 and all(p.isdigit() and int(p) <= 20 for p in parts):
+                        continue
+                if kind == "PHONE" and re.fullmatch(r"(?:19|20)\d{2}[ -](?:19|20)\d{2}", m.group()):
+                    continue  # 年份区间（1986-1988），不是 8 位电话号码
                 spans.append((m.start(), priority, -len(m.group()), m.end(), kind, m.group()))
         end, parts = 0, []
         for start, _, _, stop, kind, value in sorted(spans):
@@ -148,3 +160,33 @@ class Redactor:
 def redact(text, aliases=()):
     r = Redactor(aliases)
     return r.redact(text), r.mapping
+
+
+KIND_LABELS_ZH = {
+    "ORG": "企业主体与自定义敏感词",
+    "EMAIL": "电子邮箱",
+    "ID": "身份证件号",
+    "VIN": "车辆识别代号",
+    "PLATE": "车牌号",
+    "BANK": "银行账户号",
+    "PHONE": "联系电话",
+    "IP": "网络地址",
+}
+
+
+def summarize_redaction(text: str, aliases: tuple[str, ...] = ()) -> dict:
+    """In-memory count-only summary of outbound LLM redaction; never returns plaintext mappings."""
+    clean_aliases = {a.strip() for a in aliases if a and a.strip()}
+    if not text or not text.strip():
+        return {"total": 0, "by_kind": {}, "labels": [], "custom_terms_configured": len(clean_aliases)}
+    r = Redactor(aliases)
+    r.redact(text)
+    by_kind = {k: int(v) for k, v in r.counts.items() if v}
+    labels = [f"{KIND_LABELS_ZH.get(k, k)} {v} 处" for k, v in by_kind.items()]
+    return {
+        "total": int(sum(by_kind.values())),
+        "by_kind": by_kind,
+        "labels": labels,
+        "custom_terms_configured": len(clean_aliases),
+    }
+

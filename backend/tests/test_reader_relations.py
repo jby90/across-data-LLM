@@ -173,3 +173,18 @@ async def test_old_repealed_and_held_sources_stay_out_of_reader_graph(
         )
         await s.commit()
     assert (await client.get(url, headers=auth)).status_code == 409
+
+
+async def test_a_draft_text_stays_out_of_the_reader_graph(client, seed, session_factory):
+    async with session_factory() as s:
+        doc, v1, c1 = await source(s, "A bill, not yet law.")
+        await graph(s, doc, c1)
+        await s.commit()
+    auth = bearer(await login(client, "user", "a-member@example.com"))
+    url = f"/api/knowledge/regulations/{doc.id}/relations?version_id={v1.id}"
+    assert (await client.get(url, headers=auth)).json()["total"] == 1
+    async with session_factory() as s:
+        v = await s.get(type(v1), v1.id)
+        v.legal_status = "draft"
+        await s.commit()
+    assert (await client.get(url, headers=auth)).json()["total"] == 0

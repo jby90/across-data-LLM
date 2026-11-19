@@ -87,7 +87,6 @@ def test_whitelist_settings_and_input_are_preserved():
 
 async def test_import_inactive_activate_by_id_rollback_and_permissions(client, seed):
     admin = bearer(await login(client, "admin", "admin@example.com"))
-    reviewer = bearer(await login(client, "admin", "reviewer@example.com"))
     original = (await client.get(BASE, headers=admin)).json()
     dsl = (await client.get(BASE + "/export", headers=admin)).json()
     dsl["workflow"]["graph"]["nodes"][2]["parameters"]["top_k"] = 9
@@ -96,8 +95,6 @@ async def test_import_inactive_activate_by_id_rollback_and_permissions(client, s
     new = imported.json()
     assert new["is_active"] is False
     assert (await client.get(BASE, headers=admin)).json()["id"] == original["id"]
-    denied = await client.post(BASE + f"/versions/{new['id']}/activate", headers=reviewer)
-    assert denied.status_code == 403
     activated = await client.post(BASE + f"/versions/{new['id']}/activate", headers=admin)
     assert activated.status_code == 200, activated.text
     assert activated.json()["nodes"][2]["runtime_settings"]["top_k"] == 9

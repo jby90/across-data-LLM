@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
-from app.ingestion.models import Clause, Document, DocumentVersion
+from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
 from app.ingestion.safety import document_available, document_is_held, held_citation_ids
 from app.knowledge.models import ClauseTranslation, GlossaryTerm, LegalTermDefinition, ReviewPoint
 
@@ -120,6 +120,11 @@ DEFINITION_HEADING = re.compile(
     r"\bdefinitions?\b|\binterprétation\b|\bdéfinitions?\b|on entend par|تعريف|يقصد|المصطلحات", re.I
 )
 
+LIST_LEAD = re.compile(
+    r"on entend par\s*:|au sens de la présente loi[^\n:]{0,40}:|يقصد\s+ب[^\n:：]{0,60}[:：]|"
+    r"for the purposes? of this (?:Act|Law|Regulation)[^\n:]{0,40}:",
+    re.I,
+)
 QUOTED_COLON = re.compile(r'[“‘"«]\s*(?P<term>[^“‘”’"«»\n]{2,100}?)\s*[”’"»]\s*[:：]\s*')
 FRENCH_DIRECT = re.compile(
     r"on entend par\s+(?P<term>[^\n:：]{2,100}?)\s+(?=toutes?\b|tous\b|les?\b|la\b|une?\b)", re.I
@@ -129,6 +134,80 @@ STRUCTURAL_BOUNDARY = re.compile(
     r"Section\s+[IVX0-9]+\b|الفصل\s+[0-9٠-٩]+)",
     re.I,
 )
+
+
+EN_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "of",
+        "the",
+        "and",
+        "for",
+        "in",
+        "to",
+        "or",
+        "by",
+        "on",
+        "at",
+        "with",
+        "from",
+        "as",
+        "is",
+        "are",
+        "be",
+        "an",
+        "a",
+        "no",
+        "not",
+        "it",
+        "its",
+        "if",
+        "so",
+        "that",
+        "this",
+        "into",
+        "onto",
+        "upon",
+        "under",
+        "over",
+        "than",
+        "then",
+        "was",
+        "were",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "may",
+        "can",
+        "shall",
+        "must",
+        "will",
+        "would",
+        "should",
+        "could",
+    }
+)
+
+
+def is_stopword_term(source_term: str | None, target_zh: str | None = None) -> bool:
+    """Reject English function words / prepositions, footnote fragments, and single-char noise."""
+    src = " ".join((source_term or "").strip().split())
+    tgt = (target_zh or "").strip()
+    if not src:
+        return True
+    if src.casefold() in EN_STOPWORDS:
+        return True
+    if len(src) == 1 and src.isascii():
+        return True
+    if re.match(r"^(?:of|in|for|to|from|by|with|under|into)\s+(?:a|an|the)\b", src, re.I):
+        return True
+    if re.search(r"[A-Za-z]\d+$", src) and tgt.endswith("的"):
+        return True
+    return False
 
 
 def sha(text: str) -> str:
@@ -162,7 +241,8 @@ def identity(term, language, context=None):
 def definition_spans(text, heading=""):
     """Return exact offsets, never repaired/truncated words or inferred definitions."""
     matches = list(QUOTED.finditer(text)) + list(FRENCH_DIRECT.finditer(text))
-    if DEFINITION_HEADING.search(heading + "\n" + text[:300]):
+    # 定义列表的引导语常在条文中间（摩洛哥 09-08 号法第一条：先一段宗旨，再“on entend par :”）
+    if DEFINITION_HEADING.search(heading + "\n" + text[:300]) or LIST_LEAD.search(text):
         matches += list(QUOTED_COLON.finditer(text))
         if not matches:
             matches = list(COLON.finditer(text))
@@ -189,10 +269,18 @@ def definition_spans(text, heading=""):
             end = m.end() + amendment_end.start()
         while end > m.end() and text[end - 1].isspace():
             end -= 1
+        # 下一项的编号（“2- «”里的“2-”）不属于本项定义
+        numbering = re.search(r"\n\s*[0-9٠-٩]{1,2}\s*[-.)ـ]\s*$", text[m.end() : end])
+        if numbering:
+            end = m.end() + numbering.start()
+            while end > m.end() and text[end - 1].isspace():
+                end -= 1
         term = re.sub(
             r"^(?:\.[0-9٠-٩]+\s*|[0-9٠-٩]+\s*[.)\-]\s*|[–—\-•]\s*)", "", m.group("term").strip()
         )
         term = term.strip(" “«»”")
+        if is_stopword_term(term):
+            continue
         if re.match(r"(?:Art\.?|Article)\s*\d", term, re.I) or "\n" in term:
             continue
         if any(term.count(a) != term.count(b) for a, b in (("(", ")"), ("[", "]"))):
@@ -209,6 +297,9 @@ def definition_spans(text, heading=""):
     return out
 
 
+NEXT_ITEM_ZH = re.compile(r"[；;]\s*[0-9]{1,2}\s*[-–.)、]\s*[“\"]")
+
+
 def _zh_definition(text, target):
     if not text or target.isascii():
         return None
@@ -220,6 +311,10 @@ def _zh_definition(text, target):
     if not m:
         return None
     end = text.find("。", m.end())
+    # 定义列表译成一段时，下一项（“；4- “个人数据文件”：”）之前就是本项的结尾
+    nxt = NEXT_ITEM_ZH.search(text, m.end())
+    if nxt and (end < 0 or nxt.start() < end):
+        return text[m.start() : nxt.start() + 1]
     if end < 0 or end - m.start() > 1400:
         return None
     return text[m.start() : end + 1]  # exact excerpt of the retained translation
@@ -291,7 +386,7 @@ async def rebuild_library(session, country_code=None, document_id=None):
         if source_kind is None:
             skipped += 1
             continue
-        if clause.id in held or version.legal_status == "repealed":
+        if clause.id in held or version.legal_status in NOT_CITABLE_STATUSES:
             skipped += 1
             continue
         if (
@@ -393,7 +488,7 @@ async def current_definitions(session, country_code, document_id=None, version_i
             document_available(),
             DocumentVersion.state == "parsed",
             DocumentVersion.review_status != "rejected",
-            DocumentVersion.legal_status != "repealed",
+            DocumentVersion.legal_status.not_in(NOT_CITABLE_STATUSES),
         )
     )
     if document_id:
@@ -442,6 +537,8 @@ async def current_definitions(session, country_code, document_id=None, version_i
     )
     result, seen, parsed_spans = [], {}, {}
     for term, clause, version, _ in rows:
+        if is_stopword_term(term.source_term, term.target_zh):
+            continue
         historical_match = version_id is not None and version.id == version_id
         is_current = (
             version.id == observed[term.document_id]

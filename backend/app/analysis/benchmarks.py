@@ -86,18 +86,26 @@ FROZEN_QUESTIONS: list[dict[str, Any]] = [
 ]
 
 
+_BENCH_CACHE: dict[str, dict[str, Any]] = {}
+
+
 async def run_retrieval_benchmarks(session: AsyncSession) -> dict[str, Any]:
+    from app.knowledge.cache_sync import keeper_active, rebuilding, use_cached
+
+    hit = _BENCH_CACHE.get("latest")
+    if use_cached(hit):
+        return hit
     cases: list[dict[str, Any]] = []
     boxes: dict[str, ToolBox] = {}
     for q in FROZEN_QUESTIONS:
         tb = boxes.setdefault(q["cc"], ToolBox(session, q["cc"]))
         top = await tb.search_effective_clauses(q["dim"], top_k=5)
-        hit = None
+        hit_cand = None
         snippet = ""
         for cand in top:
             low = cand.text.lower()
             if all(n in low for n in q["need"]):
-                hit = cand
+                hit_cand = cand
                 pos = low.find(q["need"][0])
                 snippet = cand.text[max(0, pos - 40) : pos + 160].replace("\n", " ")
                 break
@@ -108,18 +116,21 @@ async def run_retrieval_benchmarks(session: AsyncSession) -> dict[str, Any]:
                 "dimension_code": q["dim"],
                 "scenario_question": q["q"],
                 "required_phrases": q["need"],
-                "matched_document_title": hit.document_title if hit else "",
-                "matched_clause_label": hit.label if hit else "",
-                "passed": hit is not None,
+                "matched_document_title": hit_cand.document_title if hit_cand else "",
+                "matched_clause_label": hit_cand.label if hit_cand else "",
+                "passed": hit_cand is not None,
                 "evidence_snippet": snippet,
             }
         )
     hits = sum(1 for c in cases if c["passed"])
-    return {
+    out = {
         "total_cases": len(cases),
         "hit_cases": hits,
         "retrieval_hit_rate_pct": round(hits / len(cases) * 100, 1) if cases else 0.0,
         "human_review_status": "0/10 未完成(法条定位与结论正确性须人工对照原文)",
-        "note": "仅为检索命中检查(前 5 条候选里是否出现题目要求的原文词句),不是法律准确率。",
+        "note": "仅为检索命中检查(前 5 条候选里是否出现评测案例要求的原文词句),不是法律准确率。",
         "cases": cases,
     }
+    if keeper_active or rebuilding.get():
+        _BENCH_CACHE["latest"] = out
+    return out

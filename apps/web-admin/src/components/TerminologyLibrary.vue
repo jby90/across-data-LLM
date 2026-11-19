@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
+import { useAuth } from '../auth'
 interface Definition {
   id: string
   source_term: string
@@ -22,10 +23,27 @@ interface Ambiguity {
   impact: string
   status: string
 }
+interface DocOption {
+  id: string
+  title: string
+  latest_version?: { id: string; state: string } | null
+}
+interface ClauseOption {
+  id: string
+  ordinal: number
+  clause_number: string | null
+  heading: string | null
+  original_text: string
+}
 const props = defineProps<{ country: string }>()
 const registerVisible = ref(false),
-  saving = ref(false)
+  saving = ref(false),
+  docsLoading = ref(false),
+  clausesLoading = ref(false)
+const docOptions = ref<DocOption[]>([]),
+  clauseOptions = ref<ClauseOption[]>([])
 const registration = reactive({
+  document_id: '',
   clause_id: '',
   source_term: '',
   target_zh: '',
@@ -33,11 +51,72 @@ const registration = reactive({
   source_kind: 'law_definition',
   applies_to_document_id: '',
 })
+async function openRegisterDialog() {
+  if (!props.country) {
+    ElMessage.warning('请先在页面顶部选择国家后再补充来源定义')
+    return
+  }
+  registration.document_id = ''
+  registration.clause_id = ''
+  registration.source_term = ''
+  registration.target_zh = ''
+  registration.quote = ''
+  registration.source_kind = 'law_definition'
+  registration.applies_to_document_id = ''
+  clauseOptions.value = []
+  registerVisible.value = true
+  docsLoading.value = true
+  try {
+    const list = await api.get<DocOption[]>(
+      `/admin/documents?country_code=${encodeURIComponent(props.country)}&limit=200`,
+    )
+    docOptions.value = list.filter((d) => d.latest_version?.state === 'parsed')
+  } catch {
+    docOptions.value = []
+  } finally {
+    docsLoading.value = false
+  }
+}
+async function onPickDocument(docId: string) {
+  registration.clause_id = ''
+  clauseOptions.value = []
+  const picked = docOptions.value.find((d) => d.id === docId)
+  if (!picked?.latest_version?.id) return
+  clausesLoading.value = true
+  try {
+    clauseOptions.value = await api.get<ClauseOption[]>(
+      `/admin/versions/${picked.latest_version.id}/clauses?limit=500`,
+    )
+  } catch {
+    clauseOptions.value = []
+  } finally {
+    clausesLoading.value = false
+  }
+}
+function onPickClause(clauseId: string) {
+  const picked = clauseOptions.value.find((c) => c.id === clauseId)
+  if (picked && !registration.quote.trim()) {
+    registration.quote = picked.original_text.slice(0, 600)
+  }
+}
 async function register() {
+  if (!props.country && registration.source_kind !== 'international_reference') {
+    ElMessage.warning('请先在页面顶部选择适用国家')
+    return
+  }
+  if (!registration.clause_id && !registration.document_id) {
+    ElMessage.warning('请先选择来源法规与具体条款')
+    return
+  }
   saving.value = true
   try {
     await api.post('/admin/knowledge/terminology/references', {
-      ...registration,
+      document_id: registration.document_id || null,
+      clause_id: registration.clause_id || null,
+      source_term: registration.source_term,
+      target_zh: registration.target_zh,
+      quote: registration.quote,
+      source_kind: registration.source_kind,
       country_code: registration.source_kind === 'international_reference' ? null : props.country,
       applies_to_document_id: registration.applies_to_document_id || null,
     })
@@ -63,11 +142,16 @@ const visible = computed(() =>
   ),
 )
 async function load() {
+  if (!props.country) {
+    items.value = []
+    points.value = []
+    return
+  }
   busy.value = true
   try {
     const [d, p] = await Promise.all([
       api.get<{ items: Definition[] }>(
-        `/admin/knowledge/terminology?country_code=${props.country || 'SG'}`,
+        `/admin/knowledge/terminology?country_code=${encodeURIComponent(props.country)}`,
       ),
       api.get<Ambiguity[]>('/admin/knowledge/terminology/ambiguities'),
     ])
@@ -108,11 +192,16 @@ watch(
     <header>
       <div>
         <h3>来源定义库</h3>
-        <p>法律自身定义 → 监管说明 → 官方语种对照 → 国际参考。来源校验与人工法律审批分别记录。</p>
+        <p>每个术语的中文译名与出处。出处按可信程度排列：法律自身的定义、监管机构的说明、官方语种对照、国际通行用法。</p>
       </div>
       <div>
-        <el-button @click="registerVisible = true">补充权威定义</el-button
-        ><el-button type="primary" @click="rebuild">更新来源定义</el-button>
+        <el-button :disabled="!props.country" @click="openRegisterDialog">补充权威定义</el-button
+        ><el-button
+          v-if="['platform_admin', 'ops_admin'].includes(useAuth().user?.role ?? '')"
+          :disabled="!props.country"
+          @click="rebuild"
+          >更新来源定义</el-button
+        >
       </div>
     </header>
     <el-input
@@ -172,11 +261,11 @@ watch(
         label="状态"
         width="130"
         ><template #default="{ row }">{{
-          row.status === 'confirmed' ? '已确认' : '待核对'
+          row.status === 'confirmed' ? '已确认' : '待复核'
         }}</template></el-table-column
       ></el-table
     >
-    <el-dialog v-model="registerVisible" title="登记来源定义与译名" width="650px" append-to-body>
+    <el-dialog v-model="registerVisible" title="登记来源定义与译名" width="min(650px, 94vw)" append-to-body>
       <el-form label-position="top">
         <el-form-item label="来源层级"
           ><el-select v-model="registration.source_kind"
@@ -188,25 +277,60 @@ watch(
               label="国际参考"
               value="international_reference" /></el-select
         ></el-form-item>
-        <el-form-item label="来源条款 ID"
-          ><el-input v-model="registration.clause_id" placeholder="从已归档官方条款复制 ID"
-        /></el-form-item>
-        <el-form-item label="原词"><el-input v-model="registration.source_term" /></el-form-item>
+        <el-form-item label="来源法规"
+          ><el-select
+            v-model="registration.document_id"
+            filterable
+            :loading="docsLoading"
+            style="width: 100%"
+            placeholder="选择已归档的官方法规文件"
+            @change="onPickDocument"
+          >
+            <el-option v-for="d in docOptions" :key="d.id" :value="d.id" :label="d.title" />
+          </el-select
+        ></el-form-item>
+        <el-form-item label="来源条款"
+          ><el-select
+            v-model="registration.clause_id"
+            filterable
+            :loading="clausesLoading"
+            :disabled="!registration.document_id"
+            style="width: 100%"
+            placeholder="选择定义所在的条款"
+            @change="onPickClause"
+          >
+            <el-option
+              v-for="c in clauseOptions"
+              :key="c.id"
+              :value="c.id"
+              :label="`${c.clause_number || `第 ${c.ordinal + 1} 段`} · ${(c.heading || c.original_text).replace(/\s+/g, ' ').slice(0, 42)}`"
+            />
+          </el-select
+        ></el-form-item>
+        <el-form-item label="原词"><el-input v-model="registration.source_term" placeholder="填写原文中的术语" /></el-form-item>
         <el-form-item label="规定中文译法"
-          ><el-input v-model="registration.target_zh"
+          ><el-input v-model="registration.target_zh" placeholder="填写规范中文译法"
         /></el-form-item>
         <el-form-item label="完整定义原文"
           ><el-input
             v-model="registration.quote"
             type="textarea"
             :rows="5"
-            placeholder="逐字粘贴来源定义"
+            placeholder="选择条款后自动带出原文，可截取该术语对应的定义原句"
         /></el-form-item>
         <el-form-item
           v-if="registration.source_kind === 'official_parallel'"
-          label="对应法规文件 ID"
-          ><el-input v-model="registration.applies_to_document_id"
-        /></el-form-item>
+          label="适用的法规文件"
+          ><el-select
+            v-model="registration.applies_to_document_id"
+            filterable
+            clearable
+            style="width: 100%"
+            placeholder="选择该多语种译名适用的法规文件"
+          >
+            <el-option v-for="d in docOptions" :key="d.id" :value="d.id" :label="d.title" />
+          </el-select
+        ></el-form-item>
       </el-form>
       <template #footer
         ><el-button @click="registerVisible = false">取消</el-button
@@ -224,7 +348,7 @@ header {
   flex-wrap: wrap;
 }
 h3 {
-  font-size: 17px;
+  font-size: 16px;
   margin: 12px 0;
 }
 p {

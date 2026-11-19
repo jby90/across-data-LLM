@@ -13,18 +13,20 @@ x-runtime: &runtime
   CYSH_LLM_MODEL: ${CYSH_LLM_MODEL:-deepseek-flash}
   CYSH_LLM_REDACTION: "on"
   CYSH_CITATION_POLICY: allow_machine_with_notice
+  CYSH_DB_POOL_SIZE: "6"
+  CYSH_DB_MAX_OVERFLOW: "6"
 services:
   db:
     logging: *logging
     image: pgvector/pgvector:pg16
     restart: unless-stopped
-    mem_limit: 320m
+    mem_limit: 540m
     environment:
       POSTGRES_DB: cyshuhe
       POSTGRES_USER: cyshuhe
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
-    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "work_mem=2MB", "-c", "max_connections=60"]
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "work_mem=2MB", "-c", "max_connections=60"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cyshuhe -d cyshuhe"]
@@ -48,12 +50,12 @@ services:
     image: cyshuhe-api:${CYSH_RELEASE:-local}
     build: {context: ../backend}
     restart: unless-stopped
-    mem_limit: 420m
+    mem_limit: 640m
     depends_on: {migrate: {condition: service_completed_successfully}}
     environment: *runtime
     volumes: [archive:/data/archive]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -62,11 +64,13 @@ services:
     image: cyshuhe-api:${CYSH_RELEASE:-local}
     build: {context: ../backend}
     restart: unless-stopped
-    mem_limit: 320m
+    mem_limit: 192m
     command: ["python", "-m", "app.worker"]
     depends_on: {api: {condition: service_healthy}}
     environment:
       <<: *runtime
+      CYSH_DB_POOL_SIZE: "2"
+      CYSH_DB_MAX_OVERFLOW: "2"
       CYSH_CRAWL_ALLOW_RESOLVED_CIDRS: "[]"
     volumes: [archive:/data/archive]
   web-user:
@@ -74,18 +78,18 @@ services:
     image: cyshuhe-web-user:${CYSH_RELEASE:-local}
     build: {context: .., dockerfile: apps/web-user/Dockerfile}
     restart: unless-stopped
-    mem_limit: 48m
+    mem_limit: 36m
   web-admin:
     logging: *logging
     image: cyshuhe-web-admin:${CYSH_RELEASE:-local}
     build: {context: .., dockerfile: apps/web-admin/Dockerfile}
     restart: unless-stopped
-    mem_limit: 48m
+    mem_limit: 36m
   nginx:
     logging: *logging
     image: nginx:1.28-alpine
     restart: unless-stopped
-    mem_limit: 48m
+    mem_limit: 36m
     depends_on: [web-user, web-admin, api]
     ports: ["${CYSH_BIND_IP:-127.0.0.1}:${CYSH_HTTP_PORT:-18080}:80"]
     volumes:

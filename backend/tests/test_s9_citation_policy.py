@@ -34,6 +34,11 @@ async def test_review_policy_is_generic_and_translation_approval_does_not_approv
         doc.country_code = country
         clause = await s.scalar(select(Clause).order_by(Clause.ordinal))
         version = await s.get(DocumentVersion, clause.version_id)
+        await s.execute(
+            update(ClauseTranslation)
+            .where(ClauseTranslation.clause_id == clause.id)
+            .values(is_current=False)
+        )
         tr = ClauseTranslation(
             clause_id=clause.id,
             translated_text="合成测试的已审译文",
@@ -119,7 +124,7 @@ async def test_pipeline_snapshots_policy_and_review_counts_without_changing_appr
         assert counts["approved"] == 0
         if policy == "reviewed_only":
             assert counts["total"] == 0 and task.status == "partial_sample"
-            assert all("待律所复核" in d["missing_gap_note"] for d in rv.dimensions_json)
+            assert all("证据缺口" in d["missing_gap_note"] for d in rv.dimensions_json)
         else:
             assert counts["pending"] > 0
             assert all(
@@ -181,6 +186,11 @@ async def test_review_revocation_during_analysis_is_rechecked_and_report_lock_is
         clause = await s.scalar(select(Clause).order_by(Clause.ordinal))
         version = await s.get(DocumentVersion, clause.version_id)
         version.review_status, clause.needs_review = "approved", False
+        await s.execute(
+            update(ClauseTranslation)
+            .where(ClauseTranslation.clause_id == clause.id)
+            .values(is_current=False)
+        )
         tr = ClauseTranslation(
             clause_id=clause.id,
             translated_text="合成复核样例",
