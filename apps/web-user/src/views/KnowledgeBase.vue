@@ -398,10 +398,11 @@ function chooseTopic(key: string) {
   topic.value = key
   topicPage.value = 1
 }
-// 译文长度和原文差得太多（译文比原文还长一大截，或短得多）：说明两边覆盖的范围不一样，不硬对齐，改成整条各一栏、各自滚动
+// 译文长度和原文差得太多（译文比原文还长一大截，或短得多）：说明两边覆盖的范围不一样，不硬对齐，改成整条各一栏、各自滚动（目录里的连续点线不计入原文有效字数）
 function columnsOnly(c: Clause): boolean {
   if (originalIsZh.value || !c.translated_text) return false
-  const a = bodyOf(c).length, b = c.translated_text.length
+  const strippedOrig = bodyOf(c).replace(/[.…·\-_]{4,}/g, ' ')
+  const a = strippedOrig.length, b = c.translated_text.replace(/[.…·\-_]{4,}/g, ' ').length
   if (a < 400) return false
   const r = b / a
   return r > 1.25 || r < 0.15

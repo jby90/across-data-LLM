@@ -59,14 +59,30 @@ _CONTACT = re.compile(
 )
 _ADDRESS = re.compile(r"大道|大街|大楼|街\s*\d|路\s*\d|\d+\s*号楼|层\b|第\s*\d+\s*层|邮编|B\.?P\.?\s*\d|Avenue|Angle|Rue|Immeuble|Hay\s|Bd\.?|boulevard", re.IGNORECASE)
 
-_FR_ORD = r"(?:[\dIVXLC]+|premier|premi[eè]re|deuxi[eè]me|troisi[eè]me|quatri[eè]me|cinqui[eè]me|sixi[eè]me|septi[eè]me|huiti[eè]me|neuvi[eè]me|dixi[eè]me)"
+_FR_ORD = r"(?:[\dIVXLC]+|1er|1[eè]re|Ier|IIe|premier|premi[eè]re|deuxi[eè]me|troisi[eè]me|quatri[eè]me|cinqui[eè]me|sixi[eè]me|septi[eè]me|huiti[eè]me|neuvi[eè]me|dixi[eè]me|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|onze|douze|pr[ée]liminaire|unique)"
 _HEADING = re.compile(
-    r"^\s*[（(]?\s*(第\s*[一二三四五六七八九十百零\dIVXLC]+\s*(章|编|篇|部分|节|卷)|第\s*[一二三四五六七八九十]+\s*[：:]|"
-    r"(chapitre|chapter|titre|title|part|partie|livre|kapitel|teil)\s+" + _FR_ORD + r"\b(?!\s*\()|section\s+" + _FR_ORD + r"\s*[.\-–]\s*\D|"
+    r"^\s*[（(]?\s*(第\s*[一二三四五六七八九十百零\dIVXLC]+\s*(章|编|篇|部分|节|小节|分编|卷)|第\s*[一二三四五六七八九十]+\s*[：:]|序编(?:\s+\S.*)?$|"
+    r"(chapitre|chapter|titre|title|part|partie|livre|kapitel|teil|paragraphe|sous-section|subdivision|division)\s+" + _FR_ORD + r"\b(?:\s*\([*\d]+\))?(?!\s*\()|"
+    r"section\s+" + _FR_ORD + r"\.?(?:\s*\([*\d]+\))?(?:\s*[:.\-–—]\s*\D|\s*$)|"
+    r"Section\s+\d+[A-Za-z]*(?:\(\d+\))?\s*$|"
     r"(الباب|الفصل|القسم|الكتاب|الفرع)(?:\s+\S+|(?:ال|األ|الأ)\S*))",
     re.IGNORECASE,
 )
 _SENTENCE_END = re.compile(r"[。；;.!?！？：:]\s*$")
+_DANGLING_PREV_RE = re.compile(
+    r"(?:\b(?:au|aux|du|des|de|dans|sur|sous|par|pour|en|under|of|in|to|from|with|by|and|or|at|on|via)|(?:^|\s)(?:من|في|إلى|على|عن|بمقتضى|و))\s*$|[,،]\s*$",
+    re.IGNORECASE,
+)
+_INLINE_LAW_REF_RE = re.compile(
+    r"\b(?:de la pr[ée]sente loi|du pr[ée]sent d[ée]cret|of this Act|of the Act|of these Regulations)\b",
+    re.IGNORECASE,
+)
+_LINK_INTRO_RE = re.compile(
+    r"(?:\b(?:at|on|via|from|to|in|or|ou|visit|see|website|portal|url|au|sur|à|sous)\s*$|[:：—–-]\s*$|(?:\bonline\s+at|网址为|网站|载于|详见|登录|访问|发送至|发至)\s*$)",
+    re.IGNORECASE,
+)
+_BARE_EMAIL_LINE_RE = re.compile(r"^\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}[.;,。；]?\s*$")
+_TRAILING_EXPLANATORY_BILL_RE = re.compile(r"\n[ \t]*EXPLANATORY STATEMENT[ \t]*\n[ \t]*This Bill seeks to\b[\s\S]*$")
 
 _ARABIC = r"[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]"
 _ARABIC_PAREN = re.compile(r"[（(]\s*" + _ARABIC + r"(?:" + _ARABIC + r"|[\s\-–—/«»\"'])*[）)]")
@@ -91,29 +107,51 @@ def arabic_left(text: str | None) -> int:
 
 def _is_heading_line(line: str) -> bool:
     s = line.strip()
-    return bool(s) and len(s) <= 80 and bool(_HEADING.match(s))
+    if not s or len(s) > 180 or _INLINE_LAW_REF_RE.search(s):
+        return False
+    if re.search(r"[.;。；]\s*$", s) and (s[0].islower() or len(s) > 45):
+        return False
+    return bool(_HEADING.match(s))
 
 
 def _short_title(line: str) -> bool:
     s = line.strip()
-    return bool(s) and len(s) <= 80 and not _SENTENCE_END.search(s) and not re.match(r"^[\d(（]", s)
+    return bool(s) and len(s) <= 130 and not re.search(r"[。；;.!?！？]\s*$", s) and not re.match(r"^[\d(（]", s)
 
 
 def _drop_trailing_heading(lines: list[str]) -> list[str]:
-    """The next chapter's heading (and its one- or two-line title) left at the end of a clause."""
+    """The next chapter's heading (and its one- to three-line title) left at the end of a clause."""
     out = list(lines)
-    for _ in range(4):
+    for _ in range(6):
         end = len(out)
         while end and not out[end - 1].strip():
             end -= 1
         peeled = False
-        for title_lines in (2, 1, 0):  # “第八章” + 一至两行标题，或只有“第八章 …”一行
+        for title_lines in (3, 2, 1, 0):  # “第八章” + 一至三行标题，或只有“第八章 …”一行
             k = end - 1 - title_lines
-            if k >= 1 and _is_heading_line(out[k]) and all(_short_title(x) for x in out[k + 1 : end]):
+            if k < 1 or not _is_heading_line(out[k]):
+                continue
+            # 若前一行停在介词/冠词/逗号（如 "prévus au\nchapitre II..." 或 "offences under\nPart 3."），绝不是下一章标题
+            p = k - 1
+            while p >= 0 and not out[p].strip():
+                p -= 1
+            if p >= 0 and _DANGLING_PREV_RE.search(out[p].strip()):
+                continue
+            if all(_short_title(x) for x in out[k + 1 : end]):
                 out = out[:k]
                 peeled = True
                 break
         if not peeled:
+            # 特判法文 Paragraphe N - Title 被旧译文直译在句末独立一行的“第2款——车辆尺寸与装载”
+            if end >= 2:
+                last_ln = out[end - 1].strip()
+                prev_ln = out[end - 2].strip()
+                if (
+                    re.search(r"[。；！？]\s*$", prev_ln)
+                    and re.match(r"^第\s*\d{1,2}\s*[款段]\s*(?:——|[—–-])\s*[^。；;!?！？]{2,32}$", last_ln)
+                ):
+                    out = out[: end - 1]
+                    continue
             break
     return out
 
@@ -124,6 +162,10 @@ def _drop_contact_block(lines: list[str]) -> list[str]:
     drop: set[int] = set()
     for i, line in enumerate(lines):
         if len(line.strip()) <= 120 and _CONTACT.search(line):
+            if _BARE_EMAIL_LINE_RE.match(line):
+                prev_ne = next((lines[p].strip() for p in range(i - 1, -1, -1) if lines[p].strip()), "")
+                if _LINK_INTRO_RE.search(prev_ne):
+                    continue
             drop.add(i)
             j = i - 1
             while j >= 0 and j >= i - 3 and len(lines[j].strip()) <= 60 and (_ADDRESS.search(lines[j]) or j in drop):
@@ -152,10 +194,10 @@ _FORM_RESIDUE = re.compile(r"w\s*w\s*w\s*\.\s*c\s*n\s*d\s*p\s*\.\s*m\s*a|Stricte
 # 条文开头的小标题和条号乱序（“同意的撤回的同意 16。——（1）”“本法4的适用。——”“需要取得同意\n13。”）、
 # 公报修订标记（“[22/2016]”“1 S 86/2026”）、页眉（“个人数据保护”单独一行）、条文末尾带出的下一章标题
 _AMEND_TAG = re.compile(r"[ \t]*\[\s*(?:\d{1,3}\s*/\s*(?:19|20)\d{2}|Act\s+\d+\s+of\s+(?:19|20)\d{2}[^\]]*|S\s*\d{1,4}\s*/\s*(?:19|20)\d{2}[^\]]*|(?:19|20)\d{2}\s*年第\s*\d+\s*号法[^\]]*)\s*\]|[ \t]*(?:\b\d\s+)?\bS\s*\d{1,4}\s*/\s*20\d{2}\b")
-_SRC_AMEND_TAG = re.compile(r"[ \t]*\[\s*(?:Act\s+\d+\s+of\s+(?:19|20)\d{2}|S\s*\d{1,4}\s*/\s*(?:19|20)\d{2}|\d{1,3}\s*/\s*(?:19|20)\d{2})(?:\s+(?:wef|w\.e\.f\.)\s+[^\]]*)?\s*\]")
+_SRC_AMEND_TAG = re.compile(r"[ \t]*\[\s*(?:Act\s+\d+\s+of\s+(?:19|20)\d{2}|S\s*\d{1,4}\s*/\s*(?:19|20)\d{2}|\d{1,3}\s*/\s*(?:19|20)\d{2})(?:\s+(?:wef|w\.e\.f\.)\s+[^\]]*)?\s*\]|[ \t]*(?:\b\d\s+)?\bS\s*\d{1,4}\s*/\s*(?:19|20)\d{2}\b")
 _AR_GAZETTE_LINE = re.compile(r"^\s*(?:[\d٠-٩]{1,4}\s*)?(?:الوقائع\s*المصرية|الجريدة\s*الرسمية)\s*(?:[—–-]+\s*)?(?:العدد|عدد)[^\n.。]{0,90}$")
 _RUNNING_HEAD = re.compile(r"(?m)^[ \t]*个人数据保护(?:（Personal Data Protection）)?[ \t]*$\n?|[ \t]*个人数据保护（Personal Data Protection）")
-_LEAD_NUM = re.compile(r"^(?!第)(?:[^\n。；：（()\d]|（[^）\n]{1,30}）|\([^)\n]{1,30}\)){1,50}?[ \t]*(?:/[ \t]*|\n+)?(\d{1,3}[A-Z]{0,2})[ \t]*(?:[.。][ \t]*[—–-]{1,3}|[.。])[ \t]*(?=[（(\d]|[一-鿿A-Za-z])")
+_LEAD_NUM = re.compile(r"^(?!第)(?:[^\n。；：（()\d]|（[^）\n]{1,30}）|\([^)\n]{1,30}\)){1,50}?[ \t]*(?:/[ \t]*|\n+)?(\d{1,3}[A-Z]{0,2})(?:[ \t]*[.。][ \t]*[—–-]{1,3}[ \t]*(?=[（(\d]|[一-鿿A-Za-z])|[ \t]*[.。](?!\d)[ \t]*(?=[（(]|[一-鿿A-Za-z]))")
 _LEAD_NUM_EMBEDDED = re.compile(r"^(?!第)[^\n。；：（()\d]{0,30}?(\d{1,3}[A-Z]{0,2})[^\n。；：（()\d]{0,14}[.。][ \t]*[—–-]{2,3}[ \t]*")
 _LEAD_NUM_ARTICLE = re.compile(r"^(?!第)[^\n。；]{2,60}?第(\d{1,3}[A-Z]{0,2})条[.。]?[ \t]*[—–-]{2,3}[ \t]*")
 _LEAD_NUM_SPACED = re.compile(r"^(?!第)[^\n。；：]{2,50}?\s(\d{1,3}[A-Z]{0,2})[ \t]*。[ \t]*[—–-]{2,3}[ \t]*")
@@ -201,12 +243,33 @@ def clean_text(text: str | None) -> str:
     if not text:
         return text or ""
     text = re.sub(r"[\ufffe\uE000-\uF8FF]", "", text)
+    text = re.sub(r"(?i)\bCNDP-F\d{3}[ \t]*\n[ \t]*\d{1,3}/\d{1,3}\b", "", text)
+    text = _SRC_AMEND_TAG.sub("", text)
+    if len(set(re.findall(r"(?m)^[ \t]*(5|10|15|20|25|30|35)[ \t]+", text))) >= 2:
+        text = re.sub(
+            r"(?m)^[ \t]*(?:5|10|15|20|25|30|35)[ \t]+(?=(?!days?\b|months?\b|years?\b|hours?\b|minutes?\b|working\b|business\b|calendar\b|per\s*cent\b)[a-z(（“\"])",
+            "",
+            text,
+        )
     text = "\n".join(ln for ln in text.split("\n") if not (_GAZETTE_DATELINE.match(ln) or _AR_GAZETTE_LINE.match(ln) or _PAGE_NO_LINE.match(ln) or _FORM_RESIDUE.search(ln) or _TABLE_RESIDUE.search(ln)))
     out = _NAV_TOKENS.sub("", text)
-    out = _SRC_AMEND_TAG.sub("", out)
+    out = _TRAILING_EXPLANATORY_BILL_RE.sub("", out)
     out = re.sub(r"([；;，,])\s*\1", r"\1", out)  # 去掉页脚后留下的重复标点
     out = re.sub(r"(电话|固定电话|座机|手机|传真|电子邮件|T[ée]l\.?|Fax|Phone|Land\s*Line|Mobile|Cell(?:ular)?)\s*[:：]\s*[+()\d][\d\s()+/\-–]{5,}[；;，,]?\s*", "", out, flags=re.IGNORECASE) if len(out) > 200 else out
-    lines = [ln for ln in _split(out) if not _NAV_LINE.match(ln) and not _LINK_LINE.match(ln)]
+    raw_lines = _split(out)
+    lines: list[str] = []
+    for ln in raw_lines:
+        if _NAV_LINE.match(ln):
+            continue
+        if _LINK_LINE.match(ln):
+            prev_nonempty = next((x.strip() for x in reversed(lines) if x.strip()), "")
+            is_url_only = bool(re.match(r"^\s*(?:https?://\S+|www\.\S+)\s*$", ln, re.IGNORECASE))
+            if is_url_only and (
+                _LINK_INTRO_RE.search(prev_nonempty) or re.search(r"[.;；。]\s*$", ln)
+            ):
+                lines.append(ln)
+            continue
+        lines.append(ln)
     lines = _drop_contact_block(lines)
     lines = _drop_trailing_heading(lines)
     cleaned = "\n".join(lines).strip("\n")
@@ -263,6 +326,11 @@ def clean_translation(text: str | None) -> str:
             out = _ARABIC_RUN.sub("", out)
         out = re.sub(r"(?<=[一-鿿，。；：、]) +(?=\S)|(?<=\S) +(?=[，。；：、）])", "", out)
     out = structure(out.strip())
+    out = re.sub(
+        r"(?:\n|\s)*[（(]?(?:原文仅含[^。\n]{0,40}无可翻译[^。\n]*[。.]?)[)）]?\s*$",
+        "",
+        out,
+    ).strip()
     return out if len(out) >= 10 else text
 
 

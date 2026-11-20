@@ -17,7 +17,8 @@ from bs4 import BeautifulSoup
 
 from app.ingestion.clauses import is_article_heading
 from app.ingestion.egov_xml import EgovError, egov_lines, is_egov_xml
-from app.ingestion.pdf_columns import column_text
+from app.ingestion.ocr_layout import find_gutter
+from app.ingestion.pdf_columns import _segments, column_text
 from app.ingestion.source_layout import (
     is_english_page,
     is_reference_page,
@@ -87,6 +88,105 @@ def _normalise_pdf_text(text: str) -> str:
     return "\n".join(line.rstrip() for line in lines if line.strip())
 
 
+_REVERSED_LATIN_APOS = re.compile(r"\b[A-Za-zÀ-ÿ]{2,}[’'][ldsnjcm]\b", re.IGNORECASE)
+
+
+def _has_reversed_latin_tokens(text: str) -> bool:
+    """Detect Latin/French PDFs exported from an RTL layout engine where word order on each line
+    is mirrored (e.g. ``identifier’d ... ensemble’l regroupe biométrie La``)."""
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 60:
+        return False
+    latin = sum(1 for c in letters if unicodedata.name(c, "").startswith("LATIN"))
+    arabic = sum(1 for c in letters if "\u0600" <= c <= "\u06ff")
+    if latin / len(letters) < 0.85 or arabic > 0:
+        return False
+    return len(_REVERSED_LATIN_APOS.findall(text)) >= 2
+
+
+def _reconstruct_reversed_latin_page(page, text_page) -> str | None:
+    """Reconstruct natural top-to-bottom, column-aware LTR reading order from PDF glyph boxes."""
+    try:
+        width, height = page.get_size()
+        cnt = text_page.count_rects()
+        if cnt < 5 or cnt > 20000:
+            return None
+        rects = [text_page.get_rect(k) for k in range(cnt)]
+        rects = [r for r in rects if r[2] > r[0] and r[3] > r[1]]
+        segs = sorted(_segments(rects, width), key=lambda r: -((r[1] + r[3]) / 2))
+        mid_lo, mid_hi = width * 0.44, width * 0.56
+        ordered_segs: list[tuple[float, float, float, float]] = []
+        band: list[tuple[float, float, float, float]] = []
+
+        def flush_band() -> None:
+            if not band:
+                return
+            boxes = [(x0, height - t, x1, height - b) for (x0, b, x1, t) in band]
+            gutter = find_gutter(boxes, width)
+            if gutter is not None:
+                by_y = lambda r: -((r[1] + r[3]) / 2)  # noqa: E731
+                left_col = sorted([s for s in band if s[2] <= gutter + 2.0], key=by_y)
+                right_col = sorted([s for s in band if s not in left_col], key=by_y)
+                ordered_segs.extend(left_col)
+                ordered_segs.extend(right_col)
+            else:
+                band.sort(key=lambda r: (-round(((r[1] + r[3]) / 2) / 4), r[0]))
+                ordered_segs.extend(band)
+            band.clear()
+
+        for s in segs:
+            if s[0] < mid_lo and s[2] > mid_hi:
+                flush_band()
+                ordered_segs.append(s)
+            else:
+                band.append(s)
+        flush_band()
+
+        used: set[int] = set()
+        lines_out: list[str] = []
+        n_chars = text_page.count_chars()
+        for bx0, bb, bx1, bt in ordered_segs:
+            lines: list[list] = []
+            for idx in range(n_chars):
+                if idx in used:
+                    continue
+                ch = text_page.get_text_range(idx, 1)
+                if ch in ("", "\r", "\n", "\ufffd", "\ufffe"):
+                    continue
+                x0, b, x1, t = text_page.get_charbox(idx, loose=True)
+                cx, cy = (x0 + x1) / 2, (b + t) / 2
+                if bx0 - 2.0 <= cx <= bx1 + 2.0 and bb - 2.0 <= cy <= bt + 2.0:
+                    used.add(idx)
+                    row = next((x for x in lines if abs(x[0] - cy) < 3.5), None)
+                    if row is None:
+                        row = [cy, []]
+                        lines.append(row)
+                    row[1].append((x0, x1, ch))
+            for _, gl in sorted(lines, key=lambda x: -x[0]):
+                gl.sort(key=lambda g: g[0])
+                s_txt, end = "", None
+                for x0, x1, ch in gl:
+                    need_space = (
+                        end is not None
+                        and x0 - end > 2.2
+                        and not ch.isspace()
+                        and (not s_txt or not s_txt[-1].isspace())
+                    )
+                    if need_space:
+                        s_txt += " "
+                    s_txt += ch
+                    end = x1
+                cleaned = " ".join(s_txt.split())
+                if cleaned:
+                    lines_out.append(cleaned)
+        joined = "\n".join(lines_out)
+        joined = re.sub(r"\)([0-9A-Za-zÀ-ÿ][^()\n]{0,60})\(", r"(\1)", joined)
+        joined = re.sub(r"\(([^()]{1,240}?)\((?=[\s.;:,!?]|$)", r"(\1)", joined)
+        return joined if len(joined) >= 60 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def parse_pdf(content: bytes, *, layout_events: list[dict] | None = None) -> list[str]:
     try:
         with _PDFIUM_LOCK:
@@ -110,6 +210,10 @@ def parse_pdf(content: bytes, *, layout_events: list[dict] | None = None) -> lis
                                         layout_events.append({"page_number": i + 1, **layout})
                             except ValueError as exc:
                                 raise ParseError(f"参考文献页 {i + 1} 版面核验失败: {exc}") from exc
+                        elif _has_reversed_latin_tokens(text):
+                            repaired = _reconstruct_reversed_latin_page(page, text_page)
+                            if repaired:
+                                text = _normalise_pdf_text(repaired)
                         else:
                             ordered = column_text(page, text_page)
                             if ordered:

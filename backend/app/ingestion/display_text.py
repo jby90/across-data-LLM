@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 
 _CONTENTS = re.compile(
-    r"^\s*(?:(الفهرس|فهرس|sommaire|table des mati[eè]res|contents|table of contents|目\s*录)\s*$|目\s*录\s+1\s+\S+)",
+    r"^\s*(?:(الفهرس|فهرس|المحتويات|المحتوى|محتويات|sommaire|table des mati[eè]res|contents|table of contents|目\s*录)\s*$|目\s*录\s+\d{1,2}\s+\S+)",
     re.IGNORECASE,
 )
 # 页眉：短、带数字（期号、页码）、不像一句话
@@ -31,9 +31,22 @@ _SENTENCE = re.compile(r"本法|本条例|本决定|公布|生效|援引|执行|
 _MAX = 70
 
 
-def _running_header(line: str) -> bool:
+_DANGLING_GAZETTE_INTRO = re.compile(
+    r"(?:\b(?:au|dans le|du|in the|at the)|(?:^|\s)(?:في|فى|بـ|بالجريدة))\s*$",
+    re.IGNORECASE,
+)
+_INLINE_ZH_TOC = re.compile(
+    r"^(.{20,300}?)\s+目\s*录\s+(?=(?:序言|前言|引言|1[\s.、]|一[、\s]|第[一1][章编部分]|\d+\s+\S))"
+)
+
+
+def _running_header(line: str, prev_line: str = "") -> bool:
     s = line.strip()
     if not s or len(s) > _MAX or _SENTENCE.search(s):
+        return False
+    if re.search(r"[.。]\s*$", s):
+        return False
+    if prev_line and _DANGLING_GAZETTE_INTRO.search(prev_line.strip()):
         return False
     return any(p.search(s) for p in _RUNNING)
 
@@ -47,7 +60,13 @@ def cut_at_contents(text: str) -> str:
             while kept and (len(kept[-1].strip()) <= 3 or _PAGE_HEADER.match(kept[-1].strip())):
                 kept.pop()
             candidate = "\n".join(kept).rstrip()
-            if len(candidate) >= 12:
+            if len(candidate) >= 120:
+                return candidate
+        m_in = _INLINE_ZH_TOC.match(line)
+        if m_in and (i > 0 or len(text) >= 800):
+            kept = [*lines[:i], m_in.group(1).rstrip()]
+            candidate = "\n".join(kept).rstrip()
+            if len(candidate) >= 120:
                 return candidate
     return text
 
@@ -62,7 +81,13 @@ def for_reading(text: str | None) -> str:
 
     text = _CTRL_PUA.sub("", text.replace("\ufffd", ""))
     text = cut_at_contents(text)
-    lines = [line for line in text.split("\n") if not _running_header(line)]
+    raw_lines = text.split("\n")
+    lines: list[str] = []
+    for line in raw_lines:
+        prev_nonempty = next((x for x in reversed(lines) if x.strip()), "")
+        if _running_header(line, prev_nonempty):
+            continue
+        lines.append(line)
     text = "\n".join(lines).strip("\n") or text
     # 网页导航、下载链接、地址电话、下一章标题；中文译文另去句中的公报页眉和阿拉伯文残片（见 noise）
     cleaned = clean_translation(text) if _CJK.search(text[:200]) else clean_text(text)

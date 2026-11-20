@@ -54,8 +54,8 @@ from app.knowledge.numeric_integrity import (
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "translate-v12"  # v12：五道译后质量门槛升级（防拒答/防行号凑字、纯数字子块直通、术语与之二强校验）
-COMPATIBLE_TRANSLATION_CACHE_PROMPTS = (PROMPT_VERSION, "translate-v11")
+PROMPT_VERSION = "translate-v13"  # v13：六道译后质量门槛升级（新增译文完整性覆盖率、半句断尾拦截与款项序号格式统一）
+COMPATIBLE_TRANSLATION_CACHE_PROMPTS = (PROMPT_VERSION, "translate-v12", "translate-v11")
 MAX_CHUNK_CHARS = 1500
 MAX_CHUNK_NUMBERS = 30
 DEFAULT_CONCURRENCY = 4
@@ -64,6 +64,7 @@ _META_POLLUTION_RE = re.compile(
     r"\[REDACTED_[A-Z_]+\]|<Placeholder>|<占位符>"
     r"|_*CYSH_(?:PRIVATE|LITERAL|DATE|SECRET|RESTORE)[A-Za-z0-9_]*"
     r"|无法执行(?:该)?翻译|无法完成(?:该)?翻译|待翻译原文仅包含|不含任何可翻译|没有可据以(?:逐句)?忠实翻译"
+    r"|原文仅含(?:分隔线|装饰性|页码|标点)|无可翻译的?(?:法律)?正文|〔此段暂无中文〕"
     r"|抱歉[，,]?\s*我?无法(?:对上述|为您)?|请提供完整的?(?:待翻译)?(?:法条)?原文|以下是(?:该|上述)?(?:法条|条款)?的?中文译文\s*[:：]"
     r"|原文此处疑似缺失|版面行号|此处版面行|原文所引用的相关法规编号标记为|受保护的数字或金额|（受保护内容）|\(受保护内容\)"
     r"|translate-v\d+|作为\s*AI\s*(?:语言)?模型",
@@ -622,6 +623,34 @@ def verify_translation(
     # ⑤ 否定词一致：“不得/禁止”不能译丢，也不能凭空译出（只抓高把握的错误，见 modality.py）
     issues.extend(modality_issues(orig_clean, trans_clean))
 
+    # ⑥ 译文完整性与半句截断门禁（防只译封面漏译正文、防句末停在虚词/逗号断句）
+    orig_no_leaders = re.sub(r"[.…·\-_]{4,}", " ", orig_clean)
+    dedup_orig = " ".join(
+        dict.fromkeys(
+            s.strip() for s in re.split(r"(?<=[.!?;:。！？])\s+|\n+", orig_no_leaders) if s.strip()
+        )
+    )
+    dedup_compact = _WS_RE.sub("", dedup_orig)
+    trans_compact = _WS_RE.sub("", trans_clean)
+    if (
+        len(dedup_compact) >= 600
+        and trans_compact
+        and len(trans_compact) / len(dedup_compact) < 0.14
+    ):
+        issues.append(
+            f"译文篇幅严重不足（仅占去重去点线后原文的 {len(trans_compact) / len(dedup_compact):.1%}），"
+            "疑似漏译后段或目录正文，须逐段完整翻译"
+        )
+    if (
+        len(trans_clean) >= 15
+        and re.search(r"[.!?؟。！？]\s*$", orig_clean)
+        and re.search(
+            r"(?:[，、]|(?:以及|或者|并且|针对|关于|根据|依据|按照|不具有额外的|进行传输的|电子邮件地址和))\s*$",
+            trans_clean,
+        )
+    ):
+        issues.append("译文在句末未完整收尾（停在逗号、顿号或悬空连词/介词），须补全完整句子")
+
     return len(issues) == 0, issues, updated_hits
 
 
@@ -682,7 +711,7 @@ def _build_translation_prompts(
         "不要直译成“车辆和动物的驾驶”；Dispositions générales / أحكام عامة 译“总则”或“一般规定”。"
         "（2）条号写“第47条”“第47条第2款”，不加括号；东阿拉伯数字（٠١٢٣٤٥٦٧٨٩）一律改写为阿拉伯数字（0123456789）；注意区分法典修订版年份“2020 Ed.”或“2020 Rev. Ed.”（应译为“2020年修订版”，严禁误写为“第2020条 Ed.”）。"
         "（3）突尼斯、摩洛哥等国法规里的“الفصل + 数字”和法文 Article 一样是“条”，写“第X条”；“الباب”“Titre”是“编”，“Chapitre”是“章”，“Section”是“节”。"
-        "（4）阿拉伯文分项字母 أ、ب、ج、د、هـ、و 依次写作（一）（二）（三）（四）（五）（六）；法文、英文的 a)、b) 写作（a）、（b）。"
+        "（4）原文独立成行的款项编号 (1)、(2)、(4A) 一律保留括号序号形式写作（1）、（2）、（4A），不得在同一条内混用“第5款”与“（4）”；阿拉伯文分项字母 أ、ب、ج、د、هـ、و 依次写作（一）（二）（三）（四）（五）（六）；法文、英文的 a)、b) 写作（a）、（b）。"
         "（5）术语用中国大陆法律法规的通行说法；除术语表要求保留原词外，不在译文里夹带外文单词。"
         "（6）条号后的 مكرر（法文 bis）译“之二”，مكررا ثانيا（ter）译“之三”，ثالثا（quater）译“之四”，写成“第12条之二”“第4条之三”，"
         "不写“（重复）”“重复条”；同一条里的“最后一款”“最后一段”写“最后一款”。",

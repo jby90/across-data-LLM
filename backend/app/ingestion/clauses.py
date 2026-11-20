@@ -539,7 +539,20 @@ def _split_numbered(pages: list[str]) -> list[_Raw]:
             except ValueError:
                 hkey = None  # 中文数字等无法比较:不做递增校验
             ok = True
-            if numeric_style:
+            prev_tail = current.lines[-1].strip() if current and current.lines else ""
+            # 行首紧接上一行介词（如 "... بالعددين 3 و4 من\nالفصل 10 من مجلة..." 或 "... under\nSection 5 of..."）是句内交叉引用，绝不是新条标题
+            if prev_tail and re.search(
+                r"(?:\b(?:of|under|in|to|from|au|aux|du|des|de|dans|sur|par)|(?:^|\s)(?:من|في|إلى|على|عن|بمقتضى|طبقا))\s*$",
+                prev_tail,
+                re.IGNORECASE,
+            ):
+                ok = False
+            elif re.match(
+                r"^(?:(?:ال)?فصل|(?:ال[\ufffe]*م(?:س)?|ام[\ufffe]*ل|م(?:س)?)[\ufffe]*ادة)\s+\d+\s+من\s+(?:مجلة|القانون|المرسوم|الأمر|هذا)\b",
+                s,
+            ):
+                ok = False
+            elif numeric_style:
                 ok = False  # 本文件用数字编号,行首的 "Article 29 of ..." 是交叉引用
             elif hkey is not None and kw_last is not None:
                 if hkey > kw_last and hkey[0] - kw_last[0] <= _MAX_JUMP:
@@ -596,8 +609,11 @@ def _split_numbered(pages: list[str]) -> list[_Raw]:
     return raws
 
 
+_SENT_END_CHARS = (".", ":", ";", "?", "!", "؟", "؛", "。", "；", "！", "？", "”", "»", ")")
+
+
 def _chunk_by_size(pages: list[str]) -> list[ClauseDraft]:
-    """没有可靠条款编号时,按约 2500 字分块(尽量在句末断开),记录页码范围。条款编号为空。"""
+    """没有可靠条款编号时,按约 2500 字分块(严格在句末断开),记录页码范围。条款编号为空。"""
     drafts: list[ClauseDraft] = []
     block: list[str] = []
     size = 0
@@ -611,7 +627,7 @@ def _chunk_by_size(pages: list[str]) -> list[ClauseDraft]:
             block.append(line.rstrip())
             end = page_no
             size += len(line)
-            if size >= _CHUNK_TARGET and line.rstrip().endswith((".", ":", ";", "?", "”")):
+            if (size >= _CHUNK_TARGET and line.rstrip().endswith(_SENT_END_CHARS)) or size >= 6000:
                 drafts.append(ClauseDraft(len(drafts), None, None, "\n".join(block), start, end))
                 block, size = [], 0
     if block:
@@ -716,12 +732,34 @@ def split_clauses(
     if not paras:
         return [], "empty"
     if paragraph_mode == "blank" and len(paras) == 1 and len(pages) > 1:
-        # PDF 文字里没有可靠的空行:按页切分,并如实标明
+        # PDF 文字里没有可靠的空行:按页切分,但若页尾停在半句中,将跨页续句拉入上一块避免断句
         per_page = [
             ClauseDraft(n, None, None, p.strip(), n + 1, n + 1)
             for n, p in enumerate(pages)
             if p.strip()
         ]
+        k = 0
+        while k + 1 < len(per_page):
+            cur_lines = per_page[k].text.splitlines()
+            nxt_lines = per_page[k + 1].text.splitlines()
+            if cur_lines and nxt_lines and not cur_lines[-1].rstrip().endswith(_SENT_END_CHARS):
+                take = 0
+                for idx_ln, ln in enumerate(nxt_lines):
+                    if idx_ln >= 8:
+                        break
+                    take = idx_ln + 1
+                    if ln.rstrip().endswith(_SENT_END_CHARS):
+                        break
+                if 0 < take < len(nxt_lines):
+                    per_page[k].text = "\n".join(cur_lines + nxt_lines[:take]).strip()
+                    per_page[k].page_end = per_page[k + 1].page_start
+                    per_page[k + 1].text = "\n".join(nxt_lines[take:]).strip()
+                elif take == len(nxt_lines):
+                    per_page[k].text = "\n".join(cur_lines + nxt_lines).strip()
+                    per_page[k].page_end = per_page[k + 1].page_end
+                    per_page.pop(k + 1)
+                    continue
+            k += 1
         for i, d in enumerate(per_page):
             d.ordinal = i
         return per_page, "page"

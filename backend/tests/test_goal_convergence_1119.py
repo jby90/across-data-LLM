@@ -3272,3 +3272,95 @@ async def test_round16_blind_audit_convergence_guards(client, seed, session_fact
     assert "'=HYPERLINK" in aud_csv
 
 
+def test_round20_clause_truncation_and_gate6_guards() -> None:
+    """Round 20: Prevent clause sentence truncation, inline cross-ref splits, trailing heading bleed,
+    and partial/truncated/meta-polluted translations."""
+    from app.ingestion.clauses import split_clauses
+    from app.ingestion.display_text import for_reading
+    from app.ingestion.noise import clean_text, clean_translation
+    from app.knowledge.translator import verify_translation
+
+    # 1) Statutory URL wrapped onto next line after 'website at' must NEVER be stripped as nav link
+    statute_with_url = (
+        "5. The notification must be given in the form set out on the Commission's website at\n"
+        "https://www.pdpc.gov.sg."
+    )
+    assert "https://www.pdpc.gov.sg." in clean_text(statute_with_url)
+
+    # 2) Inline chapter/part/gazette sentence completion must stay intact, while true trailing headings peel
+    fr_art47 = (
+        "Article 47\n"
+        "Doit figurer audit registre l’identité du responsable aux fins d’exercices des droits prévus au\n"
+        "chapitre II de la présente loi."
+    )
+    assert "chapitre II de la présente loi." in for_reading(fr_art47)
+
+    tn_art30 = (
+        "Art. 30 - Les dispositions entrent en vigueur six mois après sa publication au\n"
+        "Journal officiel de la République tunisienne."
+    )
+    assert "Journal officiel de la République tunisienne." in for_reading(tn_art30)
+
+    fr_bleed = (
+        "Article 3\n"
+        "Les entreprises sont fixées sur une liste mise à jour.\n"
+        "CHAPITRE TROIS\n"
+        "De l’homologation des moyens de cryptage"
+    )
+    assert "CHAPITRE TROIS" not in for_reading(fr_bleed)
+
+    # 3) Arabic preposition before 'الفصل 10 من مجلة' is a cross-reference, not a new article split
+    ar_pages = [
+        "الفصل 7 ـ يعاين الجرائم مأمورو الضابطة.\n"
+        "الفصل 8 ـ يعاين الجرائم المشار إليهم بالعددين 3 و4 من\n"
+        "الفصل 10 من مجلة الإجراءات الجزائية.\n"
+        "الفصل 9 ـ ترفع المحاضر فورا."
+    ]
+    drafts, strat = split_clauses(ar_pages)
+    assert strat == "numbered"
+    assert [d.clause_number for d in drafts] == ["7", "8", "9"]
+    assert "الفصل 10 من مجلة الإجراءات الجزائية." in drafts[1].text
+
+    # 4) Page-fallback splitter completes cross-page sentences instead of cutting mid-sentence
+    unnumbered_pages = [
+        "La Commission Nationale a été saisie d’une demande d’avis,",
+        "par le Ministère des Affaires Étrangères le 20 février 2023.\nElle émet l’avis suivant.",
+    ]
+    p_drafts, p_strat = split_clauses(unnumbered_pages)
+    assert p_strat == "page"
+    assert p_drafts[0].text.endswith("20 février 2023.")
+    assert p_drafts[1].text.startswith("Elle émet")
+
+    # 5) Translator Gate 6 rejects partial cover-only translations, dangling mid-sentence endings, & meta refusals
+    long_fr = " ".join(
+        f"L’article {i} impose à l’opérateur critique numéro {i * 10} de réaliser une analyse de risques documentée, une sauvegarde chiffrée hors site et une notification d’incident sous {i + 2} heures."
+        for i in range(1, 10)
+    )
+    ok_cov, issues_cov, _ = verify_translation(long_fr, "信息系统安全参考框架出版物", [])
+    assert not ok_cov and any("译文篇幅严重不足" in x for x in issues_cov)
+
+    email_clause = "Email relevant completed forms with supporting documents to:\nAutonomous_Vehicle@lta.gov.sg."
+    assert "Autonomous_Vehicle@lta.gov.sg" in clean_text(email_clause)
+    or_email = "5 Maxwell Road, Singapore 069110\nor\ncls_iot@csa.gov.sg"
+    assert "cls_iot@csa.gov.sg" in clean_text(or_email)
+
+    ok_cut, issues_cut, _ = verify_translation(
+        "Organisations do not have additional obligations relating to personal data of deceased individuals.",
+        "除上述规定外，组织对死者个人数据不具有额外的",
+        [],
+    )
+    assert not ok_cut and any("未完整收尾" in x for x in issues_cut)
+
+    ok_meta, issues_meta, _ = verify_translation(
+        "Action prise par l'équipe informatique : voir annexe.",
+        "信息技术团队采取的行动：\n原文仅含分隔线，无可翻译的法律正文。",
+        [],
+    )
+    assert not ok_meta
+    assert "原文仅含分隔线" not in clean_translation("信息技术团队采取的行动：详见附件。\n原文仅含分隔线，无可翻译的法律正文。")
+    assert clean_translation("目标 1.1：维持并加强网络安全法律与规范框架。").startswith("目标 1.1：")
+    assert "149/2013" not in clean_text("S 149/2013 4\n36. National Environment Agency Act (Cap. 195)")
+    assert "CNDP-F112" not in clean_text("XI. DROITS DES PERSONNES CONCERNÉES\nCNDP-F112\n10/12\nService compétent :")
+
+
+

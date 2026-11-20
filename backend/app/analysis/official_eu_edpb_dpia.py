@@ -28,7 +28,7 @@ from xml.etree import ElementTree as ET
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analysis import risk_items
+from app.analysis import clause_gate, risk_items
 from app.analysis.document_narrative import DocumentNarrative
 from app.analysis.llm import LlmUnavailableError, call_llm_json
 from app.analysis.official_docx import (
@@ -990,7 +990,7 @@ async def build_edpb_2026_en(
             "title_zh": str(c.get("document_title") or ""),
             "original_title": str(c.get("original_title") or ""),
             "clause": str(c.get("clause_number") or ""),
-            "excerpt": str(c.get("quote_original") or c.get("quote_zh") or "")[:320],
+            "excerpt": clause_gate.cut(str(c.get("quote_original") or c.get("quote_zh") or ""), 320),
         }
         for c in citations[:14]
     ]

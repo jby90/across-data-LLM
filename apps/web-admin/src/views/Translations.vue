@@ -69,6 +69,21 @@ interface GlossaryTerm {
 }
 
 const route = useRoute()
+const expandedRows = ref(new Set<string>())
+function toggleRowExpand(id: string) {
+  const next = new Set(expandedRows.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedRows.value = next
+}
+function isLongClauseRow(row: ClauseTranslation): boolean {
+  return (
+    (row.original_text?.length || 0) > 180 ||
+    (row.translated_text?.length || 0) > 140 ||
+    (row.original_text?.split('\n').length || 0) > 4 ||
+    (row.translated_text?.split('\n').length || 0) > 4
+  )
+}
 const activeTab = ref<'translations' | 'glossary'>('translations')
 // 第 7.5 项二轮 规则 22：默认打开上次核对的国家；第一次进来给国家卡片，点一下就进入
 const TR_KEY = 'cyshuhe.admin.tr.country'
@@ -516,14 +531,28 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column label="官方原文" min-width="220">
             <template #default="{ row }">
-              <div class="clause-box" :title="row.original_text">{{ row.original_text }}</div>
+              <div
+                class="clause-box"
+                :class="{ expanded: expandedRows.has(row.id) }"
+                @click="isLongClauseRow(row) && toggleRowExpand(row.id)"
+              >{{ row.original_text }}</div>
+              <el-button
+                v-if="isLongClauseRow(row)"
+                link
+                type="primary"
+                size="small"
+                class="clause-expand-btn"
+                @click="toggleRowExpand(row.id)"
+              >{{ expandedRows.has(row.id) ? '收起条文' : '展开完整条文' }}</el-button>
             </template>
           </el-table-column>
           <el-table-column label="中文译文与术语" min-width="260">
             <template #default="{ row }">
-              <div class="clause-box">
-                {{ row.translated_text || '未翻译' }}
-              </div>
+              <div
+                class="clause-box"
+                :class="{ expanded: expandedRows.has(row.id) }"
+                @click="isLongClauseRow(row) && toggleRowExpand(row.id)"
+              >{{ row.translated_text || '未翻译' }}</div>
               <div
                 v-if="row.glossary_hits?.length || row.unmatched_terms?.length"
                 style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px"
@@ -741,6 +770,15 @@ onMounted(async () => {
   white-space: pre-wrap;
   font-size: 13px;
   line-height: 1.5;
+}
+.clause-box.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.clause-expand-btn {
+  margin-top: 4px;
+  font-size: 13px;
 }
 .country-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 8px; }
 .country-card { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 18px; border: 1px solid var(--cy-line); border-radius: 10px; background: #fff; font: inherit; font-size: 15px; cursor: pointer; text-align: left; }
