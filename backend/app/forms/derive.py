@@ -60,7 +60,7 @@ def value(item: dict[str, Any], facts: dict[str, str], form: dict[str, Any]) -> 
     if kind == "check" and iid == "derog_cases" and facts.get("recipient_adequate") == "否" and "garanties" in options:
         return ["garanties"]  # 不在充分保护名单内：以合同条款保证保护水平，申请授权（附条款文本）
     fk = facts.get("function_key")
-    if kind == "text" and iid == "file_description" and fk in _CONTENT and not facts.get("data_types"):
+    if kind == "text" and iid in ("file_description", "s3_categories") and fk in _CONTENT:
         return _CONTENT[fk].get(lang, _CONTENT[fk]["en"])
     if kind == "text" and iid == "file_mode" and fk in _PURPOSE:
         return {"fr": "Transfert électronique chiffré (réseau) vers la plateforme cloud du destinataire", "en": "Encrypted electronic transfer over the network to the recipient's cloud platform"}.get(lang, "Encrypted electronic transfer")
@@ -98,9 +98,21 @@ def value(item: dict[str, Any], facts: dict[str, str], form: dict[str, Any]) -> 
             "localisation": {"on": True, "persons": ["clients"], **src_sensor, **who, "purpose": loc_purpose, "duration": duration},
             "id_autres": {"on": True, "persons": ["clients"], **src_sensor, **who, "purpose": id_purpose, "duration": duration, "label_other": "VIN, état du véhicule"},
         }
-    if kind == "text" and iid in ("file_name", "file_purpose") and facts.get("function_key") in _PURPOSE:
+    if kind == "text" and iid in ("file_name", "file_purpose", "s3_finalite", "finalite", "finalite_autres") and facts.get("function_key") in _PURPOSE:
         name, purpose = _PURPOSE[facts["function_key"]].get(lang, _PURPOSE[facts["function_key"]]["en"])
         return name if iid == "file_name" else purpose
+    if kind == "text" and iid == "treat_desc" and fk in _CONTENT:
+        return _CONTENT[fk].get(lang, _CONTENT[fk]["en"])
+    if kind == "text" and iid in ("file_people", "treat_people") and fk in _PURPOSE:
+        return {
+            "fr": "Propriétaires et conducteurs des véhicules concernés par le service ou les essais",
+            "en": "Vehicle owners and drivers covered by the connected service or trial programme",
+        }.get(lang, "Vehicle owners and drivers")
+    if kind == "text" and iid == "consent_method" and fk in _PURPOSE:
+        return {
+            "fr": "Consentement explicite recueilli sur l'écran du véhicule ou l'application mobile avec notice d'information préalable",
+            "en": "Explicit consent obtained via in-vehicle screen or mobile privacy centre with layered prior notice",
+        }.get(lang, "Explicit prior consent with privacy notice")
     return None
 
 
@@ -109,6 +121,16 @@ _CONTENT = {
                                 "en": "Geolocation, vehicle technical status and diagnostics, vehicle identification number (VIN)"},
     "ota_diagnostics": {"fr": "Journaux de pannes, données de diagnostic, version logicielle et identifiant du véhicule (VIN)",
                         "en": "Fault logs, diagnostic data, software version and vehicle identification number (VIN)"},
+    "autonomous_trial": {"fr": "Séquences routières pseudonymisées (visages et plaques floutés), télémétrie des capteurs et localisation d'essai",
+                         "en": "Pseudonymised road perception sequences (faces and plates blurred), sensor telemetry and trial geolocation"},
+    "cockpit_biometrics": {"fr": "Commandes vocales embarquées, indicateurs d'attention du conducteur et préférences d'habitacle",
+                           "en": "In-vehicle voice commands, driver alertness indicators and cabin profile settings"},
+    "fleet_mobility": {"fr": "Identifiant de véhicule (VIN), itinéraires de flotte, kilométrage et état opérationnel",
+                       "en": "Vehicle identification number (VIN), fleet routes, mileage and operational status"},
+    "sales_service": {"fr": "Coordonnées du client, numéro d'identification du véhicule (VIN), historique de garantie et d'entretien",
+                      "en": "Customer contact details, vehicle identification number (VIN), warranty and service history"},
+    "hd_mapping": {"fr": "Données géométriques routières anonymisées, signalisation et trajectoires de référence",
+                   "en": "Anonymised road geometry data, traffic signage and reference trajectories"},
 }
 
 # 车辆数据用途在官方表格语言里的写法（文件名称、传输目的）
@@ -125,4 +147,6 @@ _PURPOSE = {
                        "en": ("Fleet operations and mobility data", "Fleet operations, route planning, maintenance and mobility services")},
     "sales_service": {"fr": ("Données clients de vente et de service après-vente", "Gestion des ventes de véhicules, garantie constructeur et service après-vente"),
                       "en": ("Vehicle sales and after-sales customer data", "Vehicle sales management, manufacturer warranty and after-sales service")},
+    "hd_mapping": {"fr": ("Données cartographiques routières de haute précision", "Collecte et mise à jour de données cartographiques routières pour l'aide à la conduite"),
+                   "en": ("High-definition road mapping data", "Collection and update of road mapping data for driver assistance systems")},
 }

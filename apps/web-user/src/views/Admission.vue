@@ -51,7 +51,7 @@ interface ProjectRow { id: string; entry_id?: string; title: string; country_cod
 interface DraftSummary {
   id: string; name_zh: string; created_at: string; missing: string[]
   forms: Array<{ code: string; name: string }>
-  has_foreign?: boolean; foreign_name_zh?: string; foreign_generated_at?: string | null
+  has_foreign?: boolean; foreign_lang_code?: string; foreign_lang_zh?: string; foreign_name_zh?: string; foreign_generated_at?: string | null
 }
 interface ProjectDetail {
   id: string; title: string; applicant: string; vehicle_model: string; function_zh: string
@@ -715,7 +715,7 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
         <ul v-if="shownDrafts.length" class="draft-list">
           <li v-for="(d, i) in (allVersions ? shownDrafts : shownDrafts.slice(0, 3))" :key="d.id" data-testid="admission-draft-version"><span>{{ localTime(d.created_at) }}<small v-if="sent"> · 递交存档版</small><small v-else-if="i === 0 && !draftStale"> · 最新版</small><small v-if="d.missing.length"> · 生成时缺 {{ d.missing.length }} 项</small></span>
             <span class="cy-links"><el-button link type="primary" @click="showDraft(d.id)">查看</el-button><el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" @click="downloadDraft(d.id, 'docx')">Word</el-button></span></el-tooltip><el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" @click="downloadDraft(d.id, 'pdf')">PDF</el-button></span></el-tooltip>
-              <el-button v-if="d.has_foreign && d.id !== activeDraft?.id" link type="primary" @click="showForeignDraft(d.id)">{{ project.foreign_lang_zh || '外文' }}正式稿</el-button>
+              <el-button v-if="d.has_foreign && d.id !== activeDraft?.id" link type="primary" @click="showForeignDraft(d.id)">{{ d.foreign_lang_zh || project.foreign_lang_zh || '外文' }}正式稿</el-button>
               <el-tooltip v-for="f in d.forms" :key="f.code" :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" :data-testid="`admission-draft-form-${f.code}`" @click="downloadDraftForm(d.id, f)">{{ d.forms.length > 1 ? f.name : '对应版本官方表格' }}</el-button></span></el-tooltip></span></li>
         </ul>
         <el-button v-if="!sent && project.drafts.length > 3" link type="primary" data-testid="admission-all-versions" @click="allVersions = !allVersions">{{ allVersions ? '只看最近 3 版' : `查看全部 ${project.drafts.length} 版` }}</el-button>
@@ -725,7 +725,7 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
           <span class="row-actions"><el-button v-if="canChange" size="small" :type="activeDraft.has_foreign ? 'default' : 'primary'" :loading="foreignBusy === activeDraft.id" data-testid="admission-make-foreign" @click="makeForeignDraft(activeDraft.id)">{{ activeDraft.has_foreign ? '重新生成' : `生成${project.foreign_lang_zh}正式稿` }}</el-button></span>
         </div>
         <ul v-if="project.foreign_lang_zh && activeDraft?.has_foreign" class="draft-list">
-          <li data-testid="admission-foreign-item"><span>{{ localTime(activeDraft.foreign_generated_at || activeDraft.created_at) }}<small> · {{ project.foreign_lang_zh }}正式稿</small></span>
+          <li data-testid="admission-foreign-item"><span>{{ localTime(activeDraft.foreign_generated_at || activeDraft.created_at) }}<small> · {{ activeDraft.foreign_lang_zh || project.foreign_lang_zh }}正式稿</small></span>
             <span class="cy-links"><el-button link type="primary" data-testid="admission-view-foreign" @click="showForeignDraft(activeDraft.id)">查看</el-button><el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" data-testid="admission-dl-foreign-docx" @click="downloadForeignDraft(activeDraft.id, 'docx')">Word</el-button></span></el-tooltip><el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" data-testid="admission-dl-foreign-pdf" @click="downloadForeignDraft(activeDraft.id, 'pdf')">PDF</el-button></span></el-tooltip></span></li>
         </ul>
         <el-drawer :model-value="!!draft" size="min(960px, 92vw)" :title="draft?.name_zh" @close="draft = null">

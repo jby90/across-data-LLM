@@ -86,7 +86,9 @@ async def _task(session: AsyncSession, task_id: uuid.UUID, user: Principal) -> A
 async def _resolve_citation_to_current(session: AsyncSession, citation: dict) -> dict:
     """Resolve a report citation to the document's latest parsed version when the document was
     subsequently re-cut, refreshing the clause ID, text, and current Chinese translation."""
-    from app.ingestion.models import Clause, DocumentVersion
+    from app.ingestion.layout_safety import layout_held_clause_ids
+    from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
+    from app.ingestion.safety import document_is_held
     from app.knowledge.graph_validation import _latest_counterpart, _plain
     from app.knowledge.models import ClauseTranslation
 
@@ -109,19 +111,33 @@ async def _resolve_citation_to_current(session: AsyncSession, citation: dict) ->
             doc_id = None
     if doc_id is None:
         return citation
+    doc_obj = await session.get(Document, doc_id)
+    if (
+        doc_obj is None
+        or doc_obj.relevance in ("irrelevant", "out_of_scope")
+        or await document_is_held(session, doc_id)
+    ):
+        return {}
     latest_dv = await session.scalar(
         select(DocumentVersion)
-        .where(DocumentVersion.document_id == doc_id, DocumentVersion.state == "parsed")
+        .where(
+            DocumentVersion.document_id == doc_id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status != "draft",
+            DocumentVersion.review_status != "rejected",
+        )
         .order_by(DocumentVersion.version_no.desc())
         .limit(1)
     )
-    if latest_dv is None:
-        return citation
+    if latest_dv is None or latest_dv.legal_status in NOT_CITABLE_STATUSES:
+        return {}
     target_cl = cl if (cl is not None and cl.version_id == latest_dv.id) else None
     if target_cl is None and cl is not None:
         new_cid = await _latest_counterpart(session, cl.id)
         if new_cid is not None:
-            target_cl = await session.get(Clause, new_cid)
+            cand_cl = await session.get(Clause, new_cid)
+            if cand_cl is not None and cand_cl.version_id == latest_dv.id:
+                target_cl = cand_cl
     if target_cl is None:
         quote = str(citation.get("quote_original") or (cl.original_text if cl else "") or "")
         needle = _plain(quote[:120])
@@ -131,7 +147,9 @@ async def _resolve_citation_to_current(session: AsyncSession, citation: dict) ->
             ).all()
             target_cl = next((c for c in cands if needle in _plain(c.original_text)), None)
     if target_cl is None:
-        return citation
+        return {}
+    if await layout_held_clause_ids(session, [target_cl.id]):
+        return {}
     updated = dict(citation)
     rebound = target_cl.id != cid
     updated["clause_id"] = str(target_cl.id)
@@ -142,17 +160,31 @@ async def _resolve_citation_to_current(session: AsyncSession, citation: dict) ->
     if rebound or not updated.get("quote_original"):
         updated["quote_original"] = target_cl.original_text
     zh = str(updated.get("quote_zh") or "").strip()
-    if rebound or zh in ("", "(未提供译文)", "（未提供译文）"):
-        tr = await session.scalar(
-            select(ClauseTranslation)
-            .where(
-                ClauseTranslation.clause_id == target_cl.id,
-                ClauseTranslation.is_current.is_(True),
+    is_zh_cl = str(target_cl.language or "").lower().startswith("zh")
+    tr_rows = list(
+        (
+            await session.scalars(
+                select(ClauseTranslation)
+                .where(
+                    ClauseTranslation.clause_id == target_cl.id,
+                    ClauseTranslation.is_current.is_(True),
+                    ClauseTranslation.quality_check_passed.is_(True),
+                    ClauseTranslation.review_status.notin_(
+                        ("translation_failed", "not_translated", "rejected", "stale", "superseded")
+                    ),
+                )
+                .limit(2)
             )
-            .limit(1)
-        )
+        ).all()
+    )
+    if len(tr_rows) > 1:
+        return {}
+    if rebound or zh in ("", "(未提供译文)", "（未提供译文）"):
+        tr = tr_rows[0] if len(tr_rows) == 1 else None
         if tr and tr.translated_text:
             updated["quote_zh"] = tr.translated_text
+        elif is_zh_cl:
+            updated["quote_zh"] = target_cl.original_text
     return updated
 
 
@@ -454,9 +486,10 @@ async def _inputs(session: AsyncSession, task: AnalysisTask, code: str):
 
     if not values.get("company_name") and task.org_id:  # 企业账号注册时填的公司全称（不拿别的项目里写的子公司名代填）
         from app.iam.models import Organization
+        from app.iam.service import strip_trial_org_suffix
 
         org = await session.get(Organization, task.org_id)
-        values["company_name"] = (org.name or "") if org else ""
+        values["company_name"] = strip_trial_org_suffix(org.name or "") if org else ""
     # 发出方（准入是申请人）必须是该国境内的主体或企业指定的当地代表：别国的公司名不代填
     src0, rcp0 = doc_rules.ends(values, task.country_code)
     party_country = doc_rules.overseas(src0, rcp0) if code == "admission" else src0
@@ -505,18 +538,24 @@ async def _fill_admission(session: AsyncSession, task: AnalysisTask, values: dic
     country where the vehicles run — where the data is generated, the sending end — so that end is
     looked up first, then the receiving end."""
     from app.admission.models import AdmissionEntry
+    from app.admission.router import SHOWN, entry_listed
 
     if values.get("entry_type") and values.get("authority"):
         return
     rows: list = []
     for code in dict.fromkeys(c for c in (country_of(values.get("source_country")), country_of(values.get("recipient_country")), task.country_code) if c):
-        rows = (
+        cand_rows = (
             await session.scalars(
                 select(AdmissionEntry)
-                .where(AdmissionEntry.country_code == code, AdmissionEntry.review_status != "out_of_scope", AdmissionEntry.merged_into.is_(None))
+                .where(
+                    AdmissionEntry.country_code == code,
+                    AdmissionEntry.review_status.in_(SHOWN),
+                    AdmissionEntry.merged_into.is_(None),
+                )
                 .order_by(AdmissionEntry.category, AdmissionEntry.name_zh)
             )
         ).all()
+        rows = [r for r in cand_rows if await entry_listed(session, r)]
         if rows:
             break
     # 只列这项业务要办的（与合规评估页“要办 N 项”和准入页同一条规则）；判断不出业务时列全部
@@ -635,6 +674,56 @@ def _refresh_and_promote_dpia_risk_blocks(paper: list[dict], values: dict[str, s
     return [*paper[: start + 1], *fresh_risks, *prose_only, *paper[end:]]
 
 
+_NON_CN_DECL_NAME = "跨境数据传输合规申报概览表"
+_NON_CN_DECL_ROW_LABELS = {
+    "是否关键信息基础设施运营者": "是否属关键基础设施或特定受监管主体",
+    "是否含重要数据": "是否涉及受管制特定业务数据",
+    "单位注册号": "企业商业登记号或识别码",
+}
+
+
+def _effective_doc_name(code: str, default_name: str, values: dict[str, str]) -> str:
+    if code == "declaration":
+        src = str(values.get("source_country") or "").strip()
+        if src and country_of(src) != "CN":
+            return _NON_CN_DECL_NAME
+    return default_name
+
+
+def _localize_non_cn_declaration_blocks(blocks: list[dict], values: dict[str, str]) -> list[dict]:
+    src = str(values.get("source_country") or "").strip()
+    if not src or country_of(src) == "CN":
+        return blocks
+    out: list[dict] = []
+    for blk in blocks:
+        b = copy.deepcopy(blk)
+        if b.get("type") == "title":
+            b["text"] = _NON_CN_DECL_NAME
+        elif b.get("type") == "table" and isinstance(b.get("rows"), list):
+            for r in b["rows"]:
+                if isinstance(r, list) and r and r[0] in _NON_CN_DECL_ROW_LABELS:
+                    r[0] = _NON_CN_DECL_ROW_LABELS[r[0]]
+        out.append(b)
+    return out
+
+
+def _localize_non_cn_risk_blocks(blocks: list[dict], values: dict[str, str]) -> list[dict]:
+    src = str(values.get("source_country") or "").strip()
+    if not src or country_of(src) == "CN":
+        return blocks
+    out: list[dict] = []
+    for blk in blocks:
+        b = copy.deepcopy(blk)
+        if b.get("type") in ("heading", "subheading") and isinstance(b.get("text"), str):
+            b["text"] = b["text"].replace("境内全链路技术防护", "发出国本地与跨境全链路技术防护")
+        elif b.get("type") == "table" and isinstance(b.get("rows"), list):
+            for r in b["rows"]:
+                if isinstance(r, list) and r and r[0] in _NON_CN_DECL_ROW_LABELS:
+                    r[0] = _NON_CN_DECL_ROW_LABELS[r[0]]
+        out.append(b)
+    return out
+
+
 async def _prepare(
     session: AsyncSession,
     task: AnalysisTask,
@@ -717,7 +806,53 @@ async def _prepare(
                 paper, "三、", slots.get("necessity_comparison", []), "必要性与最小侵害替代方案排他比选表"
             )
 
+    paper_ref_tail: list[dict] = []
+    if code == "risk_report" and paper:
+        ref_idx = next(
+            (
+                i
+                for i, b in enumerate(paper)
+                if b.get("type") == "heading"
+                and str(b.get("text") or "").strip() in ("参考条文", "所依据的条文")
+            ),
+            None,
+        )
+        if ref_idx is not None:
+            paper_ref_tail = copy.deepcopy(paper[ref_idx:])
+            paper = paper[:ref_idx]
+
     rendered = render(template.definition, values, citations, None, paper, draft, slots, _note(task))
+    if code == "risk_report" and paper_ref_tail:
+        # 将正文[1]..[n]引注对应的《参考条文》置于第八章之后、附录之前，并移除第八章末尾无编号的重复依据表
+        app_idx = next(
+            (
+                i
+                for i, b in enumerate(rendered.blocks)
+                if b.get("type") == "heading" and str(b.get("text") or "").startswith("附录")
+            ),
+            len(rendered.blocks),
+        )
+        if (
+            app_idx > 0
+            and rendered.blocks[app_idx - 1].get("type") == "table"
+            and rendered.blocks[app_idx - 1].get("head") == ["依据", "条款", "条文内容"]
+        ):
+            rendered.blocks.pop(app_idx - 1)
+            app_idx -= 1
+        paper_ref_tail[0]["text"] = "参考条文"
+        rendered.blocks[app_idx:app_idx] = paper_ref_tail
+    if code == "declaration":
+        rendered.blocks = _localize_non_cn_declaration_blocks(rendered.blocks, values)
+        if str(values.get("source_country") or "").strip() and country_of(values.get("source_country")) != "CN":
+            for mq in (*rendered.missing, *rendered.optional_open):
+                if mq.label in _NON_CN_DECL_ROW_LABELS:
+                    mq.label = _NON_CN_DECL_ROW_LABELS[mq.label]
+    elif code == "risk_report":
+        rendered.blocks = _localize_non_cn_risk_blocks(rendered.blocks, values)
+        if str(values.get("source_country") or "").strip() and country_of(values.get("source_country")) != "CN":
+            for mq in (*rendered.missing, *rendered.optional_open):
+                if mq.label in _NON_CN_DECL_ROW_LABELS:
+                    mq.label = _NON_CN_DECL_ROW_LABELS[mq.label]
     if write_draft or clean_names:  # 导出的初稿或成稿：同一个机构只用一个名字（法规库机构字典的全称），法规名按流向所属国统一
         from app.analysis import clause_gate
         from app.knowledge.whitepaper import one_name_per_body
@@ -777,7 +912,7 @@ async def _write_paper(
         context["legit_basis"] = (
             f"发出国法律在处理依据条款里列明了合法利益（{lb['cite']}）" if lb["state"] == "有"
             else f"发出国法律的处理依据条款（{lb['cite']}）没有列合法利益" if lb["state"] == "无"
-            else "发出国法律是否把合法利益列为处理依据待核实（已收录的法规里没有找到列举处理依据的条款）"
+            else "发出国现行已收录条文中未单独列明合法利益事由，建议以数据主体明确同意或履行合同必需作为主依据，以本合法利益评估作为内部相称性论证支撑"
         )
     import asyncio as _aio
     import hashlib as _h
@@ -788,7 +923,11 @@ async def _write_paper(
     have = await narrative_stored(session, task.id, code, digest)
     if have is not None:
         return have.blocks
+    from sqlalchemy.exc import IntegrityError as _SAIntegrityError
+
     lock_key = (id(_aio.get_running_loop()), str(task.id), code)
+    if len(_PAPER_WRITE_LOCKS) > 256:
+        _PAPER_WRITE_LOCKS.clear()
     lock = _PAPER_WRITE_LOCKS.setdefault(lock_key, _aio.Lock())
     async with lock:
         have = await narrative_stored(session, task.id, code, digest)
@@ -808,7 +947,14 @@ async def _write_paper(
                 tokens=paper.tokens, created_by=user_id,
             )
         )
-        await session.commit()
+        try:
+            await session.commit()
+        except _SAIntegrityError:
+            await session.rollback()
+            existing = await narrative_stored(session, task.id, code, digest)
+            if existing is not None:
+                return existing.blocks
+            return paper.blocks
         if task.kind == "documents":
             from app.analysis import doc_projects as dp
 
@@ -857,7 +1003,7 @@ async def document_status(
     )
     return {
         "code": code,
-        "name": template.name_zh,
+        "name": _effective_doc_name(code, template.name_zh, values),
         "ready": not rendered.missing and not rendered.needs_paper,
         "needs_paper": bool(rendered.needs_paper and not rendered.missing),
         "questions": [
@@ -908,13 +1054,16 @@ async def answer_document_questions(
     return await document_status(task_id, code, user, session)
 
 
-async def _instance(session: AsyncSession, task: AnalysisTask, code: str):
-    return await session.scalar(
+async def _instance(session: AsyncSession, task: AnalysisTask, code: str, *, for_update: bool = False):
+    stmt = (
         select(DocumentInstance)
         .where(DocumentInstance.task_id == task.id, DocumentInstance.code == code)
         .order_by(DocumentInstance.created_at.desc())
         .limit(1)
     )
+    if for_update:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    return await session.scalar(stmt)
 
 
 async def _export_source(session: AsyncSession, task: AnalysisTask, code: str, draft: bool = False):
@@ -922,9 +1071,11 @@ async def _export_source(session: AsyncSession, task: AnalysisTask, code: str, d
     one, otherwise a fresh rendering that must be complete (or, as a draft, with what is still
     unanswered marked “待补充” without blocking HTTP GET on synchronous LLM generation)."""
     template, rendered = await _prepare(session, task, code, draft=draft, write_draft=False, clean_names=True)
+    _, eff_values, _ = await _inputs(session, task, code)
+    eff_name = _effective_doc_name(code, template.name_zh, eff_values)
     saved = await _instance(session, task, code)
     if saved is not None:
-        blocks, name = saved.blocks, saved.name_zh
+        blocks, name = saved.blocks, (eff_name if code == "declaration" and eff_name != template.name_zh else saved.name_zh)
     else:
         if rendered.missing and not draft:
             raise HTTPException(
@@ -932,7 +1083,7 @@ async def _export_source(session: AsyncSession, task: AnalysisTask, code: str, d
             )
         if rendered.needs_paper and not draft:
             raise HTTPException(409, "论述部分还没有生成，请先点击“生成论述”")
-        blocks, name = rendered.blocks, template.name_zh
+        blocks, name = rendered.blocks, eff_name
     # 页眉只写文件名：这是企业要递交的文件，平台的对话编号属于内部信息，不印在文件上（Word 与 PDF 相同）
     context = name
     return blocks, name, context
@@ -1079,7 +1230,8 @@ async def preview_document(
             "blocks": await asyncio.to_thread(od.docx_preview_blocks, official[0]),
         }
     template, rendered = await _prepare(session, task, code, draft=True, write_draft=False, clean_names=True)
-    return {"name": template.name_zh, "kind": "standard", "blocks": rendered.blocks}
+    _, eff_values, _ = await _inputs(session, task, code)
+    return {"name": _effective_doc_name(code, template.name_zh, eff_values), "kind": "standard", "blocks": rendered.blocks}
 
 
 @user_router.get("/tasks/{task_id}/documents/{code}/export.docx")
@@ -1186,6 +1338,7 @@ async def edpb_en_docx(
     draft: bool,
     *,
     actor_user_id: uuid.UUID | None = None,
+    read_only_viewer: bool = False,
 ) -> tuple[bytes, str]:
     """Generate or fetch cached English EDPB 2026 official DPIA Word form for EU/EEA-related non-China routes."""
     from app.analysis.doc_projects import involves_eu_eea
@@ -1212,7 +1365,13 @@ async def edpb_en_docx(
     merged = {**risk_vals, **answered, **{k: v for k, v in in_values.items() if v}}
     try:
         return await build_edpb_2026_en(
-            session, task, merged, cits, draft=draft, actor_user_id=actor_user_id
+            session,
+            task,
+            merged,
+            cits,
+            draft=draft,
+            actor_user_id=actor_user_id,
+            read_only_viewer=read_only_viewer,
         )
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
@@ -1222,8 +1381,16 @@ async def edpb_en_docx(
 async def export_edpb_en_docx(
     task_id: uuid.UUID, user: UserDep, session: SessionDep, draft: bool = False
 ) -> Response:
+    from app.iam.models import Role
+
     task = await _task(session, task_id, user)
-    data, label = await edpb_en_docx(session, task, draft, actor_user_id=user.user_id)
+    data, label = await edpb_en_docx(
+        session,
+        task,
+        draft,
+        actor_user_id=user.user_id,
+        read_only_viewer=(user.role == Role.VIEWER),
+    )
     return Response(
         data,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1239,10 +1406,17 @@ async def export_edpb_en_pdf(
 
     from app.analysis import official_docx as od
     from app.analysis.docx_pdf import PdfEngineUnavailable, docx_to_pdf, engine
+    from app.iam.models import Role
 
     task = await _task(session, task_id, user)
     task_title = task.title
-    data, label = await edpb_en_docx(session, task, draft, actor_user_id=user.user_id)
+    data, label = await edpb_en_docx(
+        session,
+        task,
+        draft,
+        actor_user_id=user.user_id,
+        read_only_viewer=(user.role == Role.VIEWER),
+    )
     await session.close()
     pdf_bytes: bytes | None = None
     if engine() != "builtin":
@@ -1271,9 +1445,16 @@ async def preview_edpb_en(
     task_id: uuid.UUID, user: UserDep, session: SessionDep, draft: bool = True
 ) -> dict:
     from app.analysis import official_docx as od
+    from app.iam.models import Role
 
     task = await _task(session, task_id, user)
-    data, _label = await edpb_en_docx(session, task, draft, actor_user_id=user.user_id)
+    data, _label = await edpb_en_docx(
+        session,
+        task,
+        draft,
+        actor_user_id=user.user_id,
+        read_only_viewer=(user.role == Role.VIEWER),
+    )
     return {
         "name": "数据保护影响评估（欧盟标准英文范本）",
         "kind": "official_docx",
@@ -1340,7 +1521,8 @@ async def save_document(
     from app.analysis import official_docx as od
 
     task = await _task(session, task_id, user)
-    inst = await _instance(session, task, code)
+    await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
+    inst = await _instance(session, task, code, for_update=True)
     if inst is None:
         cn_base = await _official_cn_base(session, task, code, draft=draft)
         if cn_base is not None:
@@ -1359,7 +1541,8 @@ async def save_document(
             if not draft and rendered.needs_paper:
                 raise HTTPException(409, "论述部分还没有生成，请先点击“生成论述”")
             blocks = rendered.blocks
-            name_zh = template.name_zh
+            _, eff_values, _ = await _inputs(session, task, code)
+            name_zh = _effective_doc_name(code, template.name_zh, eff_values)
             ver_no = template.version_no
         inst = DocumentInstance(
             task_id=task.id,
@@ -1381,11 +1564,18 @@ async def reset_saved_document(
     task_id: uuid.UUID, code: str, request: Request, user: UserDep, session: SessionDep
 ) -> dict:
     """Discard manual online edits for this document and restore the auto-generated version."""
+    from sqlalchemy import delete as sa_delete
+
     task = await _task(session, task_id, user)
+    await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
     inst = await _instance(session, task, code)
     if inst is not None:
         doc_name = inst.name_zh
-        await session.delete(inst)
+        await session.execute(
+            sa_delete(DocumentInstance).where(
+                DocumentInstance.task_id == task.id, DocumentInstance.code == code
+            )
+        )
         await session.commit()
         set_detail(request, summary=f"恢复《{doc_name}》为自动生成版")
     return {"exists": False}
@@ -1422,7 +1612,8 @@ async def edit_document(
 ) -> dict:
     """Change one piece of text and log who changed what, from what, to what."""
     task = await _task(session, task_id, user)
-    inst = await _instance(session, task, code)
+    await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
+    inst = await _instance(session, task, code, for_update=True)
     if inst is None:
         raise HTTPException(404, "请先保存一份文件副本再修改")
     blocks = copy.deepcopy(inst.blocks)

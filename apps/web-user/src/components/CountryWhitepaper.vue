@@ -20,6 +20,7 @@ interface Ref { n: number; doc_id: string; clause_id: string; title: string; ori
 interface Page {
   country_code: string; country_name_zh: string; documents: number; clauses: number
   overview: { label: string; text: string }[]; dimensions: Dimension[]; refs: Ref[]; updated?: string
+  has_whitepaper?: boolean
 }
 const page = ref<Page | null>(null)
 const loading = ref(false)
@@ -146,6 +147,11 @@ watch(() => props.country, () => { full.value = []; void load() }, { immediate: 
       <div class="pick-list"><el-button v-for="c in countries || []" :key="c.country_code" size="large" @click="emit('choose', c.country_code)">{{ c.country_name_zh }}</el-button></div>
     </div>
     <el-alert v-else-if="failed" type="error" :closable="false" :title="failed" />
+    <el-empty
+      v-else-if="page && page.documents === 0 && page.has_whitepaper === false"
+      :description="`${page.country_name_zh}暂未收录现行法规条文，待平台管理员导入法规并生成国家合规简报后即可在此查阅`"
+      data-testid="wp-empty"
+    />
     <template v-else-if="page">
       <section class="overview" data-testid="wp-overview">
         <h3>{{ page.country_name_zh }}数据合规概述<small class="updated" data-testid="wp-updated">引证核心法规 {{ page.documents }} 部 · {{ page.clauses }} 条<template v-if="page.updated"> · 法规最后更新 {{ page.updated }}</template></small></h3>
@@ -161,12 +167,14 @@ watch(() => props.country, () => { full.value = []; void load() }, { immediate: 
       </section>
 
       <div class="bar">
-        <el-button type="primary" data-testid="wp-read" @click="readFull">阅读完整简报</el-button>
-        <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
-          <span><el-button :disabled="!downloadable" data-testid="wp-pdf" @click="download('pdf')">下载 PDF</el-button></span>
+        <el-tooltip :disabled="page.has_whitepaper !== false" content="该国完整合规简报尚未生成，请先查阅上方八大维度要点" placement="top">
+          <span><el-button type="primary" :disabled="page.has_whitepaper === false" data-testid="wp-read" @click="readFull">阅读完整简报</el-button></span>
         </el-tooltip>
-        <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
-          <span><el-button :disabled="!downloadable" data-testid="wp-docx" @click="download('docx')">下载 Word</el-button></span>
+        <el-tooltip :disabled="downloadable && page.has_whitepaper !== false" :content="page.has_whitepaper === false ? '该国完整合规简报尚未生成' : '当前只读账号未开通导出权限'" placement="top">
+          <span><el-button :disabled="!downloadable || page.has_whitepaper === false" data-testid="wp-pdf" @click="download('pdf')">下载 PDF</el-button></span>
+        </el-tooltip>
+        <el-tooltip :disabled="downloadable && page.has_whitepaper !== false" :content="page.has_whitepaper === false ? '该国完整合规简报尚未生成' : '当前只读账号未开通导出权限'" placement="top">
+          <span><el-button :disabled="!downloadable || page.has_whitepaper === false" data-testid="wp-docx" @click="download('docx')">下载 Word</el-button></span>
         </el-tooltip>
       </div>
       <el-drawer v-model="fullOpen" :title="`${page.country_name_zh}汽车数据合规洞察简报`" size="min(1040px, 94vw)" :close-on-press-escape="true" append-to-body data-testid="wp-full">

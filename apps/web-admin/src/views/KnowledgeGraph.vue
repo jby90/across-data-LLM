@@ -517,6 +517,7 @@ const relationFilter = ref('')
 const qualityFilter = ref<'all' | 'needs_confirmation' | 'verified'>('all')
 const visibleNodeTypes = ref<string[]>([...ALL_NODE_TYPES])
 const loading = ref(false)
+const countriesLoaded = ref(false)
 const graph = ref<GraphPayload>({
   country_code: '',
   node_counts_by_type: {},
@@ -800,7 +801,19 @@ async function runExtract() {
       edges_total: number
     }>(`/admin/knowledge/extract?country_code=${countryCode.value}`)
     if (res.status !== 'completed') {
-      ElMessage.warning(`图谱未替换，保留旧结果：${res.reason || res.status}`)
+      const reasonZhMap: Record<string, string> = {
+        country_extraction_already_running: '该国知识图谱正在后台梳理中，请稍候刷新',
+        document_relevance_unavailable: '相关法规范围尚未核定完成，已保留既有图谱结果',
+        no_parsed_documents: '当前国家暂无已解析完成的法规条文',
+        skipped: '当前未满足重新梳理条件',
+      }
+      const rawReason = String(res.reason || res.status || '').trim()
+      const cleanReason =
+        reasonZhMap[rawReason] ||
+        (/^[A-Za-z_][A-Za-z0-9_]*$/.test(rawReason)
+          ? '智能分析服务暂不可用，已保留既有图谱结果'
+          : rawReason)
+      ElMessage.warning(`图谱未替换，保留旧结果：${cleanReason}`)
       return
     }
     const curCountryZh = countryOptions.value.find((c) => c.country_code === countryCode.value)?.country_name_zh || countryCode.value
@@ -843,9 +856,17 @@ onMounted(async () => {
     api
       .get<typeof countryOptions.value>('/admin/knowledge/countries')
       .then((res) => {
-        if (Array.isArray(res) && res.length) countryOptions.value = res
+        if (Array.isArray(res)) {
+          countryOptions.value = res
+          if (countryCode.value && !res.some((c) => c.country_code === countryCode.value)) {
+            countryCode.value = ''
+          }
+        }
       })
-      .catch((error: unknown) => ElMessage.error((error as Error).message)),
+      .catch((error: unknown) => ElMessage.error((error as Error).message))
+      .finally(() => {
+        countriesLoaded.value = true
+      }),
     countryCode.value ? loadGraph() : Promise.resolve(),
   ])
 })
@@ -887,7 +908,10 @@ onMounted(async () => {
       </div>
     </header>
     <div v-if="!countryCode" class="country-cards" data-testid="kg-country-cards">
-      <div v-if="!countryOptions.some((x) => (x.documents_count ?? 0) > 0)" style="grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--cy-text-3)">正在加载各国知识图谱概览…</div>
+      <div v-if="!countriesLoaded" style="grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--cy-text-3)">正在加载各国知识图谱概览…</div>
+      <div v-else-if="!countryOptions.some((x) => (x.documents_count ?? 0) > 0)" style="grid-column: 1 / -1; padding: 24px">
+        <el-empty description="当前法规库尚未收录条文，请先在「采集站点」或「法规文件」中导入法规后再生成知识图谱" />
+      </div>
       <button v-for="c in countryOptions.filter((x) => (x.documents_count ?? 0) > 0)" :key="c.country_code" type="button" class="country-card" :data-testid="`kg-country-${c.country_code}`" @click="countryCode = c.country_code; loadGraph()">
         <strong>
           {{ c.country_name_zh }}

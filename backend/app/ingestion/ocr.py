@@ -101,9 +101,14 @@ class OcrEngine:
                 pages=res.pages, mean_confidence=res.mean_confidence, languages=res.languages
             )
         except Exception as exc:
+            from app.core.jargon import scrub_engineering_jargon
+
+            clean_exc = scrub_engineering_jargon(str(exc))
             if not self._tesseract_available:
-                raise OcrUnavailable(f"PaddleOCR 失败且没有 Tesseract 可退回: {exc}") from exc
-            log.warning("PaddleOCR 失败，退回 Tesseract: %s", str(exc)[:200])
+                raise OcrUnavailable(
+                    f"主版面识别引擎失败且无备用识别引擎可用: {clean_exc}"
+                ) from exc
+            log.warning("主版面识别引擎失败，切换备用识别引擎: %s", clean_exc[:200])
         if paddle is None:
             return self._run_tesseract(content, language, max_pages)
         if not self._tesseract_available:
@@ -113,8 +118,8 @@ class OcrEngine:
         qt = document_quality(tess.pages, language)
         winner = paddle if qp > qt else tess
         log.info(
-            "OCR 择优：paddle（可用页 %d / 条号 %d / 字符 %d），"
-            "tesseract（可用页 %d / 条号 %d / 字符 %d），选用 %s",
+            "版面识别择优：主引擎（可用页 %d / 条号 %d / 字符 %d），"
+            "备用引擎（可用页 %d / 条号 %d / 字符 %d），选用 %s",
             *qp,
             *qt,
             winner.languages,
@@ -142,17 +147,23 @@ class OcrEngine:
     def read_page(self, content: bytes, page: int, language: str, *, dpi: int = 450) -> str:
         """One page again, at a higher resolution, in the law's own language only (no English mixed
         in), with the page's own layout: for a page the first reading could not make out."""
-        if self._paddle.supports(language) and self._paddle.available:  # 本机阿拉伯文等走 PaddleOCR
-            one = pdfium.PdfDocument(content)
-            try:
-                single = pdfium.PdfDocument.new()
-                single.import_pages(one, [page - 1])
-                import io as _io
+        from app.ingestion.parsing import _PDFIUM_LOCK
 
-                buf = _io.BytesIO()
-                single.save(buf)
-            finally:
-                one.close()
+        if self._paddle.supports(language) and self._paddle.available:  # 本机阿拉伯文等走 PaddleOCR
+            import io as _io
+
+            buf = _io.BytesIO()
+            with _PDFIUM_LOCK:
+                one = pdfium.PdfDocument(content)
+                single = None
+                try:
+                    single = pdfium.PdfDocument.new()
+                    single.import_pages(one, [page - 1])
+                    single.save(buf)
+                finally:
+                    if single is not None:
+                        single.close()
+                    one.close()
             from app.ingestion.quality_card import _readable_ratio
 
             hi = PaddleOcrEngine(self._paddle._python, dpi_scale=dpi / 72)
@@ -164,17 +175,26 @@ class OcrEngine:
                     best, best_score = text, score
             return best
         if not self._tesseract_available:
-            raise OcrUnavailable("未找到可用的 OCR 引擎")
+            raise OcrUnavailable("未找到可用的版面文字识别引擎")
         assert self._cmd is not None
         pytesseract.pytesseract.tesseract_cmd = self._cmd
         if self._tessdata:
             os.environ["TESSDATA_PREFIX"] = self._tessdata
         lang = self.languages_for(language).split("+")[0]
-        doc = pdfium.PdfDocument(content)
-        try:
-            image = doc[page - 1].render(scale=dpi / 72).to_pil().convert("L")
-        finally:
-            doc.close()
+        with _PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(content)
+            page_obj = None
+            bitmap = None
+            try:
+                page_obj = doc[page - 1]
+                bitmap = page_obj.render(scale=dpi / 72)
+                image = bitmap.to_pil().convert("L")
+            finally:
+                if bitmap is not None:
+                    bitmap.close()
+                if page_obj is not None:
+                    page_obj.close()
+                doc.close()
         best = ""
         for psm in ("--psm 6", "--psm 4", "--psm 3"):
             text = pytesseract.image_to_string(image, lang=lang, config=psm)
@@ -186,8 +206,10 @@ class OcrEngine:
     def _run_tesseract(
         self, content: bytes, language: str, max_pages: int | None = None
     ) -> OcrResult:
+        from app.ingestion.parsing import _PDFIUM_LOCK
+
         if not self._tesseract_available:
-            raise OcrUnavailable("未找到可用的 OCR 引擎")
+            raise OcrUnavailable("未找到可用的版面文字识别引擎")
         assert self._cmd is not None
         pytesseract.pytesseract.tesseract_cmd = self._cmd
         if self._tessdata:
@@ -195,25 +217,36 @@ class OcrEngine:
         langs = self.languages_for(language)
         pages: list[str] = []
         confs: list[float] = []
-        doc = pdfium.PdfDocument(content)
-        try:
-            page_limit = len(doc) if max_pages is None else min(len(doc), max_pages)
-            for i in range(page_limit):
-                image = doc[i].render(scale=self._dpi / 72).to_pil().convert("L")
-                text = pytesseract.image_to_string(image, lang=langs, config=self._config())
-                data = pytesseract.image_to_data(
-                    image,
-                    lang=langs,
-                    config=self._config(),
-                    output_type=pytesseract.Output.DICT,
-                )
-                confs.extend(
-                    float(c)
-                    for c, w in zip(data["conf"], data["text"], strict=False)
-                    if str(w).strip() and float(c) >= 0
-                )
-                pages.append("\n".join(ln.rstrip() for ln in text.splitlines() if ln.strip()))
-        finally:
-            doc.close()
+        pil_images = []
+        with _PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(content)
+            try:
+                page_limit = len(doc) if max_pages is None else min(len(doc), max_pages)
+                for i in range(page_limit):
+                    page_obj = doc[i]
+                    bitmap = None
+                    try:
+                        bitmap = page_obj.render(scale=self._dpi / 72)
+                        pil_images.append(bitmap.to_pil().convert("L"))
+                    finally:
+                        if bitmap is not None:
+                            bitmap.close()
+                        page_obj.close()
+            finally:
+                doc.close()
+        for image in pil_images:
+            text = pytesseract.image_to_string(image, lang=langs, config=self._config())
+            data = pytesseract.image_to_data(
+                image,
+                lang=langs,
+                config=self._config(),
+                output_type=pytesseract.Output.DICT,
+            )
+            confs.extend(
+                float(c)
+                for c, w in zip(data["conf"], data["text"], strict=False)
+                if str(w).strip() and float(c) >= 0
+            )
+            pages.append("\n".join(ln.rstrip() for ln in text.splitlines() if ln.strip()))
         mean = statistics.fmean(confs) if confs else 0.0
         return OcrResult(pages=pages, mean_confidence=round(mean, 1), languages=langs)

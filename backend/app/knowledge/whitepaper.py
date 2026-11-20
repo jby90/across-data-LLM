@@ -333,8 +333,12 @@ def _glimpse(code: str, text: str) -> str:
 
 async def out_of_scope_documents(session: AsyncSession, country_code: str) -> set[str]:
     """Documents the library itself marks as not about this subject (its scope check on every
-    document): kept out of the briefing so a traffic code or a consumer-credit law is not offered
-    as the country's data-compliance regime."""
+    document, admin relevance override, or source safety hold): kept out of the briefing so an
+    out-of-scope or quarantined file is never offered as the country's data-compliance regime."""
+    from sqlalchemy import or_
+
+    from app.ingestion.models import Document
+    from app.ingestion.safety import document_available
     from app.knowledge.models import KgNode, NodeType
 
     rows = await session.execute(
@@ -345,7 +349,18 @@ async def out_of_scope_documents(session: AsyncSession, country_code: str) -> se
             KgNode.review_status.notin_(("stale", "rejected", "superseded")),
         )
     )
-    return {str(r[0]) for r in rows if r[0]}
+    excluded = {str(r[0]) for r in rows if r[0]}
+    doc_rows = await session.scalars(
+        select(Document.id).where(
+            Document.country_code == country_code,
+            or_(
+                ~document_available(),
+                Document.relevance.in_(("irrelevant", "out_of_scope")),
+            ),
+        )
+    )
+    excluded.update(str(did) for did in doc_rows if did)
+    return excluded
 
 
 async def gather(session: AsyncSession, country_code: str) -> dict[str, list[dict]]:
@@ -508,7 +523,11 @@ async def _write_dimension(
             res = await call_llm_json(messages, max_tokens=9000, temperature=0.0)
         except LlmUnavailableError as exc:
             # 输出被截断：条文较多的维度偶有，只重试一次，不让整份简报因此中断
-            if attempt == 0 and "truncated" in str(exc):
+            if attempt == 0 and (
+                "truncated" in str(exc)
+                or "截断" in str(exc)
+                or any(f.get("reason") == "output_truncated" for f in getattr(exc, "failures", []))
+            ):
                 messages = messages[:2] + [{"role": "user", "content": "上一次输出被截断。请把 paragraphs 控制在 2 段以内、points 控制在 5 条以内，再输出 JSON。"}]
                 continue
             raise WhitepaperError(str(exc)) from exc
@@ -960,19 +979,26 @@ async def turnover_caps(session: AsyncSession, country_code: str, chosen: list[d
     turnover, when none of the chosen clauses does."""
     from sqlalchemy import text as sql
 
-    from app.analysis.doc_rules import real_label
+    from app.analysis.doc_rules import _SQL_ELIGIBLE_DOC_VER_CLAUSE, real_label
     from app.ingestion.display_text import for_reading
 
     have = {str(c.get("clause_id")) for c in chosen}
     rows = (
         await session.execute(
             sql(
-                """select k.id::text, d.id::text, coalesce(d.title_zh, d.title), k.clause_number, k.original_text, t.translated_text
+                f"""select k.id::text, d.id::text, coalesce(d.title_zh, d.title), k.clause_number, k.original_text, t.translated_text
                    from clauses k join document_versions v on v.id=k.version_id and v.state='parsed' join documents d on d.id=v.document_id
                    join clause_translations t on t.clause_id=k.id and t.is_current
-                   where d.country_code=:c and coalesce(d.title_zh, d.title) ~ '个人数据|个人信息|数据保护' and coalesce(d.title_zh, d.title) !~ '指南|指引|咨询'
+                     and t.quality_check_passed and t.review_status not in ('translation_failed','not_translated','rejected','stale','superseded')
+                     and not exists (
+                       select 1 from clause_translations t2
+                       where t2.clause_id=k.id and t2.id<>t.id and t2.is_current
+                         and t2.quality_check_passed and t2.review_status not in ('translation_failed','not_translated','rejected','stale','superseded')
+                     )
+                   where d.country_code=:c and d.relevance in ('relevant', 'related')
+                     and coalesce(d.title_zh, d.title) ~ '个人数据|个人信息|数据保护' and coalesce(d.title_zh, d.title) !~ '指南|指引|咨询'
                      and t.translated_text ~ '(罚款|罚金)' and t.translated_text ~ '营业额' and t.translated_text ~ '([0-9]+ ?%|百分之)'
-                     and v.version_no=(select max(version_no) from document_versions x where x.document_id=v.document_id and x.state='parsed')
+                     {_SQL_ELIGIBLE_DOC_VER_CLAUSE}
                    order by length(t.translated_text) limit 2"""
             ),
             {"c": country_code},
@@ -990,7 +1016,7 @@ async def turnover_caps(session: AsyncSession, country_code: str, chosen: list[d
 
 _TOPICS = {
     "dpo": r"(数据保护官|数据保护负责人|个人数据保护(责任人|负责人)|数据保护专员)[^。]{0,40}(任命|指定|登记)|(任命|指定)[^。]{0,30}(数据保护官|数据保护负责人|个人数据保护(责任人|负责人))",
-    "breach": r"(泄露|违规|侵害|数据安全事件)[^。]{0,60}(通知|报告|通报)[^。]{0,40}(小时|日|天|立即)",
+    "breach": r"(泄露|违规|侵害|数据安全事件)[^。]{0,90}(通知|报告|通报)[^。]{0,60}(小时|日|天|立即)|不迟于[^。]{0,40}(日历日|工作日|小时)[^。]{0,40}(通知|报告|通报)|(通知|报告|通报)[^。]{0,60}不迟于[^。]{0,40}(日历日|工作日|小时)",
     "transfer_penalty": r"(罚款|罚金|监禁)",
     "transfer_basis": r"(法律上可强制执行|具有法律强制执行力|可强制执行)[^。]{0,60}义务|约束性公司规则|特定认证|标准合同条款",
     "financial_penalty": r"要求[^。]{0,40}缴付财务处罚",
@@ -1009,7 +1035,13 @@ async def pinned_topics(session: AsyncSession, country_code: str) -> dict[str, l
     “建议书面确认”."""
     from sqlalchemy import text as sql
 
-    from app.analysis.doc_rules import _AMENDING_TITLE, _OUTBOUND, not_a_basis, real_label
+    from app.analysis.doc_rules import (
+        _AMENDING_TITLE,
+        _OUTBOUND,
+        _SQL_ELIGIBLE_DOC_VER_CLAUSE,
+        not_a_basis,
+        real_label,
+    )
     from app.ingestion.display_text import for_reading
     from app.knowledge.cache_sync import keeper_active, rebuilding, use_cached
 
@@ -1022,11 +1054,17 @@ async def pinned_topics(session: AsyncSession, country_code: str) -> dict[str, l
     rows = (
         await session.execute(
             sql(
-                """select k.id::text, d.id::text, coalesce(d.title_zh, d.title), k.clause_number, k.original_text, t.translated_text
+                f"""select k.id::text, d.id::text, coalesce(d.title_zh, d.title), k.clause_number, k.original_text, t.translated_text
                    from clauses k join document_versions v on v.id=k.version_id and v.state='parsed' join documents d on d.id=v.document_id
                    join clause_translations t on t.clause_id=k.id and t.is_current
+                     and t.quality_check_passed and t.review_status not in ('translation_failed','not_translated','rejected','stale','superseded')
+                     and not exists (
+                       select 1 from clause_translations t2
+                       where t2.clause_id=k.id and t2.id<>t.id and t2.is_current
+                         and t2.quality_check_passed and t2.review_status not in ('translation_failed','not_translated','rejected','stale','superseded')
+                     )
                    where d.country_code=:c and d.relevance='relevant' and coalesce(d.title_zh, d.title) ~ '个人数据|个人信息|数据保护'
-                     and v.version_no=(select max(version_no) from document_versions x where x.document_id=v.document_id and x.state='parsed')"""
+                     {_SQL_ELIGIBLE_DOC_VER_CLAUSE}"""
             ),
             {"c": country_code},
         )
@@ -1044,11 +1082,19 @@ async def pinned_topics(session: AsyncSession, country_code: str) -> dict[str, l
             if not label or clause_gate.why_unusable(zh, title, original):
                 continue
             main = 0 if not re.search(r"条例|法令|决定|规章|指南|regulation", title or "") else (2 if re.search(r"指南|指引", title or "") else 1)
-            hits.append((main, re.search(r"原文|旧版", title or "") is not None, len(zh), {
+            explicit_deadline = (
+                0
+                if (
+                    topic != "breach"
+                    or re.search(r"[0-9一二三四五六七八九十]+\s*个?(?:日历|工作)?(?:日|天|小时)", zh or "")
+                )
+                else 1
+            )
+            hits.append((main, explicit_deadline, re.search(r"原文|旧版", title or "") is not None, len(zh), {
                 "clause_id": cid, "document_id": did, "document_title": clause_gate.law_name(title, did, country_code=country_code), "clause_number": label,
                 "quote_original": for_reading(original or ""), "quote_zh": for_reading(zh or ""), "dimension_code": "D8"}))
-        hits.sort(key=lambda h: h[:3])
-        out[topic] = [{**h[3], "pinned": True} for h in hits[: 3 if topic == "transfer_basis" else 1]]
+        hits.sort(key=lambda h: h[:4])
+        out[topic] = [{**h[4], "pinned": True} for h in hits[: 3 if topic == "transfer_basis" else 1]]
     s_cache[country_code] = out
     if keeper_active or rebuilding.get():
         _PINNED_TOPICS_CACHE[country_code] = out
@@ -1135,11 +1181,27 @@ async def one_name_per_body(
         if pat:
             t = pat.sub(lambda m: next(variants[k] for k in sorted(variants, key=len, reverse=True) if m.group(0).startswith(k)), t)
         t = unify_authorities(t, forms, country_name=cname)
-        return _collapse_repeated_authorities(t, forms, cname)
+        t = _collapse_repeated_authorities(t, forms, cname)
+        t = re.sub(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])", "", t)
+        t = re.sub(r"(?<=[）》】\)])[ \t]+(?=[\u4e00-\u9fff，。；：、！？])", "", t)
+        t = re.sub(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[（《【\(])", "", t)
+        return t
 
     out = []
     for b in blocks:
         b = dict(b)
+        if b.get("original"):
+            out.append(b)  # 官方外文条文原句逐字保留，不展开中文机构全称
+            continue
+        if b.get("verbatim_quote") and "text" in b:
+            m_src = re.match(r"^(《[^》]+》[^：:]*[：:])(.*)$", str(b["text"]), re.S)
+            if m_src:
+                b["text"] = (
+                    clause_gate.unify_law_names(m_src.group(1), country_code=scoped_cc)
+                    + m_src.group(2)
+                )
+            out.append(b)
+            continue
         if "text" in b:
             b["text"] = fix(b["text"])
         if "items" in b:
@@ -1247,6 +1309,9 @@ def unify_authorities(text: str, forms: list[tuple[re.Pattern, str, str]], count
             if not has_guojia and prefix.endswith("国家") and any(oc in prefix for oc in other_countries):
                 return m.group(0)
             if keep:
+                tail = m.string[m.end() : m.end() + 20]
+                if re.match(rf"^[\u4e00-\u9fff]{{1,12}}[（(]\s*{re.escape(keep.group(1))}\s*[）)]", tail):
+                    return m.group(0)
                 m_acr = re.search(r"[（(]([A-Z]{2,8})[）)]|\s([A-Z]{2,8})(?![A-Za-z])$", m.group(0).strip())
                 if m_acr and (m_acr.group(1) or m_acr.group(2)) != keep.group(1).upper():
                     return m.group(0)
@@ -1514,6 +1579,12 @@ async def latest(session: AsyncSession, country_code: str) -> CountryWhitepaper 
 
 
 async def save(session: AsyncSession, country_code: str, blocks: list[dict], meta: dict) -> CountryWhitepaper:
+    from sqlalchemy import text as sa_text
+
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"whitepaper:{country_code}"},
+    )
     last = await session.scalar(
         select(func.max(CountryWhitepaper.version_no)).where(CountryWhitepaper.country_code == country_code)
     )
@@ -1584,7 +1655,11 @@ def _extract_prev_sections_and_refs(
                         raw_doc, clause_lbl = m_split.group(1).strip(), m_split.group(2).strip()
                     else:
                         raw_doc, clause_lbl = cell, ""
-                clean_doc = re.sub(r"（[^）]*[A-Za-z\u0600-\u06FF][^）]*）$", "", raw_doc).strip().strip("《》")
+                clean_doc = re.sub(
+                    r"（(?:[^（）]|（[^（）]*）|\([^()]*\))*[A-Za-z\u0600-\u06FF](?:[^（）]|（[^（）]*）|\([^()]*\))*）$",
+                    "",
+                    raw_doc,
+                ).strip().strip("《》")
                 clean_doc = clause_gate.unify_law_names(clean_doc, country_code=country_code)
                 key = (clean_doc, clause_lbl)
                 while key in prev_refs and prev_refs[key][0] != idx_val:

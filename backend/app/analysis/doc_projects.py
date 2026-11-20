@@ -236,7 +236,15 @@ def _scenario_text(function: str | None, scene: str | None) -> str:
 
 
 async def _project(session: AsyncSession, project_id: uuid.UUID, user: Principal, writable: bool = False) -> AnalysisTask:
-    task = await session.get(AnalysisTask, project_id)
+    if writable:
+        task = await session.scalar(
+            select(AnalysisTask)
+            .where(AnalysisTask.id == project_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    else:
+        task = await session.get(AnalysisTask, project_id)
     if task is None or task.org_id != user.org_id or task.kind != "documents":
         raise HTTPException(404, "这个文件项目不存在")
     if writable and task.archived_at is not None:
@@ -463,12 +471,14 @@ async def _progress_stamp(session: AsyncSession, task: AnalysisTask) -> tuple:
     kg_sig = (
         await session.execute(select(func.count(), func.max(KgNode.created_at)).where(KgNode.review_status != "superseded"))
     ).one()
+    from app.iam.service import strip_trial_org_suffix
+
     return (
         task.updated_at,
         task.country_code,
         task.scenario_type,
         task.vehicle_model,
-        org.name if org else "",
+        strip_trial_org_suffix(org.name) if org else "",
         facts_sig,
         form_sig,
         nar_sig,
@@ -496,8 +506,10 @@ async def _fast_progress(
     if cached and cached[0] == stamp:
         return cached[1]
 
+    from app.iam.service import strip_trial_org_suffix
+
     org = await session.get(Organization, task.org_id) if task.org_id else None
-    org_name = (org.name or "") if org else ""
+    org_name = strip_trial_org_suffix(org.name or "") if org else ""
     nar_rows = (
         await session.scalars(
             select(DocumentNarrative)
@@ -977,6 +989,7 @@ async def sync_doc_project_execution_traces(
     for a ``documents`` compliance evaluation project so Admin Execution Records reflect live truth."""
     if task.kind != "documents" or task.org_id is None:
         return
+    await session.execute(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
     from sqlalchemy import delete
 
     from app.analysis.document_narrative import DocumentNarrative
@@ -1047,12 +1060,17 @@ async def sync_doc_project_execution_traces(
 
     findings: list[dict] = []
     if cited_ids:
+        from app.ingestion.layout_safety import clause_layout_available
+        from app.ingestion.models import NOT_CITABLE_STATUSES
+        from app.ingestion.safety import document_available
+
         c_rows = (
             await session.execute(
                 select(
                     Clause.id,
                     Clause.clause_number,
                     Clause.original_text,
+                    Clause.language,
                     DocumentVersion.id,
                     DocumentVersion.version_no,
                     Document.id,
@@ -1061,25 +1079,40 @@ async def sync_doc_project_execution_traces(
                 )
                 .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
                 .join(Document, Document.id == DocumentVersion.document_id)
-                .where(Clause.id.in_(cited_ids[:24]))
+                .where(
+                    Clause.id.in_(cited_ids[:24]),
+                    document_available(),
+                    clause_layout_available(),
+                    Document.relevance.notin_(("irrelevant", "out_of_scope")),
+                    DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+                    DocumentVersion.review_status != "rejected",
+                )
             )
         ).all()
-        tr_map = dict(
-            (
-                await session.execute(
-                    select(ClauseTranslation.clause_id, ClauseTranslation.translated_text).where(
-                        ClauseTranslation.clause_id.in_([r[0] for r in c_rows]),
-                        ClauseTranslation.is_current.is_(True),
-                    )
+        tr_buckets: dict = {}
+        for tr_cid, tr_txt in (
+            await session.execute(
+                select(ClauseTranslation.clause_id, ClauseTranslation.translated_text).where(
+                    ClauseTranslation.clause_id.in_([r[0] for r in c_rows]),
+                    ClauseTranslation.is_current.is_(True),
+                    ClauseTranslation.quality_check_passed.is_(True),
+                    ClauseTranslation.review_status.notin_(
+                        ("translation_failed", "not_translated", "rejected", "stale", "superseded")
+                    ),
                 )
-            ).all()
-        )
+            )
+        ).all():
+            tr_buckets.setdefault(tr_cid, []).append(tr_txt)
+        tr_map = {k: v[0] for k, v in tr_buckets.items() if len(v) == 1 and v[0]}
         src_zh = filled_facts.get("source_country") or "发出国"
         dst_zh = filled_facts.get("recipient_country") or task.country_code
         scene_zh = filled_facts.get("scenario_text") or filled_facts.get("function") or task.title
-        for idx, (cid, cnum, otxt, vid, vno, did, dtitle, surl) in enumerate(c_rows, 1):
+        for idx, (cid, cnum, otxt, clang, vid, vno, did, dtitle, surl) in enumerate(c_rows, 1):
             quote_orig = (otxt or "").strip()[:220]
-            quote_zh = (tr_map.get(cid) or otxt or "").strip()[:220]
+            zh_raw = tr_map.get(cid) or (
+                otxt if str(clang or "").lower().startswith("zh") else "（译文待核对）"
+            )
+            quote_zh = (zh_raw or "").strip()[:220]
             findings.append(
                 {
                     "finding_id": f"F-{idx:02d}",
@@ -1421,8 +1454,10 @@ async def _doc_view(
             paper_cited = list((found.report or {}).get("cited_clause_ids") or []) or cited_in_blocks(found.blocks, cits)
     rendered = render(template.definition, in_values, cits, None, paper_blocks, draft=True)
     kind, label = basis_kind(code, values)
-    missing = [{"key": q.key, "label": q.label} for q in rendered.missing]
-    optional = [{"key": q.key, "label": q.label} for q in rendered.optional_open]
+    is_non_cn = bool(str(values.get("source_country") or "").strip()) and country_of(values.get("source_country")) != CN
+    lbl_map = D._NON_CN_DECL_ROW_LABELS if (is_non_cn and code in ("declaration", "risk_report")) else {}
+    missing = [{"key": q.key, "label": lbl_map.get(q.label, q.label)} for q in rendered.missing]
+    optional = [{"key": q.key, "label": lbl_map.get(q.label, q.label)} for q in rendered.optional_open]
     forms = await _official_states(session, task, D._official_forms_for(code, values))
     only_official = official_only(code, values.get("source_country", ""), forms)
     if only_official:  # 申报表就是官方原表：按官方原表的缺项算，通用申报表的题不计
@@ -1444,7 +1479,7 @@ async def _doc_view(
     )
     return {
         "code": code,
-        "name": template.name_zh,
+        "name": D._effective_doc_name(code, template.name_zh, values),
         "basis_kind": kind,
         "basis_label": label,
         "basis": basis_lines(code, task.country_code, values),
@@ -1609,7 +1644,13 @@ async def _official_pdf(
     if close_session:
         await session.close()
     if form.get("kind") == "docx":
-        data = await _docx_form_to_pdf(data, label_part)
+        is_foreign_form = str(form.get("country") or "").upper() not in ("", "CN")
+        pdf_header = (
+            str(form.get("name_orig") or form["code"].replace("_", " "))
+            if is_foreign_form
+            else label_part
+        )
+        data = await _docx_form_to_pdf(data, pdf_header, foreign=is_foreign_form)
     return data, named(task_title, label_part, ext="pdf")
 
 
@@ -1722,6 +1763,14 @@ async def recent_papers(user: UserDep, session: SessionDep, since: datetime | No
     """Argumentative parts that finished (or failed) since ``since`` — at most the last day — so the
     page the user is on, whichever it is, can tell them; the work itself runs in the background."""
     floor = datetime.now(UTC) - timedelta(days=1)
+    if since is not None:
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        else:
+            try:
+                since = since.astimezone(UTC)
+            except OverflowError:
+                raise HTTPException(422, "时间参数超出有效年份范围，请调整后重试") from None
     since = max(since or floor, floor)
     names = {code: name for code, name, _ in DEFAULT_TEMPLATES} | {"dpia_edpb_en": "数据保护影响评估（欧盟标准英文范本）"}
     rows = (
@@ -1943,17 +1992,44 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
     facts = task.facts_json or {}
     source = facts.get(DOC_FACT_PREFIX + "source_country", "")
     recipient = facts.get(DOC_FACT_PREFIX + "recipient_country", "")
-    if source and country_of(source) != "CN" and "storage_chain" in questions:
+    if source and country_of(source) != "CN":
         src_display = LIBRARY_NAMES.get(country_of(source) or "", source)
-        questions["storage_chain"]["label"] = f"{src_display}本地存储与传输链路"
-        questions["storage_chain"]["question"] = (
-            f"数据在{src_display}本地存放在哪些系统平台、数据中心（含云服务），经什么链路、以什么方式传输出去？"
-        )
+        if "storage_chain" in questions:
+            questions["storage_chain"]["label"] = f"{src_display}本地存储与传输链路"
+            questions["storage_chain"]["question"] = (
+                f"数据在{src_display}本地存放在哪些系统平台、数据中心（含云服务），经什么链路、以什么方式传输出去？"
+            )
+        if "is_cii" in questions:
+            questions["is_cii"]["label"] = "是否属关键基础设施或特定受监管主体"
+            questions["is_cii"]["question"] = f"在{src_display}法域下是否属于关键基础设施运营方或特定受监管行业主体？"
+        if "important_data" in questions:
+            questions["important_data"]["label"] = "是否涉及受管制特定业务数据"
+            questions["important_data"]["question"] = f"是否涉及{src_display}法规单独列管的特定业务或高敏管制数据？"
+        if "credit_code" in questions:
+            questions["credit_code"]["label"] = "企业商业登记号或识别码"
+            questions["credit_code"]["question"] = "企业商业登记号或法定识别码是多少？"
     # 题目旁的依据卡片：所依据的法条（按数据发出国取，链到法规知识库）
+    is_non_cn_route = bool(source and country_of(source) != "CN")
+    non_cn_hints = {
+        "credit_code": "填写企业在注册地主管机关登记的商业登记号或法定识别码。",
+        "is_cii": "按数据发出国法律判断是否属于关键基础设施运营方或特定受监管主体；不属于的选“否”。",
+        "important_data": "按数据发出国法规判断是否涉及当地单独列管的特定业务或高敏管制数据。",
+    }
+    non_cn_examples = {
+        "entity_type": "外商独资企业",
+        "registered_place": "新加坡纬壹科技城",
+        "office_place": "同注册地",
+        "credit_code": "202418920K（当地商业登记号）",
+        "is_cii": "否（不属于当地法定关键基础设施运营主体）",
+        "law_compliance": "近两年在当地经营中严格遵守个人数据保护与电信管理法规，无监管处罚或调查记录。",
+    }
+    non_cn_choices = {
+        "entity_type": ["本地内资企业", "外商独资企业", "合资企业", "跨国集团分支机构", "其他"],
+    }
     basis = await question_basis.for_project(session, source=source, recipient=recipient, keys=list(questions), library=library, function=task.scenario_type or "")
     for q in questions.values():
-        q["hint"] = G.HINTS.get(q["key"], "")
-        q["example"] = G.EXAMPLES.get(q["key"], "")
+        q["hint"] = (non_cn_hints.get(q["key"]) if is_non_cn_route else None) or G.HINTS.get(q["key"], "")
+        q["example"] = (non_cn_examples.get(q["key"]) if is_non_cn_route else None) or G.EXAMPLES.get(q["key"], "")
         q["used_for"] = G.used_for(q["used_in"])
         q["basis"] = [{**c, "link": question_basis.link(c)} for c in basis.get(q["key"], [])]
         q["carried"] = _carried(q, facts, carried_from)
@@ -1976,7 +2052,7 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
             q["evolution"] = risk_items.summary(q["value"])
         q.pop("derived", None)
         if not q["choices"] and q["key"] in G.CHOICES:
-            q["choices"] = G.CHOICES[q["key"]]
+            q["choices"] = (non_cn_choices.get(q["key"]) if is_non_cn_route else None) or G.CHOICES[q["key"]]
             q["other"] = True
     answers = {k: q["value"] for k, q in questions.items()}
     # 数据从中国出境时，按企业填的情况判断出境路径（安全评估 / 标准合同 / 免于申报）
@@ -2110,7 +2186,7 @@ async def save_answers(project_id: uuid.UUID, body: AnswersIn, user: UserDep, se
     facts = dict(task.facts_json or {})
     for key, value in body.answers.items():
         if key not in known or key in PROJECT_KEYS:
-            raise HTTPException(409, f"没有这个问题：{key}")
+            raise HTTPException(409, "提交了当前项目不支持的填写栏目，请刷新页面后重试")
         text = (value or "").strip()
         limit = risk_items.MAX_CHARS if key in risk_items.LONG_KEYS else MAX_ANSWER_CHARS
         if len(text) > limit:
@@ -2198,7 +2274,7 @@ async def diagnose_risks(project_id: uuid.UUID, request: Request, user: UserDep,
                 timeout=120.0,
             )
     except LlmUnavailableError as exc:
-        raise HTTPException(503, f"风险研判服务暂时不可用，请稍后重试（{exc}）") from exc
+        raise HTTPException(503, "风险研判服务暂时不可用，请稍后重试") from exc
 
     data = res.data if isinstance(res.data, dict) else {}
     raw_rows = data.get("rows") if isinstance(data.get("rows"), list) else []
@@ -2290,7 +2366,12 @@ def _suggest_state(project_id: uuid.UUID, count: int) -> dict:
 
 async def _suggest_job(factory: async_sessionmaker, project_id: uuid.UUID, text: str) -> None:
     from app.analysis import doc_suggest, question_basis
-    from app.core.redaction import bind_egress, llm_scope, summarize_redaction
+    from app.core.redaction import (
+        bind_egress,
+        llm_scope,
+        org_redaction_aliases,
+        summarize_redaction,
+    )
     from app.iam.models import Organization
 
     key = str(project_id)
@@ -2301,7 +2382,7 @@ async def _suggest_job(factory: async_sessionmaker, project_id: uuid.UUID, text:
                 if task is None:
                     return
                 org = await session.get(Organization, task.org_id) if task.org_id else None
-                aliases = tuple([org.name, *(org.llm_redaction_terms or [])]) if org else ()
+                aliases = org_redaction_aliases(org)
                 redaction_info = summarize_redaction(text, aliases) if text.strip() else None
                 await ensure_default_templates(session)
                 base = {**task_values(task), **D._scenario(task)}
@@ -2389,14 +2470,14 @@ async def _suggest_job(factory: async_sessionmaker, project_id: uuid.UUID, text:
 @router.post("/{project_id}/suggest", status_code=202)
 async def start_suggest(project_id: uuid.UUID, body: SuggestIn, user: UserDep, session: SessionDep) -> dict:
     """Draft suggested answers in the background (from the user's own description when given)."""
-    from app.core.redaction import summarize_redaction
+    from app.core.redaction import org_redaction_aliases, summarize_redaction
     from app.iam.models import Organization
 
     task = await _project(session, project_id, user, writable=True)
     if _suggest_state(project_id, 0)["state"] == "running":
         return _suggest_state(project_id, 0)
     org = await session.get(Organization, task.org_id) if task.org_id else None
-    aliases = tuple([org.name, *(org.llm_redaction_terms or [])]) if org else ()
+    aliases = org_redaction_aliases(org)
     redaction_info = summarize_redaction(body.text, aliases) if body.text.strip() else None
     begin_suggest(session, task.id, body.text)
     return {"state": "running", "seconds": 0, "redaction": redaction_info}
@@ -2415,7 +2496,7 @@ async def start_suggest_from_file(
     """The same, reading an existing file (PDF / Word / text) instead of pasted words. The file is
     only read for this; it is not kept."""
     from app.analysis import attachments as att
-    from app.core.redaction import summarize_redaction
+    from app.core.redaction import org_redaction_aliases, summarize_redaction
     from app.iam.models import Organization
 
     task = await _project(session, project_id, user, writable=True)
@@ -2445,7 +2526,7 @@ async def start_suggest_from_file(
     if _suggest_state(project_id, 0)["state"] == "running":
         return _suggest_state(project_id, 0)
     org = await session.get(Organization, task.org_id) if task.org_id else None
-    aliases = tuple([org.name, *(org.llm_redaction_terms or [])]) if org else ()
+    aliases = org_redaction_aliases(org)
     redaction_info = summarize_redaction(text, aliases)
     _suggesting[str(task.id)] = ("running", datetime.now(UTC), "")
     asyncio.create_task(_suggest_job(async_sessionmaker(session.bind, expire_on_commit=False), project_id, text))
@@ -2705,7 +2786,7 @@ async def export_all(
     via_word = fmt == "pdf" and engine() != "builtin"
     made: list[tuple[str, bytes]] = []
     originals: list[tuple[str, bytes]] = []  # 官方 PDF 原表：本来就是 PDF，两种包里一样
-    builtin_docx_forms: list[tuple[str, bytes, str]] = []
+    builtin_docx_forms: list[tuple[str, bytes, str, bool]] = []
     src_code = country_of(overview_now["route"]["source_country"])
     involves_eu = involves_eu_eea(overview_now["route"]["source_country"], overview_now["route"]["recipient_country"])
     if not draft:
@@ -2729,7 +2810,15 @@ async def export_all(
                     if via_word:
                         made.append((f"{prefix}{named(task_title, label_part, ext='docx')}", raw_form))
                     elif fmt == "pdf":
-                        builtin_docx_forms.append((f"{prefix}{named(task_title, label_part, ext='pdf')}", raw_form, label_part))
+                        is_foreign_form = str(f_meta.get("country") or "").upper() not in ("", "CN")
+                        pdf_header = (
+                            str(f_meta.get("name_orig") or f_meta["code"].replace("_", " "))
+                            if is_foreign_form
+                            else label_part
+                        )
+                        builtin_docx_forms.append(
+                            (f"{prefix}{named(task_title, label_part, ext='pdf')}", raw_form, pdf_header, is_foreign_form)
+                        )
                     else:
                         originals.append((f"{prefix}{named(task_title, label_part, ext='docx')}", raw_form))
                 else:
@@ -2751,7 +2840,15 @@ async def export_all(
             and involves_eu
         ):
             try:
-                edpb_bytes, edpb_label = await D.edpb_en_docx(session, task, draft=False, actor_user_id=user.user_id)
+                from app.iam.models import Role
+
+                edpb_bytes, edpb_label = await D.edpb_en_docx(
+                    session,
+                    task,
+                    draft=False,
+                    actor_user_id=user.user_id,
+                    read_only_viewer=(user.role == Role.VIEWER),
+                )
                 if via_word or fmt == "docx":
                     made.append((f"{i:02d}b_{named(task_title, edpb_label, ext='docx')}", edpb_bytes))
                 elif fmt == "pdf":
@@ -2760,6 +2857,7 @@ async def export_all(
                             f"{i:02d}b_{named(task_title, edpb_label, ext='pdf')}",
                             edpb_bytes,
                             "EDPB DPIA Template 2026 (Official EN)",
+                            True,
                         )
                     )
             except Exception as exc:  # noqa: BLE001
@@ -2772,7 +2870,7 @@ async def export_all(
     # 关键优化：所有数据库读取已全部完成，进入耗时 PDF 转换与压缩前立即归还数据库连接与事务锁
     await session.close()
 
-    for out_name, raw_docx, label_part in builtin_docx_forms:
+    for out_name, raw_docx, label_part, is_foreign_doc in builtin_docx_forms:
         is_edpb_en = label_part.startswith("EDPB ")
         originals.append(
             (
@@ -2780,7 +2878,7 @@ async def export_all(
                 await _docx_form_to_pdf(
                     raw_docx,
                     label_part,
-                    foreign=is_edpb_en,
+                    foreign=is_foreign_doc,
                     table_style="edpb" if is_edpb_en else "formal_black",
                 ),
             )
@@ -2816,6 +2914,8 @@ async def export_all(
                 zf.writestr(route_note_entry[0], route_note_entry[1])
             if not_needed:
                 tpl_names = {c: nm for c, nm, _ in DEFAULT_TEMPLATES} | {"dpia_edpb_en": "数据保护影响评估（欧盟标准英文范本）"}
+                if overview_now["route"]["source_country"] and src_code != "CN":
+                    tpl_names["declaration"] = D._NON_CN_DECL_NAME
                 zf.writestr("按目前情况不需要的文件.txt", "\n".join(f"{tpl_names.get(c, c)}：{a['why']}" for c, a in not_needed.items()))
         return buf.getvalue()
 

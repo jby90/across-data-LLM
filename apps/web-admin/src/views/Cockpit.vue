@@ -65,6 +65,7 @@ interface CockpitOverview {
     enterprise_members: number
     ordinary_viewers: number
     portal_onboarded: number
+    trial_visitors?: number
   }
   operations: {
     monitor_sites_total: number
@@ -163,7 +164,7 @@ const whitepapersOutdated = computed(() => {
 
 const intlStandardsCount = computed(() => {
   const hl = data.value?.headline
-  return hl?.intl_standards_count ?? hl?.standards_intl ?? hl?.standards_international ?? fallbackStdSplit.value?.intl ?? 163
+  return hl?.intl_standards_count ?? hl?.standards_intl ?? hl?.standards_international ?? fallbackStdSplit.value?.intl ?? 0
 })
 
 const standardsSubtitle = computed(() => {
@@ -309,7 +310,7 @@ onUnmounted(() => {
         <button type="button" class="kpi-tile" @click="go('/orgs')">
           <span class="kpi-label">入驻企业与平台账号</span>
           <strong class="kpi-num">{{ data.headline.active_organizations }}<small> 家单位</small></strong>
-          <span class="kpi-meta">企业用户 {{ data.account_summary.enterprise_members }} · 普通查看者 {{ data.account_summary.ordinary_viewers }}（门户来源 {{ data.account_summary.portal_onboarded }}）</span>
+          <span class="kpi-meta">企业用户 {{ data.account_summary.enterprise_members }} · 普通查看者 {{ data.account_summary.ordinary_viewers }}<template v-if="data.account_summary.portal_onboarded">（含门户单点开通 {{ data.account_summary.portal_onboarded }}）</template><template v-if="data.account_summary.trial_visitors"> · 独立体验账号 {{ data.account_summary.trial_visitors }}</template></span>
         </button>
 
         <button type="button" class="kpi-tile" @click="go('/agent-studio')">
@@ -482,7 +483,7 @@ onUnmounted(() => {
           </el-button>
         </div>
 
-        <div class="country-matrix" data-testid="cockpit-country-matrix">
+        <div v-if="visibleCountries.length" class="country-matrix" data-testid="cockpit-country-matrix">
           <div class="matrix-header">
             <span>国家与地区</span>
             <span>在册现行法规与原始条款</span>
@@ -620,6 +621,7 @@ onUnmounted(() => {
             </button>
           </div>
         </div>
+        <p v-else class="empty-inline" data-testid="cockpit-country-empty">当前尚未收录各国现行法规记录</p>
       </section>
     </template>
   </div>

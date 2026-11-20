@@ -67,7 +67,12 @@ def review_detail(cite):
         "machine_translated": "机翻待核对",
         "not_translated": "未提供",
         "ambiguous_current": "现行译文有冲突，待核对",
+        "native_zh": "中文原文免译",
     }
+    is_zh = str(cite.get("language") or "").lower().startswith("zh")
+    if is_zh or cite.get("translation_review_status") == "native_zh":
+        src_lbl = labels.get(cite.get("source_review_status"), "未记录，待核对")
+        return f"原文{src_lbl}（中文原文）"
     return (
         "原文"
         + labels.get(cite.get("source_review_status"), "未记录，待核对")

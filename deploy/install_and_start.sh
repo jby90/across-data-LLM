@@ -33,6 +33,8 @@ echo "[4/4] 等待网关与健康检查就绪..."
 for i in {1..30}; do
   if curl -fsS "http://127.0.0.1:${HTTP_PORT}/api/health" >/dev/null 2>&1; then
     echo "私有化部署完成！企业用户端：http://127.0.0.1:${HTTP_PORT}/  运营管理端：http://127.0.0.1:${HTTP_PORT}/admin/"
+    echo "首次洁净空库部署请执行以下命令创建首个平台超级管理员（将口令与邮箱替换为企业实际管理员信息）："
+    echo "  docker compose --env-file .env -f docker-compose.yml exec -e CYSH_ADMIN_PASSWORD='<强密码>' api python -m app.cli create-platform-admin --email admin@company.com --name '平台管理员'"
     exit 0
   fi
   sleep 2

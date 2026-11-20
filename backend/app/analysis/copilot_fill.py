@@ -455,8 +455,18 @@ async def assist_official_form(
         return {"reply": PRIVACY, "proposals": []}
 
     form_info = form_view.get("form") or {}
-    lang_code = str(form_info.get("language") or "zh").lower()
-    lang_label = LANG_NAME.get(lang_code, lang_code or "原表语种")
+    raw_lang_code = str(form_info.get("language") or "zh").lower()
+    is_pdf_form = str(form_info.get("kind") or "pdf").lower() != "docx"
+    if raw_lang_code == "ar" and is_pdf_form:
+        if str(form_info.get("country") or "").upper() == "TN":
+            lang_code = "fr"
+            lang_label = "法语（Français，阿语印刷版 PDF 表格栏位须用拉丁字母法文填写）"
+        else:
+            lang_code = "en"
+            lang_label = "英语（English，阿语印刷版 PDF 表格栏位须用拉丁字母英文填写）"
+    else:
+        lang_code = raw_lang_code
+        lang_label = LANG_NAME.get(lang_code, lang_code or "原表语种")
     form_meta = {
         "表格名称": form_info.get("name_zh", ""),
         "受理机构": form_info.get("authority_zh", ""),
@@ -535,6 +545,8 @@ async def assist_official_form(
             s = str(raw_val or "").strip()
             if not s or REMARK.search(s):
                 continue
+            if is_pdf_form and any("\u0590" <= ch <= "\u08ff" for ch in s):
+                continue
             limit = int(it.get("max_chars") or 400)
             if len(s) > limit:
                 continue
@@ -606,7 +618,13 @@ async def assist_official_form(
         )
         seen.add(iid)
 
-    if not reply_text or CLAIMED.search(reply_text):
+    all_failed = bool(results) and all(isinstance(r, Exception) for r in results)
+    if all_failed:
+        reply_text = (
+            f"智能填表助手当前服务繁忙，暂时无法自动提炼栏位（《{form_meta['表格名称']}》请使用{lang_label}填写），"
+            "请稍后再试或直接在左侧表格中逐栏填写。"
+        )
+    elif not reply_text or CLAIMED.search(reply_text):
         if proposals:
             reply_text = f"已从你的描述里整理出 {len(proposals)} 项对应栏位（按原表要求使用{lang_label}），核对下方卡片后点一键填入即可写入表格。"
         else:

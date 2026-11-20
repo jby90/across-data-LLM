@@ -333,8 +333,28 @@ export const DOC_TYPE_LABEL: Record<string, string> = {
   REGULATION: '法规',
   GUIDANCE: '监管指南',
   STANDARD: '标准',
+  ADMISSION: '准入申报材料',
   FORM: '申报表',
   OTHER: '其他',
+}
+
+const DOC_TYPE_EXTRA_LABEL: Record<string, string> = {
+  ...DOC_TYPE_LABEL,
+  ACT: '法律',
+  SUBSIDIARY: '法规',
+  DECREE: '法规',
+  RULE: '法规',
+  ORDER: '法规',
+  GUIDELINE: '监管指南',
+  NOTICE: '监管指南',
+  CIRCULAR: '监管指南',
+}
+
+export function formatDocTypeZh(raw: string | null | undefined, fallback = '其他文件'): string {
+  const s = String(raw || '').trim()
+  if (!s) return '未分类'
+  const k = s.toUpperCase()
+  return DOC_TYPE_EXTRA_LABEL[k] || (/[\u4e00-\u9fff]/.test(s) ? s : fallback)
 }
 export const STRATEGY_LABEL: Record<string, string> = {
   INDEX_PAGE: '目录页发现',

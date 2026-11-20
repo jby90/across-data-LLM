@@ -285,7 +285,13 @@ async def collect(sf, fetcher, *, phrases=SEARCH_PHRASES) -> dict[str, int]:
                     if not in_domain(e.title):
                         stats["off_domain"] += 1
                         continue
+                    from sqlalchemy import text as sa_text
+
                     stats["kept"] += 1
+                    await session.execute(
+                        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                        {"k": f"std_num:{e.number}"},
+                    )
                     row = await session.scalar(
                         select(StandardEntry).where(StandardEntry.number == e.number)
                     )
@@ -429,7 +435,13 @@ async def collect_industry(sf, fetcher, *, phrases=SEARCH_PHRASES) -> dict[str, 
                     if not in_domain(e.title):
                         stats["off_domain"] += 1
                         continue
+                    from sqlalchemy import text as sa_text
+
                     stats["kept"] += 1
+                    await session.execute(
+                        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                        {"k": f"std_num:{e.number}"},
+                    )
                     row = await session.scalar(
                         select(StandardEntry).where(StandardEntry.number == e.number)
                     )

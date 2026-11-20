@@ -186,21 +186,40 @@ _WORKFLOW_TEXT_REPLACEMENTS: tuple[tuple[str, str], ...] = (
 def _humanize_workflow_text(val: str | None) -> str | None:
     if not val:
         return val
+    from app.core.jargon import scrub_engineering_jargon
+
     out = val
     for src, dst in _WORKFLOW_TEXT_REPLACEMENTS:
         out = out.replace(src, dst)
-    out = re.sub(r"\bOCR\b", "扫描件文字识别", out)
-    out = re.sub(r"\bRAG\b", "检索增强", out)
-    out = re.sub(r"\bLLM\b", "生成式模型", out)
-    out = re.sub(r"\bJSON\b", "结构化数据", out)
-    out = re.sub(r"\buuid\b", "资源标识", out, flags=re.IGNORECASE)
-    return out
+    return scrub_engineering_jargon(
+        out,
+        ocr_zh="扫描件文字识别",
+        llm_zh="生成式模型",
+        rag_zh="检索增强",
+        json_zh="结构化数据",
+        uuid_zh="资源标识",
+        pydantic_zh="格式核验",
+        cjk_zh="中文汉字",
+    )
+
+
+def _humanize_any_schema(val):
+    if isinstance(val, str):
+        return _humanize_workflow_text(val)
+    if isinstance(val, list):
+        return [_humanize_any_schema(x) for x in val]
+    if isinstance(val, dict):
+        return {
+            (_humanize_workflow_text(k) if isinstance(k, str) else k): _humanize_any_schema(v)
+            for k, v in val.items()
+        }
+    return val
 
 
 def _humanize_schema_dict(schema: dict | None) -> dict:
     if not isinstance(schema, dict):
         return {}
-    return {k: (_humanize_workflow_text(v) if isinstance(v, str) else v) for k, v in schema.items()}
+    return {k: _humanize_any_schema(v) for k, v in schema.items()}
 
 
 def _humanize_node_for_ui(raw_node: dict) -> dict:
@@ -266,11 +285,13 @@ def _to_workflow_out(cfg: AgentWorkflowConfig) -> AgentWorkflowConfigOut:
 
 
 async def _load_org_and_creator(session: AsyncSession, t: AnalysisTask) -> tuple[str, str, str]:
+    from app.iam.service import strip_trial_org_suffix
+
     org_name = "系统示例"
     if t.org_id is not None:
         org = await session.get(Organization, t.org_id)
         if org is not None:
-            org_name = org.name
+            org_name = strip_trial_org_suffix(org.name) or org.name
     creator_email = ""
     creator_name = ""
     if t.created_by is not None:
@@ -567,9 +588,11 @@ async def _to_task_summaries(
     }
 
     org_ids = list({t.org_id for t in tasks if t.org_id is not None})
+    from app.iam.service import strip_trial_org_suffix
+
     orgs_by_id = (
         {
-            oid: name
+            oid: (strip_trial_org_suffix(name) or name)
             for oid, name in (
                 await session.execute(select(Organization.id, Organization.name).where(Organization.id.in_(org_ids)))
             ).all()
@@ -723,22 +746,33 @@ async def _to_task_detail(
     trace_outs = []
     for tr in traces:
         inp_snap, out_snap = _enrich_trace_snapshots(t, tr, rvs, evaluated_missing)
+        clean_summary = (
+            "评估流程执行中断，请稍后重试"
+            if (tr.business_summary or "").startswith("流水线异常终止:")
+            else tr.business_summary
+        )
+        clean_tcs = []
+        for tc in tr.tool_calls_json or []:
+            tc_copy = _humanize_any_schema(dict(tc))
+            if tc_copy.get("tool_name") == "llm.chat":
+                tc_copy["tool_name"] = "model.analyze"
+            clean_tcs.append(ToolCallTraceOut(**tc_copy))
         trace_outs.append(
             AnalysisStepTraceOut(
                 workflow_version_id=tr.workflow_version_id,
                 id=tr.id,
                 seq_no=tr.seq_no,
                 agent_node_id=tr.agent_node_id,
-                agent_name=tr.agent_name,
+                agent_name=_humanize_workflow_text(tr.agent_name) or tr.agent_name,
                 phase=tr.phase,
                 status=tr.status,
-                business_summary=tr.business_summary,
+                business_summary=_humanize_workflow_text(clean_summary) or clean_summary,
                 is_backtrack=tr.is_backtrack,
-                backtrack_reason=tr.backtrack_reason,
-                backtrack_resolution=tr.backtrack_resolution,
-                tool_calls=[ToolCallTraceOut(**tc) for tc in (tr.tool_calls_json or [])],
-                input_snapshot=inp_snap,
-                output_snapshot=out_snap,
+                backtrack_reason=_humanize_workflow_text(tr.backtrack_reason),
+                backtrack_resolution=_humanize_workflow_text(tr.backtrack_resolution),
+                tool_calls=clean_tcs,
+                input_snapshot=_humanize_any_schema(inp_snap),
+                output_snapshot=_humanize_any_schema(out_snap),
                 tokens_used=tr.tokens_used,
                 duration_ms=tr.duration_ms,
                 created_at=tr.created_at,
@@ -750,8 +784,8 @@ async def _to_task_detail(
             regulatory_updates=await report_updates(session, rv.id),
             citation_policy=rv.citation_policy or "legacy_unrecorded",
             source_integrity_alerts=[
-                f"原文绑定或页级解析待核对，引用 {cid} 已隔离，需核查后重新分析"
-                for cid in await report_held_citation_ids(session, rv)
+                f"原文绑定或页级解析待核对（第 {idx} 处引用条文已隔离，需核查后重新分析）"
+                for idx, _cid in enumerate(await report_held_citation_ids(session, rv), 1)
             ],
             id=rv.id,
             task_id=rv.task_id,
@@ -950,7 +984,21 @@ async def export_admin_workflow_dsl(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="工作流版本不存在")
     else:
         cfg = await ensure_workflow_config(session)
-    return export_workflow_dsl(cfg)
+    raw_dsl = export_workflow_dsl(cfg)
+    out_dsl = copy.deepcopy(raw_dsl)
+    app_meta = out_dsl.get("app")
+    if isinstance(app_meta, dict):
+        for k_meta in ("name", "description", "change_note"):
+            if isinstance(app_meta.get(k_meta), str):
+                app_meta[k_meta] = _humanize_workflow_text(app_meta[k_meta])
+    wf = out_dsl.get("workflow")
+    if isinstance(wf, dict):
+        graph = wf.get("graph")
+        if isinstance(graph, dict) and isinstance(graph.get("nodes"), list):
+            graph["nodes"] = [
+                _humanize_node_for_ui(n) if isinstance(n, dict) else n for n in graph["nodes"]
+            ]
+    return out_dsl
 
 
 @admin_router.post(
@@ -1066,6 +1114,40 @@ async def get_admin_analysis_task_detail(
     return await _to_task_detail(session, task)
 
 
+async def _purge_tasks_with_dependents(session: AsyncSession, tasks: list[AnalysisTask]) -> None:
+    """Explicitly clean up notifications and impacts in trigger-safe order before deleting tasks."""
+    if not tasks:
+        return
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import or_
+    from sqlalchemy import update as sa_update
+
+    from app.updates.models import UpdateImpact, UserNotification
+
+    tids = [t.id for t in tasks]
+    rv_subq = select(ReportVersion.id).where(ReportVersion.task_id.in_(tids))
+    imp_subq = select(UpdateImpact.id).where(
+        or_(UpdateImpact.task_id.in_(tids), UpdateImpact.report_version_id.in_(rv_subq))
+    )
+    await session.execute(
+        sa_delete(UserNotification).where(
+            or_(UserNotification.task_id.in_(tids), UserNotification.impact_id.in_(imp_subq))
+        )
+    )
+    await session.execute(
+        sa_update(UpdateImpact)
+        .where(UpdateImpact.resolved_report_id.in_(rv_subq))
+        .values(resolved_report_id=None)
+    )
+    await session.execute(
+        sa_delete(UpdateImpact).where(
+            or_(UpdateImpact.task_id.in_(tids), UpdateImpact.report_version_id.in_(rv_subq))
+        )
+    )
+    for t in tasks:
+        await session.delete(t)
+
+
 @admin_router.delete("/tasks/{task_id}")
 async def delete_admin_analysis_task(
     task_id: uuid.UUID,
@@ -1077,7 +1159,9 @@ async def delete_admin_analysis_task(
     if task is None or viewer_owner(task) is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="对话工作流记录不存在")
     code = format_conversation_code(task.id, task.created_at)
-    await session.delete(task)
+    side_chat = await _project_side_chat(session, task)
+    targets = [side_chat, task] if side_chat is not None else [task]
+    await _purge_tasks_with_dependents(session, targets)
     await session.commit()
     return {"deleted": True, "id": str(task_id), "conversation_code": code}
 
@@ -1338,6 +1422,7 @@ async def batch_delete_analysis_tasks(
     tasks = await _batch_candidates(session, user, kind=body.kind, archived=True, ids=body.ids)
     deleted_ids: list[str] = []
     titles: list[str] = []
+    to_purge: list[AnalysisTask] = []
     for t in tasks:
         if t.status == "running":
             continue
@@ -1345,8 +1430,9 @@ async def batch_delete_analysis_tasks(
         titles.append(t.title)
         side_chat = await _project_side_chat(session, t)
         if side_chat is not None:
-            await session.delete(side_chat)
-        await session.delete(t)
+            to_purge.append(side_chat)
+        to_purge.append(t)
+    await _purge_tasks_with_dependents(session, to_purge)
     await session.commit()
     target_zh = "合规评估项目" if body.kind == "documents" else "咨询对话"
     set_detail(
@@ -1380,9 +1466,8 @@ async def delete_own_analysis_task(
         return {"archived": True, "id": str(task_id), "conversation_code": code}
     if not permanent:
         return {"archived": True, "id": str(task_id), "conversation_code": code}
-    if side_chat is not None:
-        await session.delete(side_chat)
-    await session.delete(task)
+    targets = [side_chat, task] if side_chat is not None else [task]
+    await _purge_tasks_with_dependents(session, targets)
     await session.commit()
     return {"deleted": True, "id": str(task_id), "conversation_code": code}
 
@@ -1492,7 +1577,12 @@ async def run_user_analysis_task(
     user: UserDep,
     session: SessionDep,
 ) -> AnalysisTaskDetailOut:
-    task = await session.get(AnalysisTask, task_id)
+    task = await session.scalar(
+        select(AnalysisTask)
+        .where(AnalysisTask.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到该合规评估项目")
     if task.sufficiency_score < 100:
@@ -1514,7 +1604,12 @@ async def edit_user_report_version(
     session: SessionDep,
 ) -> ReportVersionOut:
     """在线编辑报告章节并保存为新的不可变版本(保留部分样稿标识)。"""
-    task = await session.get(AnalysisTask, task_id)
+    task = await session.scalar(
+        select(AnalysisTask)
+        .where(AnalysisTask.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到该合规评估项目")
 
@@ -1972,14 +2067,34 @@ async def get_clause_citation_card(
         )
         else ""
     )
+    from app.ingestion.models import NOT_CITABLE_STATUSES
     from app.knowledge.business_view import topic_cards
     from app.knowledge.legal_terms import current_definitions, term_payload
+
+    is_native_zh = str(clause.language or doc.language or "").lower().startswith("zh")
+    doc_citable = (
+        ver.legal_status not in NOT_CITABLE_STATUSES
+        and ver.review_status != "rejected"
+        and doc.relevance not in ("irrelevant", "out_of_scope")
+    )
+    source_ok = ver.review_status == "approved" and not clause.needs_review
+    alerts: list[str] = []
+    if layout_pending:
+        alerts.append("本页存在待核对解析修订；以下仅保留旧原文和译文，禁止作新的法律依据引用。")
+    if translation_ambiguous:
+        alerts.append("同一条款存在多个现行译文，尚未消歧；保留原文，不任意选取一个译文。")
+    if ver.legal_status in NOT_CITABLE_STATUSES or ver.review_status == "rejected":
+        alerts.append("该文件处于已废止、草案或驳回状态，不可作为现行有效法律依据引用。")
+    elif doc.relevance in ("irrelevant", "out_of_scope"):
+        alerts.append("该文件不属于汽车数据跨境合规现行适用范围，不作为专项法律依据引用。")
 
     return {
         "clause_id": str(clause.id),
         "document_id": str(doc.id),
         "document_title": doc.title,
         "country_code": doc.country_code,
+        "language": clause.language or doc.language or "",
+        "is_native_zh": is_native_zh,
         "clause_number": clause.clause_number or f"#{clause.ordinal}",
         "heading": clause.heading,
         "section_path": clause.section_path,
@@ -1990,36 +2105,27 @@ async def get_clause_citation_card(
         "review_status": "approved"
         if (
             not layout_pending
-            and ver.review_status == "approved"
-            and not clause.needs_review
-            and ((tr and tr.review_status == "approved") or clause.language.startswith("zh"))
+            and doc_citable
+            and source_ok
+            and ((tr and tr.review_status == "approved") or is_native_zh)
         )
         else "pending_review"
-        if tr
+        if (tr or is_native_zh)
         else "not_translated",
-        "source_integrity_alerts": (
-            ["本页存在待核对解析修订；以下仅保留旧原文和译文，禁止作新的法律依据引用。"]
-            if layout_pending
-            else []
-        )
-        + (
-            ["同一条款存在多个现行译文，尚未消歧；保留原文，不任意选取一个译文。"]
-            if translation_ambiguous
-            else []
-        ),
-        "source_review_status": "approved"
-        if ver.review_status == "approved" and not clause.needs_review
-        else "pending_review",
+        "source_integrity_alerts": alerts,
+        "source_review_status": "approved" if source_ok else "pending_review",
         "translation_review_status": tr.review_status
         if tr
         else "ambiguous_current"
         if translation_ambiguous
+        else ("approved" if source_ok else "native_zh")
+        if is_native_zh
         else "not_translated",
         "usable_as_legal_basis": bool(
             not layout_pending
-            and ver.review_status == "approved"
-            and not clause.needs_review
-            and ((tr and tr.review_status == "approved") or clause.language.startswith("zh"))
+            and doc_citable
+            and source_ok
+            and ((tr and tr.review_status == "approved") or is_native_zh)
         ),
         "related_requirements": await topic_cards(session, doc.country_code, clause_id=clause.id),
         "terms": [

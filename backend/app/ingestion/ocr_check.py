@@ -93,18 +93,32 @@ async def settle_item(session: AsyncSession, version: DocumentVersion, clause_id
     """One passage settled: ``text`` None means “没错”; otherwise the corrected text, kept as the
     clause's reading text (translation and analysis read it; the archived original is untouched).
     When none is left, the version counts as checked."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     from app.ingestion.models import ClauseReading
 
+    locked = await session.scalar(
+        select(DocumentVersion)
+        .where(DocumentVersion.id == version.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if locked is not None:
+        version = locked
     items = [dict(i) for i in (version.check_items or [])]
     hit = next((i for i in items if i["clause_id"] == str(clause_id)), None)
     if hit is None:
         raise LookupError("这一段不在待核对的段落里")
     if text is not None and text.strip():
-        row = await session.scalar(select(ClauseReading).where(ClauseReading.clause_id == clause_id))
-        if row is None:
-            session.add(ClauseReading(clause_id=clause_id, reading_text=text.strip(), method="manual"))
-        else:
-            row.reading_text, row.method = text.strip(), "manual"
+        clean_t = text.strip()
+        await session.execute(
+            pg_insert(ClauseReading)
+            .values(id=uuid.uuid4(), clause_id=clause_id, reading_text=clean_t, method="manual")
+            .on_conflict_do_update(
+                index_elements=["clause_id"],
+                set_={"reading_text": clean_t, "method": "manual"},
+            )
+        )
         hit["state"] = "fixed"
     else:
         hit["state"] = "ok"

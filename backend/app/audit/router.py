@@ -46,8 +46,22 @@ class Filters:
         ip: str | None = Query(None, max_length=64),
         active_only: bool = Query(False, description="仅展示在用正式企业与正式账号操作留痕"),
     ):
+        from datetime import UTC
+
+        from fastapi import HTTPException
+
+        def _norm_dt(dt_val: datetime | None) -> datetime | None:
+            if dt_val is None:
+                return None
+            if dt_val.tzinfo is None:
+                return dt_val.replace(tzinfo=UTC)
+            try:
+                return dt_val.astimezone(UTC)
+            except OverflowError:
+                raise HTTPException(422, "时间筛选参数超出有效年份范围，请调整日期后重试") from None
+
         self.start, self.end, self.actor, self.category, self.q, self.ip, self.active_only = (
-            start, end, actor, category, q, ip, active_only,
+            _norm_dt(start), _norm_dt(end), actor, category, q, ip, active_only,
         )
 
     def apply(self, stmt):
@@ -75,7 +89,11 @@ class Filters:
         if self.start:
             stmt = stmt.where(AuditLog.at >= self.start)
         if self.end:
-            stmt = stmt.where(AuditLog.at < self.end + timedelta(seconds=1))
+            try:
+                upper_end = self.end + timedelta(seconds=1)
+                stmt = stmt.where(AuditLog.at < upper_end)
+            except OverflowError:
+                stmt = stmt.where(AuditLog.at <= self.end)
         if self.actor:
             like = f"%{self.actor}%"
             stmt = stmt.where(or_(AuditLog.actor_name.ilike(like), AuditLog.actor_email.ilike(like)))
@@ -154,11 +172,13 @@ async def export_xlsx(
         .all()
     )
     wb = Workbook()
+    from app.core.spreadsheet import write_safe_xlsx_cell
+
     ws = wb.active
     ws.title = "审计记录"
     head = ["时间", "人员", "邮箱", "角色", "来源地址", "类型", "动作", "说明", "结果", "修改前", "修改后", "记录校验码"]
     for j, h in enumerate(head, 1):
-        ws.cell(1, j, h).font = Font(bold=True)
+        write_safe_xlsx_cell(ws, 1, j, h).font = Font(bold=True)
 
     for i, r in enumerate(rows, 2):
         act = display_action(r.category, r.action, r.method, r.path)
@@ -172,7 +192,7 @@ async def export_xlsx(
             "成功" if r.status < 400 else f"未通过（{describe.status_reason_zh(r.status)}）", describe.readable(clean_before), describe.readable(clean_after), r.content_hash,
         ]
         for j, v in enumerate(values, 1):
-            ws.cell(i, j, v)
+            write_safe_xlsx_cell(ws, i, j, v, neutralize_formula_prefix=True)
     for col, width in zip("ABCDEFGHIJKL", (20, 14, 26, 14, 16, 12, 30, 40, 10, 40, 40, 20), strict=False):
         ws.column_dimensions[col].width = width
     buf = io.BytesIO()
@@ -192,6 +212,8 @@ async def export_csv(
 ) -> Response:
     import csv
 
+    from app.core.spreadsheet import sanitize_csv_cell
+
     rows = (
         (await session.execute(f.apply(select(AuditLog)).order_by(AuditLog.at.desc()).limit(MAX_EXPORT_ROWS)))
         .scalars()
@@ -207,22 +229,21 @@ async def export_csv(
         summ = hum if (hum and hum.strip()) else describe.fallback_summary(r.category, act, r.method, r.path, r.status)
         clean_before = describe.humanize_payload(r.before)
         clean_after = describe.humanize_payload(r.after)
-        writer.writerow(
-            [
-                r.at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
-                r.actor_name or "",
-                r.actor_email or "",
-                ROLE_ZH.get(r.actor_role, r.actor_role),
-                r.ip or "",
-                CATEGORY_ZH.get(r.category, r.category),
-                act,
-                summ,
-                "成功" if r.status < 400 else f"未通过（{describe.status_reason_zh(r.status)}）",
-                describe.readable(clean_before),
-                describe.readable(clean_after),
-                r.content_hash,
-            ]
-        )
+        raw_row = [
+            r.at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+            r.actor_name or "",
+            r.actor_email or "",
+            ROLE_ZH.get(r.actor_role, r.actor_role),
+            r.ip or "",
+            CATEGORY_ZH.get(r.category, r.category),
+            act,
+            summ,
+            "成功" if r.status < 400 else f"未通过（{describe.status_reason_zh(r.status)}）",
+            describe.readable(clean_before),
+            describe.readable(clean_after),
+            r.content_hash,
+        ]
+        writer.writerow([sanitize_csv_cell(v) for v in raw_row])
     set_detail(request, summary=f"导出审计记录 {len(rows)} 条")
     name = f"审计记录_{datetime.now():%Y%m%d_%H%M}.csv"
     payload = ("\ufeff" + sio.getvalue()).encode("utf-8")

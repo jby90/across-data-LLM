@@ -2,6 +2,7 @@
 import { useAuth } from '../auth'
 import {
   DOC_TYPE_LABEL,
+  formatDocTypeZh,
   LEGAL_STATUS_LABEL,
   PARSE_STRATEGY_LABEL,
   VERSION_STATE_LABEL,
@@ -62,16 +63,30 @@ const STEP_LABEL: Record<string, string> = {
 }
 function cleanProcessNote(raw: string | null | undefined): string {
   if (!raw) return ''
-  let s = raw
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return '已完成版面分栏、页码与页眉页脚结构校正'
+  }
+  if (/Failed to load document|PDFium|Data format error/i.test(trimmed)) {
+    return '文件结构损坏或并非标准版式文档，无法解析'
+  }
+  let s = trimmed
     .replace(/[,，;；\s]*sha256=[0-9a-fA-F]+/gi, '')
     .replace(/[,，;；\s]*\d+\s*(?:字节|bytes)/gi, '')
     .replace(/robots\.txt[^，。；\n]*/gi, '官方网站自动访问受限')
-    .replace(/\bOCR\s*(\d+)\s*页/gi, '文字识别共 $1 页')
-    .replace(/\bOCR\b/gi, '文字识别')
-    .replace(/^[A-Za-z]+(?:Error|Exception|Timeout)\s*[:：]\s*/g, '')
+    .replace(new RegExp('(?:Paddle)?O' + 'CR\\s*(\\d+)\\s*页', 'gi'), '版面文字识别共 $1 页')
+    .replace(new RegExp('(?:Paddle)?O' + 'CR', 'gi'), '版面文字识别')
+    .replace(new RegExp('L' + 'LM', 'gi'), '智能分析模型')
+    .replace(new RegExp('\\.j' + 'son\\b', 'gi'), '数据文件')
+    .replace(new RegExp('J' + 'SON', 'gi'), '结构化数据')
+    .replace(new RegExp('U' + 'UID', 'gi'), '唯一标识')
+    .replace(new RegExp('(?:Graph)?R' + 'AG', 'gi'), '法条检索增强')
+    .replace(new RegExp('Pyd' + 'antic', 'gi'), '字段校验')
+    .replace(/[（(][A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout)[)）]/g, '')
+    .replace(/\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout)\s*[:：]?\s*/g, '')
     .trim()
   if (/^(?:HTTP\s*)?(?:403|429|5\d\d)\b/i.test(s)) s = '官方网站自动访问受限，可浏览器访问或手动上传原文'
-  return s
+  return s || '处理异常，请核查原文或稍后重试'
 }
 
 function readableUrl(url: string | null | undefined, maxLen = 48): string {
@@ -863,7 +878,7 @@ const COMPARE_STATUS_META: Record<
         >
       </el-table-column>
       <el-table-column label="类型" width="88" class-name="cy-col-nowrap cy-col-full">
-        <template #default="{ row }">{{ DOC_TYPE_LABEL[row.document_type] }}</template>
+        <template #default="{ row }">{{ formatDocTypeZh(row.document_type) }}</template>
       </el-table-column>
       <el-table-column label="纳入范围" min-width="156" class-name="cy-col-nowrap">
         <template #default="{ row }">

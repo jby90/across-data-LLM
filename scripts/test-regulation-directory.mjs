@@ -35,6 +35,10 @@ test('levels follow metadata order; misleading titles do not change file classif
   ], 'SG')
   assert.deepEqual(groups.map(g => g.key), ['LAW', 'REGULATION', 'GUIDANCE', 'FORM'])
   assert.equal(groups.find(g => g.key === 'GUIDANCE').items[0].id, 'guide')
+  const mixedCase = directoryLevels([
+    doc('cn-law', 'CN', 'law'), doc('cn-act', 'CN', 'act'), doc('cn-std', 'CN', 'standard'), doc('cn-adm', 'CN', 'admission'),
+  ], 'CN')
+  assert.deepEqual(mixedCase.map(g => [g.key, g.name]), [['LAW', '法律'], ['STANDARD', '标准'], ['ADMISSION', '准入申报材料']])
 })
 
 test('same titles never merge distinct documents or versions', () => {

@@ -157,7 +157,9 @@ _CN_ARTICLES_CACHE: dict[str, dict[tuple[str, str], dict]] = {}
 async def _cn_articles(session: AsyncSession) -> dict[tuple[str, str], dict]:
     """(law, clause number) → where the library holds it, for the four provisions; read from the
     latest parsed version of each, only articles whose stored text starts with that article."""
-    from app.ingestion.models import Clause, Document, DocumentVersion
+    from app.ingestion.layout_safety import clause_layout_available
+    from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
+    from app.ingestion.safety import document_available
     from app.knowledge.cache_sync import keeper_active, rebuilding, use_cached
 
     s_cache = session.info.get("_cn_articles")
@@ -167,7 +169,15 @@ async def _cn_articles(session: AsyncSession) -> dict[tuple[str, str], dict]:
         return _CN_ARTICLES_CACHE["CN"]
 
     laws = {SA, SC, CP, AUTO}
-    docs = (await session.scalars(select(Document).where(Document.country_code == "CN"))).all()
+    docs = (
+        await session.scalars(
+            select(Document).where(
+                Document.country_code == "CN",
+                document_available(),
+                Document.relevance.notin_(("irrelevant", "out_of_scope")),
+            )
+        )
+    ).all()
     matched_docs: list[tuple[Document, str]] = []
     for doc in docs:
         title = next((t for t in (doc.title_zh, doc.title) if t and t.strip() in laws), None)
@@ -179,24 +189,36 @@ async def _cn_articles(session: AsyncSession) -> dict[tuple[str, str], dict]:
         versions = (
             await session.scalars(
                 select(DocumentVersion)
-                .where(DocumentVersion.document_id.in_(doc_ids), DocumentVersion.state == "parsed")
+                .where(
+                    DocumentVersion.document_id.in_(doc_ids),
+                    DocumentVersion.state == "parsed",
+                    DocumentVersion.legal_status != "draft",
+                    DocumentVersion.review_status != "rejected",
+                )
                 .order_by(DocumentVersion.document_id, DocumentVersion.version_no.desc())
             )
         ).all()
         latest_ver_by_doc = {}
         for v in versions:
-            latest_ver_by_doc.setdefault(v.document_id, v.id)
-        ver_ids = list(latest_ver_by_doc.values())
+            latest_ver_by_doc.setdefault(v.document_id, v)
+        ver_ids = [
+            v.id for v in latest_ver_by_doc.values() if v.legal_status not in NOT_CITABLE_STATUSES
+        ]
         clauses_by_ver: dict = {}
         if ver_ids:
             for c in (
                 await session.scalars(
-                    select(Clause).where(Clause.version_id.in_(ver_ids), Clause.clause_number.is_not(None))
+                    select(Clause).where(
+                        Clause.version_id.in_(ver_ids),
+                        Clause.clause_number.is_not(None),
+                        clause_layout_available(),
+                    )
                 )
             ).all():
                 clauses_by_ver.setdefault(c.version_id, []).append(c)
         for doc, title in matched_docs:
-            vid = latest_ver_by_doc.get(doc.id)
+            v_obj = latest_ver_by_doc.get(doc.id)
+            vid = v_obj.id if v_obj is not None and v_obj.legal_status not in NOT_CITABLE_STATUSES else None
             if vid is None:
                 continue
             for c in clauses_by_ver.get(vid, ()):

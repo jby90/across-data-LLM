@@ -36,6 +36,8 @@ for ($i = 0; $i -lt 30; $i++) {
     try {
         $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/health" -TimeoutSec 3
         Write-Host "私有化部署成功！企业用户端：http://127.0.0.1:$port/  运营管理端：http://127.0.0.1:$port/admin/" -ForegroundColor Green
+        Write-Host "首次洁净空库部署请执行以下命令创建首个平台超级管理员（请替换为企业实际口令与邮箱）：" -ForegroundColor Yellow
+        Write-Host "  docker compose --env-file .env -f docker-compose.yml exec -e CYSH_ADMIN_PASSWORD='<强密码>' api python -m app.cli create-platform-admin --email admin@company.com --name '平台管理员'"
         exit 0
     } catch {
         Start-Sleep -Seconds 2

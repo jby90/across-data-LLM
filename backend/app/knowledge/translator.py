@@ -54,10 +54,27 @@ from app.knowledge.numeric_integrity import (
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "translate-v11"  # v11：条号后的 مكرر/bis 译“之二”（不写“重复”）；v10：加中文法规体例（标题、条号、分项、术语）
+PROMPT_VERSION = "translate-v12"  # v12：五道译后质量门槛升级（防拒答/防行号凑字、纯数字子块直通、术语与之二强校验）
+COMPATIBLE_TRANSLATION_CACHE_PROMPTS = (PROMPT_VERSION, "translate-v11")
 MAX_CHUNK_CHARS = 1500
 MAX_CHUNK_NUMBERS = 30
 DEFAULT_CONCURRENCY = 4
+
+_META_POLLUTION_RE = re.compile(
+    r"\[REDACTED_[A-Z_]+\]|<Placeholder>|<占位符>"
+    r"|_*CYSH_(?:PRIVATE|LITERAL|DATE|SECRET|RESTORE)[A-Za-z0-9_]*"
+    r"|无法执行(?:该)?翻译|无法完成(?:该)?翻译|待翻译原文仅包含|不含任何可翻译|没有可据以(?:逐句)?忠实翻译"
+    r"|抱歉[，,]?\s*我?无法(?:对上述|为您)?|请提供完整的?(?:待翻译)?(?:法条)?原文|以下是(?:该|上述)?(?:法条|条款)?的?中文译文\s*[:：]"
+    r"|原文此处疑似缺失|版面行号|此处版面行|原文所引用的相关法规编号标记为|受保护的数字或金额|（受保护内容）|\(受保护内容\)"
+    r"|translate-v\d+|作为\s*AI\s*(?:语言)?模型",
+    re.IGNORECASE,
+)
+_CYSH_LEAK_RE = re.compile(r"_*CYSH_(?:PRIVATE|LITERAL|DATE|SECRET|RESTORE)[A-Za-z0-9_]*")
+_BARE_PROCESSOR_RE = re.compile(r"(?<![微中央信号协图形网络流数字音频视频图像])处理器")
+_BIS_SOURCE_RE = re.compile(
+    r"(?:\b(?:Article|Art\.?|Section)\s+\d+\s+bis\b|(?:المادة|الفصل)\s*\(?\s*[\d٠-٩]+\s*\)?\s*مكرر)",
+    re.IGNORECASE,
+)
 
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(r"(?:\+\d{1,3}[-\s]?)?\b\d{3,4}[-\s]\d{4,8}\b")
@@ -482,6 +499,8 @@ def verify_translation(
     translated_text: str,
     glossary_hits: list[dict],
     clause_number: str | None = None,
+    *,
+    allow_flex_cjk: bool = False,
 ) -> tuple[bool, list[str], list[dict]]:
     """译后程序检查(四项强校验):
     ① CJK 占比 >= 30%(阿语/法语/英文原文都应翻成中文);
@@ -500,8 +519,12 @@ def verify_translation(
         issues.append("译文为空")
     elif trans_clean == orig_clean:
         issues.append("译文与原文完全相同")
-    if "__CYSH_" in trans_clean:
+    if _CYSH_LEAK_RE.search(trans_clean):
         issues.append("脱敏占位符丢失或未能安全还原，译文不完整")
+    if _META_POLLUTION_RE.search(trans_clean):
+        issues.append("译文混入模型拒答说明、行号凑字或未还原占位标记，严禁入库")
+    if _BIS_SOURCE_RE.search(orig_clean) and re.search(r"重复条|（重复）|\(重复\)", trans_clean):
+        issues.append("条号后的 bis/مكرر 应规范译为“之二”，不得译为“重复”")
     # A numeric table cell must not gain invented prose just to meet the CJK gate.
     # These closed vocabulary cases have unambiguous short labels. Other legal
     # prose still needs ordinary translation and human semantic review.
@@ -528,7 +551,7 @@ def verify_translation(
 
     # ① CJK 字符占比 >= 30%
     kept = tuple(h["source_term"] for h in glossary_hits if h.get("preserve_original"))
-    if _translatable_letters(orig_clean) >= MIN_FLEX_LETTERS:
+    if allow_flex_cjk or _translatable_letters(orig_clean) >= MIN_FLEX_LETTERS:
         cjk_ratio = translatable_cjk_ratio(trans_clean, kept)
     else:
         cjk_ratio = compute_cjk_ratio(trans_clean)
@@ -545,12 +568,18 @@ def verify_translation(
             trans_folded = " ".join(trans_clean.casefold().split())
             src_folded = " ".join(h["source_term"].casefold().split())
             canon_folded = " ".join((h.get("canonical_source") or h["source_term"]).casefold().split())
-            if src_folded not in trans_folded and canon_folded not in trans_folded:
+            if (h.get("target_zh") or "").isascii():
+                ok = bool(trans_clean) and (src_folded in trans_folded or canon_folded in trans_folded)
+            elif src_folded not in trans_folded and canon_folded not in trans_folded:
                 ok = False
         item = dict(h, matched_in_translation=ok)
         updated_hits.append(item)
         if not ok:
-            if h.get("preserve_original") and h["target_zh"] in trans_clean:
+            if h.get("preserve_original") and (h.get("target_zh") or "").isascii():
+                issues.append(
+                    f"术语须保留原词: 译为中文时须紧跟括号写出原词 '{h['target_zh']}'（如 '（{h['target_zh']}）'）"
+                )
+            elif h.get("preserve_original") and h["target_zh"] in trans_clean:
                 # 译法对了、只是没带原词：提示要说准，否则重试时模型会反复改译法而不是补原词
                 issues.append(
                     f"术语须保留原词: 译为 '{h['target_zh']}' 时须紧跟括号写出原词，"
@@ -563,8 +592,14 @@ def verify_translation(
         # A correct label elsewhere does not legitimise an everyday mistranslation.
         if h.get("concept_code") == "data_controller" and "控制器" in trans_clean:
             issues.append("法律语境中的 controller 不得译为控制器")
-        if h.get("concept_code") == "data_processor" and "处理器" in trans_clean:
+        if h.get("concept_code") == "data_processor" and _BARE_PROCESSOR_RE.search(trans_clean):
             issues.append("法律语境中的 processor 不得译为处理器")
+    if (
+        re.search(r"\bdata\s+processors?\b|\bsous-traitants?\b", orig_clean, re.IGNORECASE)
+        and _BARE_PROCESSOR_RE.search(trans_clean)
+        and not any("processor 不得译为处理器" in x for x in issues)
+    ):
+        issues.append("法律语境中的 processor/sous-traitant 应译为数据处理者，不得译为处理器")
 
     # ② 原文中的数字、金额、百分比、年份、条号在译文中全部出现
     translated_norm = _normalize_digits(trans_clean)
@@ -621,7 +656,9 @@ def _build_translation_prompts(
         ),
         (
             "5. 【纯译文输出】：只输出翻译后的简体中文法条正文，"
-            "不要输出任何前言、后记、Markdown 代码块标记或说明。"
+            "不要输出任何前言、后记、Markdown 代码块标记或说明；"
+            "严禁输出“无法执行翻译”“待翻译原文仅包含”“版面行号”“受保护内容”等元解释。"
+            "若原文含 <Placeholder>，统一译为“（官方原件留空待填）”，不得输出 <Placeholder> 或 <占位符>。"
         ),
         "6. 【币种与单位】：保留原文货币符号/代码，$ 不得自行改成美元、新元或欧元。"
         "不得把金额改写为万元/百万；百分比保留 %，日期月份和引用条号必须精确对应原文。",
@@ -660,10 +697,16 @@ def _build_translation_prompts(
                 f"；出处: {h.get('source_reference', '')}"
             )
             if h.get("preserve_original"):
-                sys_lines.append(
-                    f"该词须保留原词 {h['source_term']}，并使用暂译 {h['target_zh']}；"
-                    "不得自行消除定义冲突。"
-                )
+                if (h.get("target_zh") or "").isascii():
+                    sys_lines.append(
+                        f"该词在本法规中有专门定义，译为中文时须在紧随其后的括号内原样保留外文原词“{h['target_zh']}”"
+                        f"（如“影响（{h['target_zh']}）”），不得省略原词“{h['target_zh']}”，也不得不译中文直接裸写外文。"
+                    )
+                else:
+                    sys_lines.append(
+                        f"该词须保留原词 {h['source_term']}，并使用暂译 {h['target_zh']}；"
+                        "不得自行消除定义冲突。"
+                    )
     if unmatched_terms:
         sys_lines.append("\n【专业词汇参考译法】：")
         for u in unmatched_terms:
@@ -681,13 +724,18 @@ def _build_translation_prompts(
         for m in protected_markers:
             counts[m] = counts.get(m, 0) + 1
         user_parts.append(
-            "完整性清单：下列每个标记必须原样输出，次数与原文相同（未注次数的只输出一次，包括版面行号，禁止省略）：\n"
+            "完整性清单：下列每个标记必须原样输出，次数与原文相同（未注次数的只输出一次，禁止省略或添加任何解释说明）：\n"
             + "\n".join(m if n == 1 else f"{m}（共 {n} 次）" for m, n in counts.items())
         )
     if req_nums:
         user_parts.append(f"必须在译文中原样保留的数字/金额/百分比/条号: {', '.join(req_nums)}")
     if glossary_hits:
-        must_zh = ", ".join(f"'{h['target_zh']}'" for h in glossary_hits)
+        must_zh = ", ".join(
+            f"中文译名（{h['target_zh']}）"
+            if h.get("preserve_original") and (h.get("target_zh") or "").isascii()
+            else f"'{h['target_zh']}'"
+            for h in glossary_hits
+        )
         user_parts.append(f"必须在译文中原样出现的强制术语译法: {must_zh}")
     if retry_issues:
         user_parts.append(
@@ -814,7 +862,7 @@ async def _call_llm_translate(
                     await asyncio.sleep(0.6 * (2**attempt))
                     continue
                 log.warning(
-                    "外部 LLM 翻译调用失败 (已重试 %d 次): %s", max_attempts, type(exc).__name__
+                    "外部翻译模型调用失败 (已重试 %d 次): %s", max_attempts, type(exc).__name__
                 )
                 return None
     return None
@@ -879,7 +927,13 @@ async def _semantic_issues(
 
 
 def _reusable(
-    cache: dict[str, str], chunk: str, clause: Clause, hits: list[dict], *, whole=True
+    cache: dict[str, str],
+    chunk: str,
+    clause: Clause,
+    hits: list[dict],
+    *,
+    whole: bool = True,
+    allow_flex_cjk: bool = False,
 ) -> bool:
     """A cached translation is used only if it still passes today's deterministic checks."""
     zh = cache.get(chunk_key(chunk, clause.language))
@@ -890,6 +944,7 @@ def _reusable(
         zh,
         hits,
         clause_number=clause.clause_number if whole else None,
+        allow_flex_cjk=False if whole else allow_flex_cjk,
     )
     return ok
 
@@ -907,10 +962,10 @@ async def _load_chunk_cache(
     rows = await session.execute(
         select(TranslationChunkCache.chunk_hash, TranslationChunkCache.translated_text).where(
             TranslationChunkCache.chunk_hash.in_(keys),
-            TranslationChunkCache.prompt_version == PROMPT_VERSION,
+            TranslationChunkCache.prompt_version.in_(COMPATIBLE_TRANSLATION_CACHE_PROMPTS),
         )
     )
-    return {k: v for k, v in rows.all()}
+    return {k: v for k, v in rows.all() if not _META_POLLUTION_RE.search(v or "")}
 
 
 async def _store_chunk_cache(
@@ -1072,6 +1127,8 @@ async def translate_clause(
                     total_tokens_out += tout2
                     total_duration_ms += dms2
     else:
+        parent_is_flex = _translatable_letters(source_text) >= MIN_FLEX_LETTERS
+
         # 多块长条款:每块独立提取命中术语并校验,单块失败重译一次,按顺序合并后再做整条总校验
         async def _translate_halves(piece: str):
             """A block that failed twice is cut in two at a sentence end and each half is
@@ -1085,13 +1142,18 @@ async def translate_clause(
             tin = tout = dms = 0
             model = model_name
             for half in halves:
+                if is_numeric_only(half) or (parent_is_flex and _translatable_letters(half) == 0):
+                    parts.append(half)
+                    continue
                 h_hits, h_unmatched = match_clause_glossary(half, effective_terms)
                 res = await _invoke_llm_translate(half, clause.language, h_hits, h_unmatched)
                 if res is None:
                     return None
                 zh, model, a_in, a_out, a_ms = res
-                tin, tout, dms = tin + a_in, tout + a_out, dms + a_ms
-                ok, found, _ = verify_translation(half, zh, h_hits)
+                tin, tout, dms = tin + a_in, tout + a_out, a_ms + dms
+                ok, found, _ = verify_translation(
+                    half, zh, h_hits, allow_flex_cjk=parent_is_flex
+                )
                 if ok:
                     found = await _semantic_issues(half, zh, clause.language, sem_cache)
                     ok = not found
@@ -1101,14 +1163,23 @@ async def translate_clause(
             return chr(10).join(parts), model, tin, tout, dms
 
         async def _translate_single_chunk(chunk_str: str) -> tuple[str | None, str, int, int, int]:
+            if is_numeric_only(chunk_str) or (
+                parent_is_flex and _translatable_letters(chunk_str) == 0
+            ):
+                # 多块长条款中的纯数字/纯矩阵代号子块原样直通，绝不送模型编造行号说明
+                return chunk_str, model_name, 0, 0, 0
             c_hits, c_unmatched = match_clause_glossary(chunk_str, effective_terms)
-            if _reusable(chunk_cache, chunk_str, clause, c_hits, whole=False):
+            if _reusable(
+                chunk_cache, chunk_str, clause, c_hits, whole=False, allow_flex_cjk=parent_is_flex
+            ):
                 return chunk_cache[chunk_key(chunk_str, clause.language)], model_name, 0, 0, 0
             r1 = await _invoke_llm_translate(chunk_str, clause.language, c_hits, c_unmatched)
             if r1 is None:
                 return None, model_name, 0, 0, 0
             c_zh, c_model, tin1, tout1, dms1 = r1
-            c_ok, c_issues, _ = verify_translation(chunk_str, c_zh, c_hits)
+            c_ok, c_issues, _ = verify_translation(
+                chunk_str, c_zh, c_hits, allow_flex_cjk=parent_is_flex
+            )
             if c_ok:
                 c_issues = await _semantic_issues(chunk_str, c_zh, clause.language, sem_cache)
                 c_ok = not c_issues
@@ -1124,7 +1195,9 @@ async def translate_clause(
                 )
                 if r2 is not None:
                     c_zh, c_model, tin2, tout2, dms2 = r2
-                    retry_ok, retry_issues, _ = verify_translation(chunk_str, c_zh, c_hits)
+                    retry_ok, retry_issues, _ = verify_translation(
+                        chunk_str, c_zh, c_hits, allow_flex_cjk=parent_is_flex
+                    )
                     if retry_ok:
                         retry_issues = await _semantic_issues(
                             chunk_str, c_zh, clause.language, sem_cache
@@ -1192,6 +1265,7 @@ async def translate_clause(
         if chunk_failures:
             passed = False
             issues.extend("分块校验未通过: " + issue for issue in chunk_failures)
+        passed = bool(passed and not issues)
         next_status = (
             TranslationReviewStatus.MACHINE_TRANSLATED.value
             if passed
@@ -1289,16 +1363,23 @@ async def translate_document_latest_version(
         .scalars()
         .all()
     )
+    from app.ingestion.models import ClauseReading
+    from app.ingestion.noise import clean_text
+
     out: list[ClauseTranslation] = []
     for c in clauses:
         from app.knowledge.legal_terms import translation_terms
 
+        rd_txt = await session.scalar(
+            select(ClauseReading.reading_text).where(ClauseReading.clause_id == c.id)
+        )
+        c_src = unwrap_layout_lines(clean_text(rd_txt or c.original_text))
         effective = select_effective_terms(
             await translation_terms(session, c, doc.country_code, terms),
             doc.country_code,
             c.language,
         )
-        required_hits, _ = match_clause_glossary(c.original_text, effective)
+        required_hits, _ = match_clause_glossary(c_src, effective)
         current = (
             await session.scalars(
                 select(ClauseTranslation).where(
@@ -1314,7 +1395,7 @@ async def translate_document_latest_version(
             row.review_status == "approved"
             or (
                 row.quality_check_passed
-                and verify_translation(c.original_text, row.translated_text, required_hits)[0]
+                and verify_translation(c_src, row.translated_text, required_hits)[0]
             )
             for row in current
         ):

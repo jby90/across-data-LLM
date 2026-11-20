@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,7 @@ MAX_EDIT_CHARS = 4000
 
 class DocumentInstance(Base):
     __tablename__ = "document_instances"
+    __table_args__ = (UniqueConstraint("task_id", "code", name="uq_document_instance_task_code"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -112,14 +113,19 @@ def build_xlsx(blocks: list[dict], title: str) -> bytes:
     import math
 
     from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
     from app.analysis.rich_text import strip_bold
+    from app.core.spreadsheet import write_safe_xlsx_cell
+
+    def _safe_xlsx_str(raw: object) -> str:
+        return ILLEGAL_CHARACTERS_RE.sub("", strip_bold(str(raw or "")))
 
     wb = Workbook()
     ws = wb.active
-    clean_sheet = strip_bold(title or "合规文件").translate(str.maketrans("", "", r"[]:*?/\\"))[:28] or "合规文件"
+    clean_sheet = _safe_xlsx_str(title or "合规文件").translate(str.maketrans("", "", r"[]:*?/\\"))[:28] or "合规文件"
     ws.title = clean_sheet
 
     max_cols = max([len(b.get("head") or []) for b in blocks if b.get("type") == "table"] + [3])
@@ -142,8 +148,8 @@ def build_xlsx(blocks: list[dict], title: str) -> bytes:
     total_char_width = sum(col_widths[:max_cols])
 
     def _merge_prose_row(row_idx: int, txt: str, font_obj: Font, min_h: int = 22) -> None:
-        val = strip_bold(txt or "")
-        c = ws.cell(row_idx, 1, val)
+        val = _safe_xlsx_str(txt or "")
+        c = write_safe_xlsx_cell(ws, row_idx, 1, val)
         c.font = font_obj
         c.alignment = wrap
         if max_cols > 1:
@@ -169,13 +175,13 @@ def build_xlsx(blocks: list[dict], title: str) -> bytes:
             r += 1
         elif kind == "list":
             for it in b.get("items") or []:
-                _merge_prose_row(r, f"· {strip_bold(str(it or ''))}", body_font, min_h=20)
+                _merge_prose_row(r, f"· {_safe_xlsx_str(it)}", body_font, min_h=20)
                 r += 1
         elif kind == "table":
             if not b.get("no_head"):
-                heads = [strip_bold(str(h or "")) for h in (b.get("head") or [])]
+                heads = [_safe_xlsx_str(h) for h in (b.get("head") or [])]
                 for j, h in enumerate(heads, 1):
-                    cell = ws.cell(r, j, h)
+                    cell = write_safe_xlsx_cell(ws, r, j, h)
                     cell.font = th_font
                     cell.fill = th_fill
                     cell.alignment = head_align
@@ -185,8 +191,8 @@ def build_xlsx(blocks: list[dict], title: str) -> bytes:
             for row in b.get("rows") or []:
                 max_lines = 1
                 for j, v in enumerate(row, 1):
-                    val = strip_bold(str(v or ""))
-                    cell = ws.cell(r, j, val)
+                    val = _safe_xlsx_str(v)
+                    cell = write_safe_xlsx_cell(ws, r, j, val)
                     cell.font = body_font
                     cell.alignment = wrap
                     cell.border = border

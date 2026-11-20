@@ -6,7 +6,8 @@ x-runtime: &runtime
   CYSH_ENV: prod
   CYSH_DATABASE_URL: postgresql+asyncpg://cyshuhe_runtime:${CYSH_RUNTIME_DB_PASSWORD:?required}@db:5432/cyshuhe
   CYSH_JWT_SECRET: ${CYSH_JWT_SECRET:?required}
-  CYSH_CORS_ORIGINS: ${CYSH_CORS_ORIGINS:-["http://localhost"]}
+  CYSH_CORS_ORIGINS: ${CYSH_CORS_ORIGINS:-["http://localhost:18080","http://127.0.0.1:18080"]}
+  CYSH_TRUSTED_PROXIES: ${CYSH_TRUSTED_PROXIES:-["127.0.0.1/32","10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"]}
   CYSH_ARCHIVE_DIR: /data/archive
   CYSH_LLM_API_KEY: ${CYSH_LLM_API_KEY:-}
   CYSH_LLM_BASE_URL: ${CYSH_LLM_BASE_URL:-https://api.deepseek.com/v1}

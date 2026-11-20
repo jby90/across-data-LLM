@@ -56,14 +56,115 @@ from app.knowledge.translator import translate_clause
 
 logger = logging.getLogger(__name__)
 
-EXTRACTOR_PROMPT_VERSION = "kg-extract-v4"
+EXTRACTOR_PROMPT_VERSION = "kg-extract-v5"
 # These releases share the same output schema and quote/type/judge-v2 contract.
 # Their already-complete results may be replayed, with fresh source/schema checks;
 # invalid responses were never cached. Future prompt versions are not auto-trusted.
-COMPATIBLE_EXTRACTION_CACHE_PROMPTS = ("kg-extract-v3", "kg-extract-v2")
+COMPATIBLE_EXTRACTION_CACHE_PROMPTS = ("kg-extract-v4", "kg-extract-v3", "kg-extract-v2")
 JUDGE_PROMPT_VERSION = "kg-judge-v2"
 STRUCTURAL_EXTRACTOR_MODEL = "structural-metadata-v2"
 LEGACY_RULE_EXTRACTOR_MODEL = "kg-rule-extractor-v1"
+
+_ULTRA_VAGUE_ENTITY_NAMES_ZH = frozenset(
+    {
+        "数据",
+        "信息",
+        "记录",
+        "资产",
+        "漏洞",
+        "痕迹",
+        "文档",
+        "文件",
+        "内容",
+        "规定",
+        "义务",
+        "要求",
+        "措施",
+        "罚款",
+        "处罚",
+        "罚金",
+        "监禁",
+        "制裁",
+        "违法",
+        "违规",
+        "责任",
+        "密码",
+        "口令",
+        "密钥",
+        "凭据",
+        "日志",
+        "标识",
+        "主体",
+        "权限",
+        "行为",
+        "系统",
+        "服务",
+        "活动",
+        "对象",
+        "范围",
+    }
+)
+_QUOTE_NUMERIC_PENALTY_RE = re.compile(
+    r"(?:\d+|%|百分之|mille|million|cent|trois|cinq|six|dix|douze|vingt|trente|cinquante|"
+    r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|thirty|fifty|hundred|thousand|months?|years?|days?)\b|"
+    r"ألف|آلاف|مليون|ملايين|مائة|مئة|دينار|جنيه|درهم|ليرة|dollars?|euros?|dirhams?|dinars?)",
+    re.IGNORECASE,
+)
+_PENALTY_QUANTIFIER_IN_TARGET_RE = re.compile(
+    r"(?:\d+|%|[一二三四五六七八九十百千万亿两]+\s*(?:年|个月|月|日|天|万|千|百|亿|%|倍|元|镑|第纳尔|迪拉姆|新元|美元|欧元))"
+)
+_GENERIC_HOLLOW_PENALTY_NAMES = frozenset(
+    {
+        "违规罚则",
+        "违法罚则",
+        "行政处罚",
+        "刑事处罚",
+        "罚款处罚",
+        "罚金处罚",
+        "监禁处罚",
+        "监禁与罚金",
+        "罚金或监禁",
+        "罚款或监禁",
+        "法律责任",
+        "违法处罚",
+    }
+)
+
+
+def validate_entity_specificity_and_penalty_fidelity(
+    *,
+    relation_type: RelationType,
+    source_type: NodeType,
+    source_name: str,
+    target_type: NodeType,
+    target_name: str,
+    evidence_quote: str,
+) -> tuple[bool, str, str]:
+    """第4道图谱质量闸门：实体颗粒度专属性与罚则量化保真校验。"""
+    for ntype, raw_name, role in (
+        (source_type, source_name, "源节点"),
+        (target_type, target_name, "目标节点"),
+    ):
+        clean_nm = re.sub(r"\s+", "", (raw_name or "").strip())
+        if ntype in (NodeType.DATA_CATEGORY, NodeType.OBLIGATION, NodeType.PENALTY):
+            if len(clean_nm) <= 1 or clean_nm in _ULTRA_VAGUE_ENTITY_NAMES_ZH:
+                return (
+                    False,
+                    "entity_specificity",
+                    f"{role}名称“{raw_name}”颗粒度过于宽泛空洞，缺乏可操作的合规限定语",
+                )
+
+    if relation_type == RelationType.PENALIZES and target_type == NodeType.PENALTY:
+        tgt_clean = (target_name or "").strip()
+        if _QUOTE_NUMERIC_PENALTY_RE.search(evidence_quote or ""):
+            has_quant = bool(_PENALTY_QUANTIFIER_IN_TARGET_RE.search(tgt_clean))
+            if tgt_clean in _GENERIC_HOLLOW_PENALTY_NAMES or not has_quant:
+                return (
+                    False,
+                    "penalty_numeric_fidelity",
+                    f"证据片段载有明确罚金数额、比例或监禁刑期，罚则节点“{tgt_clean}”不得省略量化标准",
+                )
+    return True, "passed", ""
 
 
 # 两层术语库种子:country_code=None 为跨国通用核心概念;country_code='SG' 等为各国法定覆盖
@@ -565,7 +666,7 @@ async def _call_llm_doc_relevance(
             reason=str(data.get("reason") or "大模型相关性判定完成"),
         )
     except Exception as exc:
-        logger.warning("LLM document relevance call failed: %s", type(exc).__name__)
+        logger.warning("法规相关性模型判定调用失败: %s", type(exc).__name__)
         return None
 
 
@@ -935,7 +1036,7 @@ async def _call_llm_judge(
             model_name=str(response_payload.get("model") or settings.llm_model),
         )
     except Exception as exc:
-        logger.warning("LLM semantic judge failed: %s", type(exc).__name__)
+        logger.warning("图谱语义裁判调用失败: %s", type(exc).__name__)
         return None
 
 
@@ -1043,6 +1144,25 @@ async def evaluate_kg_candidate(
     dst_enum = (
         target_type if isinstance(target_type, NodeType) else NodeType(str(target_type).upper())
     )
+
+    ok_spec, spec_stage, spec_reason = validate_entity_specificity_and_penalty_fidelity(
+        relation_type=rel_enum,
+        source_type=src_enum,
+        source_name=source_name,
+        target_type=dst_enum,
+        target_name=target_name,
+        evidence_quote=aligned,
+    )
+    if not ok_spec:
+        return CandidateEvaluationResult(
+            admitted=False,
+            stage=spec_stage,
+            aligned_quote=aligned,
+            confidence=0.0,
+            judge_verdict="no",
+            judge_reason=spec_reason,
+            review_status=GraphReviewStatus.REJECTED.value,
+        )
 
     verdict = await judge_extracted_relation(
         relation_type=rel_enum,
@@ -1193,10 +1313,11 @@ async def _call_llm_extract_clause(
         "- REGULATOR: 监管机构/主管机关\n"
         "- INSTRUMENT: 法规文件/法案/条例/指南\n"
         "- DATA_CATEGORY: 具体数据类型(如个人数据、敏感个人数据、车载黑匣子记录器数据、"
-        "车联网IoT数据、受托处理数据等)\n"
+        "车联网IoT数据、受托处理数据等；严禁抽取单字或泛词如“数据”“信息”“资产”“记录”“漏洞”)\n"
         "- OBLIGATION: 具体合规义务(如跨境传输同等保护义务、告知同意义务、数据泄露3日通报义务、"
-        "自动驾驶路测事前批准义务、黑匣子数据3年留存义务、CNDP/INPDP跨境申报许可义务等)\n"
-        "- PENALTY: 具体违规罚则(必须体现该条款规定的具体罚款金额、行政处罚或监禁刑期)\n"
+        "自动驾驶路测事前批准义务、黑匣子数据3年留存义务、CNDP/INPDP跨境申报许可义务等；严禁抽取泛词如“义务”“规定”)\n"
+        "- PENALTY: 具体违规罚则(name_zh 必须写明该条款规定的具体罚款金额区间、币种、营业额比例或监禁刑期，"
+        "如“3个月至1年监禁及3000至10000第纳尔罚金”，严禁笼统写“违规罚则”或“行政处罚”)\n"
         "【十二类关系枚举(RelationType)及强制类型约束】:\n"
         "- AMENDS: INSTRUMENT -> INSTRUMENT (仅当条款明确修订另一部法规时)\n"
         "- REPEALS: INSTRUMENT -> INSTRUMENT (仅当条款明确废止/撤销另一部法规或旧规定时)\n"
@@ -1318,6 +1439,12 @@ async def _find_matching_clause(
 
 async def seed_glossary_and_review_points(session: AsyncSession) -> dict[str, int]:
     """初始化两层法律术语库与解读要点确认单(幂等,自动关联库内真实证据条款)。"""
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended('seed_glossary_and_review_points', 0))")
+    )
     terms_added = 0
     points_added = 0
 
@@ -1385,8 +1512,10 @@ async def seed_glossary_and_review_points(session: AsyncSession) -> dict[str, in
                 )
             ).scalar_one_or_none()
 
-        session.add(
-            ReviewPoint(
+        res_rp = await session.execute(
+            pg_insert(ReviewPoint)
+            .values(
+                id=uuid.uuid4(),
                 country_code=rp["country_code"],
                 point_code=rp["point_code"],
                 title=rp["title"],
@@ -1397,8 +1526,9 @@ async def seed_glossary_and_review_points(session: AsyncSession) -> dict[str, in
                 term_id=term.id if term else None,
                 status=ReviewPointStatus.OPEN.value,
             )
+            .on_conflict_do_nothing(constraint="uq_review_points_code")
         )
-        points_added += 1
+        points_added += int(res_rp.rowcount or 0)
 
     await session.commit()
     return {"terms_added": terms_added, "review_points_added": points_added}
@@ -2260,8 +2390,17 @@ async def _extract_knowledge_for_country_impl(
                             target_name=item["target_name"],
                             document_title=doc.title,
                         )
+                        ok_spec, _, _ = validate_entity_specificity_and_penalty_fidelity(
+                            relation_type=RelationType(rel.type),
+                            source_type=st,
+                            source_name=item["source_name"],
+                            target_type=dt,
+                            target_name=item["target_name"],
+                            evidence_quote=evaluation.aligned_quote or "",
+                        )
                         if not (
                             ok
+                            and ok_spec
                             and evaluation.admitted
                             and evaluation.judge_verdict == "yes"
                             and evaluation.judge_model
@@ -2765,25 +2904,50 @@ async def handle_new_version_linkage(
         .scalars()
         .all()
     )
-    new_by_hash = {c.text_hash: c for c in new_clauses}
+    new_by_hash: dict[str, list[Clause]] = {}
+    for c in new_clauses:
+        new_by_hash.setdefault(c.text_hash, []).append(c)
+
+    from app.ingestion.noise import clean_text
+    from app.knowledge.legal_terms import translation_terms
+    from app.knowledge.translator import (
+        match_clause_glossary,
+        select_effective_terms,
+        unwrap_layout_lines,
+        verify_translation,
+    )
+
+    doc_obj = await session.get(Document, new_version.document_id)
+    doc_cc = doc_obj.country_code.upper() if doc_obj and doc_obj.country_code else "SG"
+    base_terms = list(
+        (
+            await session.scalars(
+                select(GlossaryTerm).where(
+                    (GlossaryTerm.country_code == doc_cc) | GlossaryTerm.country_code.is_(None)
+                )
+            )
+        ).all()
+    )
 
     stale_tr = 0
     stale_edges = 0
     reused_tr = 0
 
     for old_c in old_clauses:
-        tr = (
-            await session.execute(
-                select(ClauseTranslation)
-                .where(
-                    ClauseTranslation.clause_id == old_c.id,
-                    ClauseTranslation.is_current.is_(True),
-                    ClauseTranslation.review_status != TranslationReviewStatus.SUPERSEDED.value,
+        curr_trs = list(
+            (
+                await session.scalars(
+                    select(ClauseTranslation)
+                    .where(
+                        ClauseTranslation.clause_id == old_c.id,
+                        ClauseTranslation.is_current.is_(True),
+                        ClauseTranslation.review_status != TranslationReviewStatus.SUPERSEDED.value,
+                    )
+                    .order_by(ClauseTranslation.updated_at.desc())
                 )
-                .order_by(ClauseTranslation.updated_at.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+            ).all()
+        )
+        tr = curr_trs[0] if len(curr_trs) == 1 else None
         edges = list(
             (
                 await session.execute(
@@ -2796,48 +2960,68 @@ async def handle_new_version_linkage(
             .scalars()
             .all()
         )
-        matched_new = new_by_hash.get(old_c.text_hash)
-        if matched_new is not None:
-            if tr is not None:
-                exists_new_tr = (
-                    await session.execute(
-                        select(ClauseTranslation.id).where(
-                            ClauseTranslation.clause_id == matched_new.id,
-                            ClauseTranslation.review_status
-                            != TranslationReviewStatus.SUPERSEDED.value,
+        matched_list = new_by_hash.get(old_c.text_hash, [])
+        if matched_list:
+            if (
+                tr is not None
+                and tr.quality_check_passed
+                and tr.review_status
+                in (
+                    TranslationReviewStatus.APPROVED.value,
+                    TranslationReviewStatus.MACHINE_TRANSLATED.value,
+                    TranslationReviewStatus.PENDING_REVIEW.value,
+                )
+            ):
+                eff_src = unwrap_layout_lines(clean_text(old_c.original_text))
+                c_terms = await translation_terms(session, old_c, doc_cc, base_terms)
+                eff_terms = select_effective_terms(c_terms, doc_cc, old_c.language)
+                hits, unmatched = match_clause_glossary(eff_src, eff_terms)
+                recheck_ok, recheck_issues, checked_hits = verify_translation(
+                    eff_src, tr.translated_text, hits
+                )
+                if not recheck_ok:
+                    continue
+                for matched_new in matched_list:
+                    exists_new_tr = (
+                        await session.execute(
+                            select(ClauseTranslation.id).where(
+                                ClauseTranslation.clause_id == matched_new.id,
+                                ClauseTranslation.review_status
+                                != TranslationReviewStatus.SUPERSEDED.value,
+                            )
                         )
-                    )
-                ).first()
-                if not exists_new_tr:
-                    session.add(
-                        ClauseTranslation(
-                            clause_id=matched_new.id,
-                            translated_text=tr.translated_text,
-                            engine=tr.engine,
-                            model_name=tr.model_name,
-                            prompt_version=tr.prompt_version,
-                            tokens_in=0,  # Reuse is not a new paid model call.
-                            tokens_out=0,
-                            duration_ms=0,
-                            glossary_hits=tr.glossary_hits,
-                            unmatched_terms=tr.unmatched_terms,
-                            quality_check_passed=tr.quality_check_passed,
-                            quality_issues=tr.quality_issues,
-                            review_status=tr.review_status,
-                            reviewer_id=tr.reviewer_id,
-                            reviewer_note=tr.reviewer_note,
-                            reviewed_at=tr.reviewed_at,
-                            updated_at=datetime.now(UTC),
+                    ).first()
+                    if not exists_new_tr:
+                        session.add(
+                            ClauseTranslation(
+                                clause_id=matched_new.id,
+                                translated_text=tr.translated_text,
+                                engine=tr.engine,
+                                model_name=tr.model_name,
+                                prompt_version=tr.prompt_version,
+                                tokens_in=0,  # Reuse is not a new paid model call.
+                                tokens_out=0,
+                                duration_ms=0,
+                                glossary_hits=checked_hits,
+                                unmatched_terms=unmatched,
+                                quality_check_passed=True,
+                                quality_issues=recheck_issues,
+                                review_status=tr.review_status,
+                                reviewer_id=tr.reviewer_id,
+                                reviewer_note=tr.reviewer_note,
+                                reviewed_at=tr.reviewed_at,
+                                updated_at=datetime.now(UTC),
+                            )
                         )
-                    )
-                    reused_tr += 1
+                        reused_tr += 1
         else:
-            if tr is not None and tr.review_status != TranslationReviewStatus.STALE.value:
-                from app.knowledge.history import snapshot
+            for stale_cand in curr_trs:
+                if stale_cand.review_status != TranslationReviewStatus.STALE.value:
+                    from app.knowledge.history import snapshot
 
-                snapshot(session, tr, "before_version_stale")
-                tr.review_status = TranslationReviewStatus.STALE.value
-                stale_tr += 1
+                    snapshot(session, stale_cand, "before_version_stale")
+                    stale_cand.review_status = TranslationReviewStatus.STALE.value
+                    stale_tr += 1
             for e in edges:
                 if e.review_status != GraphReviewStatus.STALE.value:
                     from app.knowledge.history import snapshot

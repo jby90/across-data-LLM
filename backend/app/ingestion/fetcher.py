@@ -35,9 +35,22 @@ class FetchResult:
     not_modified: bool = False
 
 
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None and _ip_blocked(ip.ipv4_mapped):
+            return True
+        if ip.sixtofour is not None and _ip_blocked(ip.sixtofour):
+            return True
+        if ip.teredo is not None and (_ip_blocked(ip.teredo[0]) or _ip_blocked(ip.teredo[1])):
+            return True
+        if ip in _NAT64_NET:
+            return True
     return (
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_reserved
@@ -47,13 +60,23 @@ def _ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 
 def is_blocked_host(host: str) -> bool:
-    """字面量判断:localhost、内网/回环/链路本地 IP、常见内部域名后缀。"""
+    """字面量判断:localhost、内网/回环/链路本地/CGNAT IP、变形数字 IP、常见内部域名后缀。"""
     h = host.lower().rstrip(".").strip("[]")
-    if h == "localhost" or h.endswith((".localhost", ".local", ".internal", ".lan", ".intranet")):
+    blocked_suffixes = (".localhost", ".local", ".internal", ".lan", ".intranet")
+    if not h or h == "localhost" or h.endswith(blocked_suffixes):
         return True
     try:
         return _ip_blocked(ipaddress.ip_address(h))
     except ValueError:
+        pass
+    # 拦截十进制/八进制/十六进制变形 IP 字面量（如 http://2130706433/ 或 http://0177.0.0.1/）
+    segs = h.split(".")
+    if all(s and (s.isdigit() or s.startswith("0x")) for s in segs):
+        return True
+    try:
+        packed = socket.inet_aton(h)
+        return _ip_blocked(ipaddress.IPv4Address(packed))
+    except OSError:
         return False
 
 
@@ -135,6 +158,16 @@ class PoliteFetcher:
                 await self._sleep(wait)
         self._last_hit[host] = self._clock()
 
+    async def _stream_bytes(self, resp: httpx.Response, limit: int) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in resp.aiter_bytes():
+            total += len(chunk)
+            if total > limit:
+                raise FetchError(f"响应超过大小上限: {resp.url}")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
     async def _robots_for(self, url: str) -> RobotFileParser | None:
         parts = urlsplit(url)
         origin = f"{parts.scheme}://{parts.netloc}"
@@ -142,58 +175,77 @@ class PoliteFetcher:
             return self._robots[origin]
         robots_url = f"{origin}/robots.txt"
         parser: RobotFileParser | None = None
+        robots_limit = min(self._max_bytes, 2 * 1024 * 1024)
         try:
             current_robots_url = robots_url
-            resp: httpx.Response | None = None
+            status_code = 0
+            ctype = ""
+            robots_bytes = b""
             for _ in range(min(self._max_redirects, 5) + 1):
                 r_host = await self._check_target(current_robots_url)
                 await self._throttle(r_host)
+                redirect_loc: str | None = None
                 try:
-                    resp = await self._client.get(
+                    async with self._client.stream(
+                        "GET",
                         current_robots_url,
                         headers={"User-Agent": self._ua},
                         follow_redirects=False,
                         timeout=15,
-                    )
+                    ) as resp:
+                        status_code = resp.status_code
+                        ctype = resp.headers.get("content-type", "").lower()
+                        if status_code in (301, 302, 303, 307, 308):
+                            redirect_loc = resp.headers.get("location")
+                        elif status_code == 200:
+                            robots_bytes = await self._stream_bytes(resp, robots_limit)
                 except httpx.HTTPError:
                     if self._fallback_client is None:
                         raise
-                    resp = await self._fallback_client.get(
+                    async with self._fallback_client.stream(
+                        "GET",
                         current_robots_url,
                         headers={"User-Agent": self._ua},
                         follow_redirects=False,
                         timeout=15,
-                    )
-                if resp.status_code in (301, 302, 303, 307, 308):
-                    loc = resp.headers.get("location")
-                    if not loc:
+                    ) as resp:
+                        status_code = resp.status_code
+                        ctype = resp.headers.get("content-type", "").lower()
+                        if status_code in (301, 302, 303, 307, 308):
+                            redirect_loc = resp.headers.get("location")
+                        elif status_code == 200:
+                            robots_bytes = await self._stream_bytes(resp, robots_limit)
+                if status_code in (301, 302, 303, 307, 308):
+                    if not redirect_loc:
                         break
-                    current_robots_url = urljoin(current_robots_url, loc)
+                    current_robots_url = urljoin(current_robots_url, redirect_loc)
                     continue
                 break
-            assert resp is not None
-            ctype = resp.headers.get("content-type", "").lower()
             final_path = urlsplit(current_robots_url).path.lower()
-            if (
-                resp.status_code == 200
-                and "text/html" not in ctype
-                and not final_path.endswith("/error")
-            ):
+            robots_text = (
+                robots_bytes.decode("utf-8", errors="replace") if status_code == 200 else ""
+            )
+            sniff_head = robots_text[:512].lstrip("\ufeff \t\r\n").lower()
+            looks_html = (
+                "text/html" in ctype
+                or final_path.endswith("/error")
+                or sniff_head.startswith(("<!doctype html", "<html"))
+                or (sniff_head.startswith("<!--") and "<html" in sniff_head)
+            )
+            if status_code == 200 and not looks_html:
                 parser = RobotFileParser()
-                parser.parse(resp.text.splitlines())
+                parser.parse(robots_text.splitlines())
                 self._robots_note[origin] = "HTTP 200,已读取规则"
-            elif resp.status_code == 200 and (
-                "text/html" in ctype or final_path.endswith("/error")
-            ):
+            elif status_code == 200 and looks_html:
                 parser = None
                 self._robots_note[origin] = "返回 HTML/错误页，无法确认 robots 规则，不抓取"
-            elif resp.status_code in (404, 410):
+            elif status_code in (404, 410):
                 parser = RobotFileParser()  # 没有 robots.txt:视为允许
                 parser.parse([])
-                self._robots_note[origin] = f"HTTP {resp.status_code},无 robots.txt,视为允许"
+                self._robots_note[origin] = f"HTTP {status_code},无 robots.txt,视为允许"
             else:
                 parser = None  # Authentication/rate limits/5xx never imply permission.
-                self._robots_note[origin] = f"HTTP {resp.status_code},无法确认规则,保守起见不抓取"
+                self._robots_note[origin] = f"HTTP {status_code},无法确认规则,保守起见不抓取"
         except (httpx.HTTPError, BlockedError, FetchError) as e:
             parser = None
             self._robots_note[origin] = f"网络错误({type(e).__name__}),无法确认规则,不抓取"
@@ -291,16 +343,19 @@ class PoliteFetcher:
     async def post_form(self, url: str, form: dict[str, str]) -> FetchResult:
         """礼貌 POST 表单(用于官方目录的公开检索接口,如行业标准信息服务平台)。规则同 get。"""
         host = await self._check_target(url)
+        if not await self._robots_allowed(url):
+            raise BlockedError(f"robots.txt 禁止抓取: {url}")
         await self._throttle(host)
         headers = {"User-Agent": self._ua, "X-Requested-With": "XMLHttpRequest"}
         try:
-            resp = await self._client.post(url, data=form, headers=headers, follow_redirects=False)
-            if resp.status_code >= 400:
-                raise FetchError(f"HTTP {resp.status_code}: {url}")
-            if len(resp.content) > self._max_bytes:
-                raise FetchError(f"响应超过大小上限: {url}")
-            mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-            return FetchResult(url, resp.status_code, resp.content, mime, None, None)
+            async with self._client.stream(
+                "POST", url, data=form, headers=headers, follow_redirects=False
+            ) as resp:
+                if resp.status_code >= 400:
+                    raise FetchError(f"HTTP {resp.status_code}: {url}")
+                body = await self._stream_bytes(resp, self._max_bytes)
+                mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                return FetchResult(url, resp.status_code, body, mime, None, None)
         except httpx.HTTPError as e:
             raise FetchError(f"网络错误: {url}: {e}") from e
 
@@ -315,6 +370,8 @@ class PoliteFetcher:
 
         遵守与 get 相同的内网拦截与同源限速规则。"""
         host = await self._check_target(url)
+        if not await self._robots_allowed(url):
+            raise BlockedError(f"robots.txt 禁止抓取: {url}")
         await self._throttle(host)
         headers = {
             "User-Agent": self._ua,
@@ -323,14 +380,13 @@ class PoliteFetcher:
             **(extra_headers or {}),
         }
         try:
-            resp = await self._client.post(
-                url, json=payload, headers=headers, follow_redirects=False
-            )
-            if resp.status_code >= 400:
-                raise FetchError(f"HTTP {resp.status_code}: {url}")
-            if len(resp.content) > self._max_bytes:
-                raise FetchError(f"响应超过大小上限: {url}")
-            mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-            return FetchResult(url, resp.status_code, resp.content, mime, None, None)
+            async with self._client.stream(
+                "POST", url, json=payload, headers=headers, follow_redirects=False
+            ) as resp:
+                if resp.status_code >= 400:
+                    raise FetchError(f"HTTP {resp.status_code}: {url}")
+                body = await self._stream_bytes(resp, self._max_bytes)
+                mime = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                return FetchResult(url, resp.status_code, body, mime, None, None)
         except httpx.HTTPError as e:
             raise FetchError(f"网络错误: {url}: {e}") from e

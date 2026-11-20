@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.analysis.citation_policy import review_label, review_overview
@@ -86,7 +86,7 @@ async def _guarded_run(
     async with session_factory() as session:
         try:
             await run_pipeline(session, task_id)
-        except Exception as exc:  # noqa: BLE001 - 兜底:任何异常都要把任务标记为失败
+        except Exception:  # noqa: BLE001 - 兜底:任何异常都要把任务标记为失败
             log.exception("合规评估流程异常")
             await session.rollback()
             task = await session.get(AnalysisTask, task_id)
@@ -110,7 +110,7 @@ async def _guarded_run(
                     name="流水线异常终止",
                     phase="error",
                     status="failed",
-                    summary=f"流水线异常终止: {type(exc).__name__}: {exc}",
+                    summary="评估流程执行中断，系统已记录现场状态，请稍后重试",
                     calls=[],
                     inp={
                         "failed_phase": context.get("phase"),
@@ -138,15 +138,17 @@ async def _add_trace(
     resolution: str | None = None,
     commit: bool = True,
 ) -> AnalysisStepTrace:
+    await session.scalar(
+        select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update()
+    )
     seq = (
-        len(
-            (
-                await session.execute(
-                    select(AnalysisStepTrace.id).where(AnalysisStepTrace.task_id == task.id)
+        int(
+            await session.scalar(
+                select(func.coalesce(func.max(AnalysisStepTrace.seq_no), 0)).where(
+                    AnalysisStepTrace.task_id == task.id
                 )
             )
-            .scalars()
-            .all()
+            or 0
         )
         + 1
     )
@@ -1705,8 +1707,17 @@ async def _compile(
                     },
                 }
             )
+            _inline_risk_zh = {
+                "CRITICAL": "极高风险",
+                "HIGH": "高风险",
+                "MEDIUM": "中风险",
+                "LOW": "低风险",
+                "INFO": "提示",
+                "PENDING_VERIFICATION": "待核实",
+            }
+            r_lbl = _inline_risk_zh.get(str(risk).upper(), str(risk))
             lines.append(
-                f"- {tag} {f.get('obligation', '')}(风险:{risk}；{review_label(citations[-1])})"
+                f"- {tag} {f.get('obligation', '')}(风险：{r_lbl}；{review_label(citations[-1])})"
             )
             if source_notice(cand.source_nature):
                 lines.append(f"  来源说明：{source_notice(cand.source_nature)}。")
@@ -1879,6 +1890,9 @@ async def _compile(
             summary = summary.replace(
                 "尚有维度存在业务事实或可用法源缺口,已逐维标注,本报告为部分样稿。", ""
             )
+    await session.scalar(
+        select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update()
+    )
     rvs = list(
         (await session.execute(select(ReportVersion).where(ReportVersion.task_id == task.id)))
         .scalars()

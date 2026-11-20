@@ -51,7 +51,7 @@ SYSTEM_PROMPT = (
     "没有规范性要求。\n"
     "注意：as the case may be、may be prescribed、shall have jurisdiction、"
     "shall consist of 这类不是规范，标 declarative。\n"
-    "src 必须逐字摘自原文，tgt 必须逐字摘自译文，各自不超过 200 字；"
+    "src 必须逐字摘自原文，tgt 必须逐字摘自译文，各自不超过 360 字；"
     "译文里确实找不到对应内容时 tgt 填 null，tgt_type 填 null。\n"
     "原文有乱码或识别噪声时照样逐字摘录。覆盖原文的全部实质内容，不要只挑一部分。\n"
     '严格输出 JSON：{"pairs":[{"src":"...",'

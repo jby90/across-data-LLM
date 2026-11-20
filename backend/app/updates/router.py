@@ -200,7 +200,8 @@ async def _advice_for(session, subject, document):
 
 async def _subscription_item(session, user, notification) -> dict:
     """A subscribed change: before/after, impact, what to do, and this enterprise's projects it touches."""
-    subject = f"change:{notification.change_id}" if notification.change_id else notification.dedupe_key.split(":", 1)[1]
+    dk = str(notification.dedupe_key or "")
+    subject = f"change:{notification.change_id}" if notification.change_id else (dk.split(":", 1)[1] if ":" in dk else dk)
     advice = await subs.advice_out(session, subject)
     related: list[dict] = []
     if notification.change_id:
@@ -232,7 +233,12 @@ async def _subscription_item(session, user, notification) -> dict:
     from app.admission.models import AdmissionEntry, AdmissionProject
     from app.ingestion.models import Clause
 
-    doc = await session.get(Document, uuid.UUID(notification.link.split("doc=")[1].split("&")[0])) if "doc=" in (notification.link or "") else None
+    doc = None
+    if "doc=" in (notification.link or ""):
+        try:
+            doc = await session.get(Document, uuid.UUID(notification.link.split("doc=", 1)[1].split("&", 1)[0]))
+        except (ValueError, IndexError):
+            doc = None
     base = None
     if doc is not None and not notification.change_id:
         from app.analysis.document_narrative import DocumentNarrative
@@ -385,21 +391,43 @@ async def list_weekly_digests(
 async def set_subscription(body: SubscriptionIn, user: UserDep, session: SessionDep):
     """Save what to subscribe to; nothing chosen = no subscription. Changes collected from now on
     are pushed (not the ones before)."""
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     opts = await subs.options(session)
     allowed = {k: {o["value"] for o in v} for k, v in opts.items()}
     chosen = {k: list(dict.fromkeys(v for v in getattr(body, k) if v in allowed[k])) for k in allowed}
-    sub = await org_subscription(session, user.org_id)
     if not any(chosen.values()):
-        if sub is not None:
-            await session.delete(sub)
+        await session.execute(sa_delete(UserSubscription).where(UserSubscription.org_id == user.org_id))
         await session.commit()
         return await _subscription_out(session, None)
-    if sub is None:
-        sub = UserSubscription(org_id=user.org_id, user_id=user.user_id)
-        session.add(sub)
-    sub.countries, sub.doc_types, sub.topics = chosen["countries"], chosen["doc_types"], chosen["topics"]
+    now = now_utc()
+    stmt = (
+        pg_insert(UserSubscription)
+        .values(
+            id=uuid.uuid4(),
+            org_id=user.org_id,
+            user_id=user.user_id,
+            countries=chosen["countries"],
+            doc_types=chosen["doc_types"],
+            topics=chosen["topics"],
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=["org_id"],
+            set_={
+                "user_id": user.user_id,
+                "countries": chosen["countries"],
+                "doc_types": chosen["doc_types"],
+                "topics": chosen["topics"],
+                "updated_at": now,
+            },
+        )
+    )
+    await session.execute(stmt)
     await session.commit()
-    await session.refresh(sub)
+    sub = await org_subscription(session, user.org_id)
     return await _subscription_out(session, sub)
 
 
@@ -561,13 +589,33 @@ async def discoveries(
 
 @admin_router.get("/sla")
 async def sla(_: AdminDep, session: SessionDep):
+    from sqlalchemy import case
+
+    from app.iam import service as iam_service
+    from app.iam.models import Organization
+
     now = now_utc()
+    trial_pat = f"%{iam_service.TRIAL_ORG_MARKER}%"
     groups = (
         select(
             UpdateImpact.task_id,
             UpdateImpact.change_id,
             func.bool_or(UpdateImpact.state == "open").label("is_open"),
             func.min(UpdateImpact.due_at).label("due"),
+            func.bool_or(
+                case(
+                    (UpdateImpact.state == "open", UpdateImpact.due_at < now),
+                    else_=func.coalesce(UpdateImpact.resolved_at, UpdateImpact.detected_at)
+                    > UpdateImpact.due_at,
+                )
+            ).label("was_overdue"),
+        )
+        .outerjoin(Organization, Organization.id == UpdateImpact.org_id)
+        .where(
+            or_(
+                UpdateImpact.org_id.is_(None),
+                and_(Organization.is_active.is_(True), ~Organization.name.like(trial_pat)),
+            )
         )
         .group_by(UpdateImpact.task_id, UpdateImpact.change_id)
         .subquery()
@@ -578,7 +626,7 @@ async def sla(_: AdminDep, session: SessionDep):
                 select(
                     func.count().filter(groups.c.is_open.is_(True)).label("pending_updates"),
                     func.count()
-                    .filter(groups.c.is_open.is_(True) & (groups.c.due < now))
+                    .filter(groups.c.was_overdue.is_(True))
                     .label("overdue_72h"),
                     func.count().filter(groups.c.is_open.is_(False)).label("resolved_updates"),
                 ).select_from(groups)
@@ -600,6 +648,13 @@ async def sla(_: AdminDep, session: SessionDep):
                     func.count()
                     .filter(known & tracked.c.first_parsed_at.is_not(None))
                     .label("completed"),
+                    func.count()
+                    .filter(
+                        known
+                        & tracked.c.first_parsed_at.is_not(None)
+                        & (tracked.c.first_parsed_at <= tracked.c.discovered_at + timedelta(days=30))
+                    )
+                    .label("completed_on_time"),
                     func.count()
                     .filter(
                         known
@@ -637,7 +692,12 @@ async def sla(_: AdminDep, session: SessionDep):
         select(func.count())
         .select_from(UserNotification)
         .join(UpdateImpact, UpdateImpact.id == UserNotification.impact_id)
-        .where(UserNotification.created_at > UpdateImpact.due_at)
+        .join(Organization, Organization.id == UserNotification.org_id)
+        .where(
+            UserNotification.created_at > UpdateImpact.due_at,
+            Organization.is_active.is_(True),
+            ~Organization.name.like(trial_pat),
+        )
     )
     rows = (
         (await session.execute(query.order_by(RegulatoryDiscovery.discovered_at.desc()).limit(50)))
@@ -833,10 +893,11 @@ async def _build_sla_linkage_report(session: AsyncSession) -> dict:
         is not None
     )
     healthy_sites = max(0, active_sites - failed_sites)
-    patrol_rate = _capped_pct(healthy_sites, active_sites) if active_sites > 0 else 100.0
+    patrol_rate = _capped_pct(healthy_sites, active_sites) if active_sites > 0 else 0.0
 
     intake = sla_data["intake"]
     completed_in = int(intake["completed"] or 0)
+    completed_on_time_in = int(intake.get("completed_on_time") or 0)
     pending_in = int(intake["pending"] or 0)
     overdue_30d = int(intake["overdue_30d"] or 0)
     tracked_in = completed_in + pending_in
@@ -910,11 +971,36 @@ async def _build_sla_linkage_report(session: AsyncSession) -> dict:
         if d["overdue"]:
             bucket["overdue_30d"] += 1
 
+    from sqlalchemy import text as _sa_text
+
     doc_rows = (
         await session.execute(
-            select(Document.country_code, func.count(Document.id))
-            .where(Document.relevance.in_(("relevant", "related")))
-            .group_by(Document.country_code)
+            _sa_text(
+                """
+                WITH latest_dv AS (
+                    SELECT DISTINCT ON (document_id)
+                           id, document_id, legal_status
+                    FROM document_versions
+                    WHERE state = 'parsed'
+                      AND review_status <> 'rejected'
+                      AND coalesce(legal_status, 'in_force') <> 'draft'
+                    ORDER BY document_id, version_no DESC, parse_revision DESC
+                )
+                SELECT d.country_code, count(DISTINCT d.id) AS doc_cnt
+                FROM documents d
+                JOIN latest_dv dv ON dv.document_id = d.id
+                WHERE d.relevance IN ('relevant', 'related')
+                  AND coalesce(dv.legal_status, 'in_force') NOT IN ('repealed', 'draft')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM knowledge_change_proposals p
+                      WHERE p.target_type = 'documents'
+                        AND p.target_id = d.id
+                        AND p.status IN ('pending_review', 'approved')
+                        AND coalesce((p.payload->>'safety_hold')::boolean, false) = true
+                  )
+                GROUP BY d.country_code
+                """
+            )
         )
     ).all()
     docs_by_cc = {
@@ -922,22 +1008,25 @@ async def _build_sla_linkage_report(session: AsyncSession) -> dict:
         for cc, n in doc_rows
         if cc and cc not in ("ZZ", "INTL", "--")
     }
-    total_library_docs = int(
+    total_library_docs = sum(int(n or 0) for cc, n in doc_rows if cc)
+    intake_denom = tracked_in
+    intake_numer = min(completed_in, max(0, completed_on_time_in))
+    intake_rate = _capped_pct(intake_numer, intake_denom) if intake_denom > 0 else 100.0
+
+    from app.iam import service as iam_service
+    from app.iam.models import Organization
+
+    trial_pat = f"%{iam_service.TRIAL_ORG_MARKER}%"
+    notices_pushed = int(
         (
             await session.scalar(
-                select(func.count(Document.id)).where(
-                    Document.relevance.in_(("relevant", "related"))
-                )
+                select(func.count())
+                .select_from(UserNotification)
+                .join(Organization, Organization.id == UserNotification.org_id)
+                .where(Organization.is_active.is_(True), ~Organization.name.like(trial_pat))
             )
         )
         or 0
-    )
-    intake_denom = max(tracked_in, total_library_docs) if tracked_in > 0 else 0
-    intake_numer = max(0, completed_in - overdue_30d)
-    intake_rate = _capped_pct(intake_numer, intake_denom) if intake_denom > 0 else 100.0
-
-    notices_pushed = int(
-        (await session.scalar(select(func.count()).select_from(UserNotification))) or 0
     )
 
     all_ccs = [
@@ -1017,6 +1106,7 @@ async def export_updates_sla_report(_: AdminDep, session: SessionDep) -> Respons
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     from app.analysis.report_exporter import content_disposition
+    from app.core.spreadsheet import write_safe_xlsx_cell
 
     rep = await _build_sla_linkage_report(session)
     wb = Workbook()
@@ -1029,7 +1119,8 @@ async def export_updates_sla_report(_: AdminDep, session: SessionDep) -> Respons
     head_font = Font(name="Microsoft YaHei", size=11, bold=True, color="000000")
     body_font = Font(name="Microsoft YaHei", size=10, color="000000")
 
-    ws.append(["指标维度", "核心考核口径", "当前统计值", "达标率 / 状态"])
+    for col_i, h in enumerate(["指标维度", "核心考核口径", "当前统计值", "达标率 / 状态"], 1):
+        write_safe_xlsx_cell(ws, 1, col_i, h)
     r72 = rep["response_72h"]
     pat = rep["patrol_timeliness"]
     in30 = rep["intake_30d"]
@@ -1060,8 +1151,9 @@ async def export_updates_sla_report(_: AdminDep, session: SessionDep) -> Respons
             f"累计推送企业提醒 {lnk['enterprise_notices_pushed']} 条",
         ],
     ]
-    for sr in summary_rows:
-        ws.append(sr)
+    for sr_i, sr in enumerate(summary_rows, 2):
+        for col_i, val in enumerate(sr, 1):
+            write_safe_xlsx_cell(ws, sr_i, col_i, val)
     for row_idx, row_cells in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row), 1):
         for cell in row_cells:
             cell.border = border
@@ -1076,9 +1168,13 @@ async def export_updates_sla_report(_: AdminDep, session: SessionDep) -> Respons
         ws.column_dimensions[col_letter].width = width
 
     ws2 = wb.create_sheet("分国别入库与联动明细")
-    ws2.append(["国家或地区", "在库生效法规数", "新发现跟踪数", "已完成入库数", "30日超期数", "条文修订记录", "国家简报状态", "关联准入事项数"])
-    for c in rep["by_country"]:
-        ws2.append([
+    for col_i, h in enumerate(
+        ["国家或地区", "在库生效法规数", "新发现跟踪数", "已完成入库数", "30日超期数", "条文修订记录", "国家简报状态", "关联准入事项数"],
+        1,
+    ):
+        write_safe_xlsx_cell(ws2, 1, col_i, h)
+    for c_i, c in enumerate(rep["by_country"], 2):
+        row_vals = [
             c["country_name_zh"],
             c["in_library_count"],
             c["discovered_count"],
@@ -1087,7 +1183,9 @@ async def export_updates_sla_report(_: AdminDep, session: SessionDep) -> Respons
             c["changes_count"],
             "已发布" if c["whitepaper_published"] else ("国内法规底座" if c["country_code"] == "CN" else "未发布"),
             c["admission_entries"],
-        ])
+        ]
+        for col_i, val in enumerate(row_vals, 1):
+            write_safe_xlsx_cell(ws2, c_i, col_i, val, neutralize_formula_prefix=True)
     for row_idx, row_cells in enumerate(ws2.iter_rows(min_row=1, max_row=ws2.max_row), 1):
         for cell in row_cells:
             cell.border = border

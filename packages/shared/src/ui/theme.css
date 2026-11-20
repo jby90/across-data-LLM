@@ -33,6 +33,11 @@
   --el-font-size-extra-small: 13px;
   --el-font-weight-primary: 600;
   --el-checkbox-font-size: 13px;
+  --el-messagebox-error-font-size: 13px;
+  --el-pagination-font-size-small: 13px;
+  --el-tag-font-size: 13px;
+  --el-badge-font-size: 13px;
+  --el-anchor-font-size: 13px;
   --el-component-size: 36px;
   --el-component-size-small: 28px;
 }
@@ -568,6 +573,61 @@ small {
 .el-form-item__label {
   font-size: 14px;
   color: #4b5e6c;
+}
+.el-input .el-input__count,
+.el-input .el-input__count .el-input__count-inner,
+.el-textarea .el-input__count,
+.el-form-item__error,
+.el-form-item--small,
+.el-message-box,
+.el-message-box__errormsg,
+.el-popper,
+.el-button--small,
+.el-cascader--small,
+.el-checkbox-button--small .el-checkbox-button__inner,
+.el-checkbox.el-checkbox--small .el-checkbox__label,
+.el-checkbox.is-bordered.el-checkbox--small .el-checkbox__label,
+.el-date-table,
+.el-month-table,
+.el-year-table,
+.el-quarter-table,
+.el-picker-panel__btn,
+.el-picker-panel__icon-btn,
+.el-date-picker__time-header,
+.el-date-range-picker__time-header,
+.el-time-panel__btn,
+.el-time-spinner__item,
+.el-descriptions--small,
+.el-descriptions--small .el-descriptions__body .el-descriptions__table .el-descriptions__cell,
+.el-dropdown-menu--small .el-dropdown-menu__item,
+.el-input--small,
+.el-menu-item-group__title,
+.el-progress-bar__innerText,
+.el-radio-button--small .el-radio-button__inner,
+.cy-pill-group .el-radio-button__inner,
+.el-radio.el-radio--small .el-radio__label,
+.el-radio.is-bordered.el-radio--small .el-radio__label,
+.el-range-editor--small .el-range-input,
+.el-range-editor--small .el-range-separator,
+.el-select--small .el-select__wrapper,
+.el-select-group__title,
+.el-step__description,
+.el-switch--small,
+.el-switch--small .el-switch__label,
+.el-switch--small .el-switch__label *,
+.el-switch__core .el-switch__inner-wrapper,
+.el-tag,
+.el-badge,
+.el-anchor,
+.el-transfer-panel .el-transfer-panel__header-count,
+.el-transfer-panel__filter .el-input__inner,
+.el-upload__tip {
+  --font-size: 13px;
+  --el-messagebox-error-font-size: 13px;
+  --el-tag-font-size: 13px;
+  --el-badge-font-size: 13px;
+  --el-anchor-font-size: 13px;
+  font-size: 13px;
 }
 .el-table {
   font-size: 14px;

@@ -238,8 +238,10 @@ def consulting_blocks(
             continue
         b.append({"t": "h2", "text": d["title"]})
         if d["code"] in edited["dimensions"]:
+            from app.analysis.pdf_renderer import _localize_inline_enums
+
             b.extend(
-                {"t": "p", "text": ln}
+                {"t": "p", "text": _localize_inline_enums(ln)}
                 for ln in dim_text.get(d["code"], "").splitlines()
                 if ln.strip()
             )

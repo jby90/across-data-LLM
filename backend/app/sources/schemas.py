@@ -149,3 +149,10 @@ class RunOut(BaseModel):
     versions_new: int
     errors: int
     message: str | None
+
+    @field_validator("message", mode="after")
+    @classmethod
+    def _scrub_run_msg(cls, v: str | None) -> str | None:
+        from app.ingestion.router import clean_admin_process_text
+
+        return clean_admin_process_text(v)

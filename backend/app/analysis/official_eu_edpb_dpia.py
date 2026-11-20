@@ -43,6 +43,7 @@ from app.analysis.official_docx import (
 EDPB_TEMPLATE_PATH = OFFICIAL_DIR / "EU_EDPB_DPIA_template_2026_v1_en.docx"
 EDPB_NARRATIVE_CODE = "dpia_edpb_en"
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60]")
+_XML_BAD_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 _LEVEL_EN = {"低": "Low", "中": "Medium", "高": "High", "低风险": "Low", "中风险": "Medium", "高风险": "High"}
 
@@ -67,23 +68,24 @@ SYSTEM_EDPB_EN = (
 
 
 def _sanitise_edpb_tree(node: Any, cjk_aliases: list[str]) -> Any:
+    ordered_aliases = sorted((a for a in cjk_aliases if a), key=len, reverse=True)
     if isinstance(node, str):
         out = node
-        for alias in cjk_aliases:
+        for alias in ordered_aliases:
             if alias and alias in out:
                 out = out.replace(alias, "[Official English Legal Name of Data Controller]")
         return _strip_cjk(out)
     if isinstance(node, list):
-        return [_sanitise_edpb_tree(item, cjk_aliases) for item in node]
+        return [_sanitise_edpb_tree(item, ordered_aliases) for item in node]
     if isinstance(node, dict):
-        return {k: _sanitise_edpb_tree(v, cjk_aliases) for k, v in node.items()}
+        return {k: _sanitise_edpb_tree(v, ordered_aliases) for k, v in node.items()}
     return node
 
 
-def _strip_cjk(text: str, fallback: str = "") -> str:
+def _strip_cjk(text: Any, fallback: str = "") -> str:
     if not text:
         return fallback
-    cleaned = text
+    cleaned = _XML_BAD_RE.sub("", str(text))
     replacements = (
         ("，", ", "),
         ("。", ". "),
@@ -265,7 +267,7 @@ def _schema_part2() -> dict[str, Any]:
         "dpo_advice": "Formal DPO / Chief Compliance Counsel review opinion, recommendations and sign-off confirmation (3-4 sentences)",
         "data_subject_views": "Summary of layered in-vehicle / mobile privacy notice transparency and user opt-out / rights feedback mechanisms (2-3 sentences)",
         "decision": {
-            "outcome": "APPROVED | CONDITIONALLY_APPROVED",
+            "outcome": "APPROVED | CONDITIONALLY_APPROVED | CONSULTATION | REJECTED",
             "condition_1": "Completion of statutory prior filing / standard contractual clauses / supervisory transfer authorisation prior to production activation, with strict whitelist field locking",
             "condition_2": "Continuous enforcement of on-vehicle edge masking, mTLS encryption, backup-inclusive expiry erasure, and a single-path circuit-breaker (immediate isolated suspension and local fallback of any non-compliant or anomalous sub-path)",
             "justification": "Formal synthesis (3-4 sentences) justifying conditional approval based on acceptable residual risk, mandatory pre-launch conditions, single-path suspension isolation, and annual/change-triggered DPIA re-evaluation",
@@ -325,13 +327,33 @@ def _set_cell_text(cell, text: str, *, append_below: bool = False) -> None:
 
 
 def _check_boxes_in_cell(cell, match_substrings: list[str]) -> None:
-    """Tick Wingdings checkboxes on paragraphs inside ``cell`` whose text contains any of ``match_substrings``."""
+    """Tick Wingdings checkboxes on paragraphs inside ``cell`` whose text matches ``match_substrings``.
+    A pattern starting with ``^`` anchors to the start of the stripped paragraph text so mutually
+    exclusive options (e.g. ``Implemented`` vs ``Partially implemented``, ``APPROVED:`` vs
+    ``CONDITIONALLY APPROVED:``) never collide."""
     lowered = [s.lower() for s in match_substrings if s]
     if not lowered:
         return
     for p in cell.findall(W + "p"):
-        ptxt = _text(p).strip().lower()
-        if any(m in ptxt for m in lowered):
+        ptxt = re.sub(r"^[\s\uf000-\uf0ff☐☑☒✓✔•\-]+", "", _text(p)).strip().lower()
+        matched = False
+        for m in lowered:
+            if m.startswith("^"):
+                if ptxt.startswith(m[1:]):
+                    matched = True
+                    break
+            elif m == "implemented":
+                if ptxt == "implemented" or (ptxt.startswith("implemented") and "partially" not in ptxt):
+                    matched = True
+                    break
+            elif m.startswith("approved:"):
+                if ptxt.startswith("approved:") and not ptxt.startswith("conditionally"):
+                    matched = True
+                    break
+            elif m in ptxt:
+                matched = True
+                break
+        if matched:
             for sym in p.iter(W + "sym"):
                 sym.set(W + "font", "Wingdings")
                 sym.set(W + "char", CHECKED)
@@ -458,36 +480,62 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
     _set_cell_text(t4[0].findall(W + "tc")[1], str(plan.get("launch_date") or f"Upon completion of statutory filing / authorisation ({today_str})"))
     _set_cell_text(t4[1].findall(W + "tc")[1], str(plan.get("expiration") or "Continuous operation subject to strict retention limits and annual / change-triggered DPIA review"))
 
+    items = (data.get("data_items") or [])[:6]
+    any_special = any(
+        it.get("is_special") or str(it.get("special_type") or "none").lower() not in ("", "none", "no", "false")
+        for it in items
+    )
+
     ts = data.get("tech_sheet") or {}
     t5 = tables[5].findall(W + "tr")
     _set_cell_text(t5[0].findall(W + "tc")[1], f"Version 1.0 ({today_str}) — Prepared in accordance with EDPB DPIA Template 2026 v1.0")
     _set_cell_text(t5[1].findall(W + "tc")[1], str(ts.get("dpia_team") or ""))
     _set_cell_text(t5[2].findall(W + "tc")[1], str(ts.get("reference_materials") or ""))
-    _check_boxes_in_cell(t5[3].findall(W + "tc")[1], ["systematic monitoring", "innovative use", "cross-border", "high-risk", "other"])
+    t5_criteria = ["^systematic monitoring:", "^data processed on a large scale", "^innovative use"]
+    if any_special:
+        t5_criteria.insert(0, "^processing on a large scale of special categories")
+    _check_boxes_in_cell(t5[3].findall(W + "tc")[1], t5_criteria)
     _set_cell_text(t5[4].findall(W + "tc")[1], str(ts.get("scope") or ""))
     _set_cell_text(t5[5].findall(W + "tc")[1], today_str)
     _set_cell_text(t5[6].findall(W + "tc")[1], today_str)
     _check_boxes_in_cell(t5[7].findall(W + "tc")[1], ["shared externally"])
     _replace_underscore_in_cell(t5[7].findall(W + "tc")[1], "shared externally", "Submitted confidentially to competent supervisory authority upon statutory filing/request; executive summary available to data subjects.")
 
-    items = (data.get("data_items") or [])[:6]
     if items:
         def _fill_t6(idx: int, tcs: list, it: dict) -> None:
             _set_cell_text(tcs[0], str(idx))
             _set_cell_text(tcs[1], str(it.get("item") or ""))
             _set_cell_text(tcs[2], str(it.get("explanation") or it.get("need_justification") or ""))
-            if it.get("is_special") or str(it.get("special_type") or "none").lower() not in ("", "none", "no", "false"):
-                _check_boxes_in_cell(tcs[3], ["yes:", "biometric"])
+            spec_type_raw = str(it.get("special_type") or "none").strip().lower()
+            if it.get("is_special") or spec_type_raw not in ("", "none", "no", "false"):
+                spec_blob = f"{spec_type_raw} {it.get('item') or ''} {it.get('explanation') or ''}".lower()
+                picks = ["^yes:"]
+                if re.search(
+                    r"health|medical|heart|vital|fatigue|drows|physiolog|illness|clinical|patient",
+                    spec_blob,
+                ):
+                    picks.append("data concerning health")
+                if re.search(r"genetic|dna|genome|chromosom", spec_blob):
+                    picks.append("genetic data")
+                if re.search(r"racial|ethnic|political|religi|philosoph|trade\s+union", spec_blob):
+                    picks.append("data revealing racial")
+                if re.search(r"\bsex|sexual\s+orientation", spec_blob):
+                    picks.append("sex life or sexual orientation")
+                if (
+                    re.search(
+                        r"biometric|face|facial|voice|voiceprint|iris|fingerprint|gait|retina",
+                        spec_blob,
+                    )
+                    or len(picks) == 1
+                ):
+                    picks.append("biometric data")
+                _check_boxes_in_cell(tcs[3], picks)
             else:
-                _check_boxes_in_cell(tcs[3], ["no"])
+                _check_boxes_in_cell(tcs[3], ["^no"])
 
         _populate_dynamic_rows(tables[6], items, _fill_t6)
 
     lb_meta = data.get("legal_basis") or {}
-    any_special = any(
-        it.get("is_special") or str(it.get("special_type") or "none").lower() not in ("", "none", "no", "false")
-        for it in items
-    )
     spec_det = str(
         data.get("special_category_determination")
         or lb_meta.get("special_justification")
@@ -526,9 +574,40 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
     _set_cell_text(t9[0].findall(W + "tc")[1], str(nsc.get("nature") or ""))
     _set_cell_text(t9[1].findall(W + "tc")[1], str(nsc.get("scope") or ""))
     c_ctx = t9[2].findall(W + "tc")[1]
+    ctx_ps = c_ctx.findall(W + "p")
+    ctx_main = _strip_cjk(
+        str(
+            nsc.get("context")
+            or "Connected-vehicle telematics, safety diagnostics and cross-regional engineering collaboration operated under privacy-by-default controls, transparent layered notices and strict contractual purpose locks."
+        )
+    )
+    if ctx_ps and not _text(ctx_ps[0]).strip():
+        r_ctx0 = ET.SubElement(ctx_ps[0], W + "r")
+        t_ctx0 = ET.SubElement(r_ctx0, W + "t")
+        t_ctx0.text = ctx_main
+        for p_blank in ctx_ps[1:]:
+            if not _text(p_blank).strip() and not list(p_blank.iter(W + "sym")):
+                c_ctx.remove(p_blank)
     _check_boxes_in_cell(c_ctx, ["yes (justification", "yes ("])
-    _replace_underscore_in_cell(c_ctx, "yes", str(nsc.get("context_cross_border") or ""))
-    _set_cell_text(c_ctx, str(nsc.get("context_cross_border") or ""), append_below=True)
+    yes_ps = [p for p in c_ctx.findall(W + "p") if "yes" in _text(p).lower()]
+    cb_scope = _strip_cjk(
+        "Cross-jurisdictional coordination between the local data controller / market operator and designated technical support units under unified data protection governance."
+    )
+    cb_transfer = _strip_cjk(
+        str(
+            nsc.get("context_cross_border")
+            or "Cross-border transfer to the designated recipient is governed by enforceable transfer safeguards, edge de-identification, end-to-end encryption and strict purpose limitation."
+        )
+    )
+    for idx_y, p_y in enumerate(yes_ps):
+        val_y = cb_scope if idx_y == 0 and len(yes_ps) > 1 else cb_transfer
+        ts_y = list(p_y.iter(W + "t"))
+        if ts_y:
+            joined_y = "".join(t.text or "" for t in ts_y)
+            updated_y = re.sub(r"_{3,}", " " + val_y, joined_y, count=1)
+            ts_y[0].text = updated_y if updated_y != joined_y else (joined_y.rstrip() + " " + val_y)
+            for extra_y in ts_y[1:]:
+                extra_y.text = ""
 
     phases = (data.get("phases") or [])[:5]
     if phases:
@@ -551,9 +630,8 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
     coc = data.get("codes_of_conduct") or {}
     t12 = tables[12].findall(W + "tr")[1].findall(W + "tc")
     _set_cell_text(t12[1], str(coc.get("code") or ""))
-    _check_boxes_in_cell(t12[2], ["legal obligation", "necessary or beneficial"])
-    _replace_underscore_in_cell(t12[2], "why?:", str(coc.get("explanation") or ""))
-    _set_cell_text(t12[2], str(coc.get("explanation") or ""), append_below=True)
+    _check_boxes_in_cell(t12[2], ["necessary or beneficial"])
+    _replace_underscore_in_cell(t12[2], "necessary or beneficial. why?:", str(coc.get("explanation") or ""))
 
     lb = data.get("legal_basis") or {}
     choice_map = {
@@ -670,7 +748,29 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
             _check_boxes_in_cell(tcs[3], ["implemented"])
 
     threats = (data.get("abnormal_threats") or [])[:4]
-    if threats:
+    intended_threats = (data.get("intended_threats") or [])[:4]
+    if not intended_threats and threats:
+        intended_threats = [
+            {
+                "threat": "Over-collection beyond strictly necessary diagnostic telemetry",
+                "materialisation": "Continuous background vehicle telemetry could capture granular behavioural or location patterns beyond episodic fault diagnostics if whitelist filters drift.",
+                "sources": "Broad sensor configuration or unreviewed firmware telemetry schema expansion",
+                "impact": "Intrusive behavioural inference or erosion of driver and passenger expectations of informational autonomy.",
+            },
+            {
+                "threat": "Residual re-identification linkage across pseudonymised VIN tokens",
+                "materialisation": "Cross-referencing pseudonymised vehicle event logs with service-centre warranty records could indirectly single out the registered vehicle owner.",
+                "sources": "Insufficient separation between local identity mapping vaults and cross-border engineering datasets",
+                "impact": "Loss of effective pseudonymity and unintended attribution of vehicle operating events to identifiable individuals.",
+            },
+            {
+                "threat": "Extended retention or secondary repurposing in recipient environment",
+                "materialisation": "Retaining diagnostic snapshots past incident resolution could expose historical records to secondary analytics outside the declared safety purpose.",
+                "sources": "Manual archive retention or unsynchronised backup purge schedules",
+                "impact": "Prolonged exposure window and loss of data-subject control over personal data lifecycle.",
+            },
+        ]
+    if intended_threats or threats:
         def _fill_threat(idx: int, tcs: list, th: dict) -> None:
             _set_cell_text(tcs[0], str(idx))
             _set_cell_text(tcs[1], str(th.get("threat") or ""))
@@ -678,8 +778,10 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
             _set_cell_text(tcs[3], str(th.get("sources") or ""))
             _set_cell_text(tcs[4], str(th.get("impact") or ""))
 
-        _populate_dynamic_rows(tables[22], threats, _fill_threat)
-        _populate_dynamic_rows(tables[25], threats, _fill_threat)
+        if intended_threats:
+            _populate_dynamic_rows(tables[22], intended_threats, _fill_threat)
+        if threats:
+            _populate_dynamic_rows(tables[25], threats, _fill_threat)
 
     _set_cell_text(tables[23].findall(W + "tr")[0].findall(W + "tc")[0], str(data.get("necessity_assessment") or ""), append_below=True)
     _set_cell_text(tables[24].findall(W + "tr")[0].findall(W + "tc")[0], str(data.get("proportionality_assessment") or ""), append_below=True)
@@ -732,13 +834,17 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
 
     dec = data.get("decision") or {}
     c33 = tables[33].findall(W + "tr")[0].findall(W + "tc")[0]
-    outcome = str(dec.get("outcome") or "CONDITIONALLY_APPROVED").upper()
-    if "CONDITIONALLY" in outcome:
-        _check_boxes_in_cell(c33, ["conditionally approved:"])
+    outcome_norm = re.sub(r"[\s\-]+", "_", str(dec.get("outcome") or "CONDITIONALLY_APPROVED").strip().upper())
+    if any(x in outcome_norm for x in ("REJECT", "NOT_APPROVED", "DISAPPROVED", "PROHIBITED", "ABANDON")):
+        _check_boxes_in_cell(c33, ["^rejected:"])
+    elif "CONSULT" in outcome_norm:
+        _check_boxes_in_cell(c33, ["^consultation:"])
+    elif "CONDITIONALLY" in outcome_norm or "DEFER" in outcome_norm:
+        _check_boxes_in_cell(c33, ["^conditionally approved:"])
         _replace_underscore_in_cell(c33, "condition 1:", str(dec.get("condition_1") or ""))
         _replace_underscore_in_cell(c33, "condition 2:", str(dec.get("condition_2") or ""))
     else:
-        _check_boxes_in_cell(c33, ["approved: the processing may proceed"])
+        _check_boxes_in_cell(c33, ["^approved:"])
     _set_cell_text(tables[34].findall(W + "tr")[0].findall(W + "tc")[0], str(dec.get("justification") or ""))
 
     _unlink_broken_ref_fields(root)
@@ -822,8 +928,11 @@ async def build_edpb_2026_en(
     *,
     draft: bool = False,
     actor_user_id: uuid.UUID | None = None,
+    read_only_viewer: bool = False,
 ) -> tuple[bytes, str]:
     """Generate or fetch cached English EDPB 2026 official DPIA .docx for a non-China outbound project."""
+    from fastapi import HTTPException
+
     from app.core.redaction import bind_egress, egress_context, llm_scope
     from app.iam.models import Organization
 
@@ -836,8 +945,16 @@ async def build_edpb_2026_en(
         )
     )
     assessment_dt = str(values.get("self_assessed_on") or "").strip() or date.today().isoformat()
-    if cached and isinstance(cached.report, dict) and cached.report.get("edpb_data"):
-        return render_edpb_2026_docx(cached.report["edpb_data"], assessment_dt), "EDPB_2026_DPIA_Official_EN"
+    if cached and isinstance(cached.report, dict) and isinstance(cached.report.get("edpb_data"), dict):
+        try:
+            return render_edpb_2026_docx(cached.report["edpb_data"], assessment_dt), "EDPB_2026_DPIA_Official_EN"
+        except (AttributeError, TypeError, KeyError, ValueError):
+            if not read_only_viewer:
+                await session.delete(cached)
+                await session.flush()
+
+    if read_only_viewer:
+        raise HTTPException(403, "查看账号只能查阅或导出已生成的欧盟标准英文范本，不能触发新建生成")
 
     parsed_risks = [r for r in risk_items.parse(values.get("risk_rating", "")) if r.get("mitigated") != "1"]
     structured_risks = []
@@ -922,9 +1039,13 @@ async def build_edpb_2026_en(
     part1 = res1.data if isinstance(res1.data, dict) else {}
     part2 = res2.data if isinstance(res2.data, dict) else {}
     raw_edpb = {**part1, **part2}
-    if not raw_edpb.get("controller"):
+    if not isinstance(raw_edpb.get("controller"), dict) or not raw_edpb["controller"]:
         raise RuntimeError("英文 EDPB 官方表结构化输出未通过核验，请重试")
     edpb_data = _sanitise_edpb_tree(raw_edpb, cjk_aliases)
+    try:
+        rendered_docx = render_edpb_2026_docx(edpb_data, assessment_dt)
+    except (AttributeError, TypeError, KeyError, ValueError) as exc:
+        raise RuntimeError("英文 EDPB 官方表结构化输出未通过核验，请重试") from exc
 
     tokens = (
         int(getattr(res1, "prompt_tokens", 0) or 0)
@@ -949,4 +1070,4 @@ async def build_edpb_2026_en(
         await session.commit()
     except IntegrityError:
         await session.rollback()
-    return render_edpb_2026_docx(edpb_data, assessment_dt), "EDPB_2026_DPIA_Official_EN"
+    return rendered_docx, "EDPB_2026_DPIA_Official_EN"

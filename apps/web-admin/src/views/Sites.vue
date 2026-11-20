@@ -3,6 +3,7 @@
 const readableUrl = (u: string) => { try { return decodeURI(u) } catch { return u } }
 import {
   DOC_TYPE_LABEL,
+  formatDocTypeZh,
   RUN_STATUS_LABEL,
   STRATEGY_LABEL,
   type RunOut,
@@ -74,7 +75,7 @@ function siteDocTypesLabel(row: SiteOut): string {
     .map((t) => String(t || '').trim().toUpperCase())
     .filter((t) => t && t !== 'OTHER')
   if (!types.length) return row.document_count > 0 ? '综合法规与指南' : '官方法规目录'
-  return types.map((t) => DOC_TYPE_LABEL[t] || t).join('、')
+  return [...new Set(types.map((t) => formatDocTypeZh(t, '官方法规')))].join('、')
 }
 
 function siteVerifyStatus(row: SiteOut): { label: string; type: 'success' | 'warning' | 'danger' | 'info' } {

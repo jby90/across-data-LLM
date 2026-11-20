@@ -72,7 +72,7 @@ class PaddleOcrEngine:
                     stall_seconds=STALL_SECONDS,
                 )
             if code != 0 or not out.exists():
-                raise RuntimeError("PaddleOCR 执行失败: " + tail[-300:])
+                raise RuntimeError("主版面文字识别执行失败: " + tail[-300:])
             data = json.loads(out.read_text(encoding="utf-8"))
         scores = [s for page in data["scores"] for s in page]
         mean = statistics.fmean(scores) * 100 if scores else 0.0
@@ -108,7 +108,7 @@ def _run_worker(cmd: list[str], *, env: dict[str, str], stall_seconds: float) ->
         if time.monotonic() - state["last"] > stall_seconds:
             proc.kill()
             reader.join(timeout=5)
-            raise RuntimeError(f"PaddleOCR 连续 {int(stall_seconds)} 秒没有完成任何一页，已终止")
+            raise RuntimeError(f"主版面文字识别连续 {int(stall_seconds)} 秒没有完成任何一页，已终止")
     reader.join(timeout=5)
     return proc.returncode, state["tail"]
 

@@ -30,7 +30,7 @@ async def main(once: bool) -> None:
     ocr = OcrEngine(
         settings.tesseract_cmd, settings.tessdata_dir, settings.ocr_dpi, settings.paddle_python
     )
-    log.info("OCR %s", "可用" if ocr.available else "不可用(扫描件只标记,不识别)")
+    log.info("版面文字识别 %s", "可用" if ocr.available else "不可用(扫描件只标记,不识别)")
     sf = get_sessionmaker()
     if settings.env == "prod":
         from app.core.db import get_engine

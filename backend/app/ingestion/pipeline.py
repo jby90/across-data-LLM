@@ -380,14 +380,17 @@ async def parse_version(
                     )
                 )
     except Exception as e:  # noqa: BLE001 - 单个版本失败不能拖垮整次运行
+        from app.core.jargon import scrub_engineering_jargon
+
+        clean_err = scrub_engineering_jargon(str(e))
         version.state = VersionState.FAILED.value
-        version.error = f"{type(e).__name__}: {e}"[:2000]
+        version.error = f"{type(e).__name__}: {clean_err or '版面解析失败'}"[:2000]
         session.add(
             PipelineEvent(
                 version_id=version.id, step="parse", status="error", message=version.error
             )
         )
-        log.warning("解析失败 version=%s: %s", version.id, e)
+        log.warning("解析失败 version=%s: %s", version.id, clean_err)
 
     if version.state == VersionState.PARSED.value:
         await session.flush()

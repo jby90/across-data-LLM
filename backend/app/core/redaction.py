@@ -30,13 +30,32 @@ def llm_scope(*, org_id=None, aliases=(), session_factory=None):
         egress_context.reset(token)
 
 
+def org_redaction_aliases(org=None) -> tuple[str, ...]:
+    if org is None:
+        return ()
+    from app.iam.service import strip_trial_org_suffix
+
+    raw_name = (getattr(org, "name", "") or "").strip()
+    base_name = strip_trial_org_suffix(raw_name)
+    items: list[str] = []
+    if raw_name:
+        items.append(raw_name)
+    if base_name and len(base_name) >= 2 and base_name not in items:
+        items.append(base_name)
+    for term in getattr(org, "llm_redaction_terms", None) or []:
+        t = str(term or "").strip()
+        if t and t not in items:
+            items.append(t)
+    return tuple(sorted(items, key=len, reverse=True))
+
+
 def bind_egress(session, org=None):
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     egress_context.set(
         EgressContext(
             org.id if org else None,
-            tuple([org.name, *(org.llm_redaction_terms or [])]) if org else (),
+            org_redaction_aliases(org),
             async_sessionmaker(session.bind, expire_on_commit=False),
         )
     )
@@ -138,7 +157,8 @@ class Redactor:
         if isinstance(value, str):
             for marker, original in self.mapping.items():
                 value = value.replace(marker, original)
-            if self.prefix in value:
+            own_core = self.prefix.strip("_")
+            if self.prefix in value or (own_core and re.search(re.escape(own_core), value, re.I)):
                 raise ValueError("模型返回的隐私占位符损坏，禁止作为原文使用")
             return value
         if isinstance(value, list):

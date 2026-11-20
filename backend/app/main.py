@@ -74,37 +74,67 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
     )
 
+    import json as _json
+    import logging as _logging
+    import math as _math
+
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
+    from sqlalchemy.exc import DBAPIError as _SADBAPIError
+    from sqlalchemy.exc import IntegrityError as _SAIntegrityError
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
 
-    def _contains_nul(val: object) -> bool:
-        if isinstance(val, str):
-            return "\x00" in val
-        if isinstance(val, dict):
-            return any(_contains_nul(k) or _contains_nul(v) for k, v in val.items())
-        if isinstance(val, list):
-            return any(_contains_nul(it) for it in val)
+    _SURROGATE_OR_NUL_RE = re.compile(r"[\x00\ud800-\udfff]")
+    _RAW_BODY_SUSPECT_RE = re.compile(
+        rb"\x00|\\u0000|\\ud[89a-f][0-9a-f]{2}|\b(?:NaN|Infinity|-Infinity)\b",
+        re.IGNORECASE,
+    )
+
+    def _has_illegal_json_val(val: object) -> bool:
+        stack: list[object] = [val]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, str):
+                if _SURROGATE_OR_NUL_RE.search(cur):
+                    return True
+            elif isinstance(cur, float):
+                if _math.isnan(cur) or _math.isinf(cur):
+                    return True
+            elif isinstance(cur, dict):
+                for k, v in cur.items():
+                    stack.append(k)
+                    stack.append(v)
+            elif isinstance(cur, list):
+                stack.extend(cur)
         return False
 
-    _NUL_ERR = {"detail": "请求参数包含非法空字符，请修改后重试"}
+    _NUL_ERR = {"detail": "请求参数包含非法空字符、控制字符或无效数值，请修改后重试"}
+    _UTF8_ERR = {"detail": "提交的请求体字符编码无效，请使用标准 UTF-8 编码重试"}
 
     @app.middleware("http")
     async def isolate_model_egress_context(request, call_next):
         raw_qs: bytes = request.scope.get("query_string") or b""
-        if b"\x00" in raw_qs or b"%00" in raw_qs.lower() or "\x00" in request.url.path:
+        if (
+            b"\x00" in raw_qs
+            or b"%00" in raw_qs.lower()
+            or bool(_SURROGATE_OR_NUL_RE.search(request.url.path))
+        ):
             return JSONResponse(status_code=422, content=_NUL_ERR)
-        ctype = (request.headers.get("content-type") or "").lower()
-        if ctype.startswith("application/json"):
+        media_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if media_type == "application/json" or media_type.endswith("+json"):
             raw_body = await request.body()
-            if b"\x00" in raw_body or b"\\u0000" in raw_body.lower():
-                import json as _json
-
+            if raw_body:
                 try:
-                    parsed_json = _json.loads(raw_body)
-                except Exception:  # noqa: BLE001
-                    parsed_json = None
-                if b"\x00" in raw_body or _contains_nul(parsed_json):
-                    return JSONResponse(status_code=422, content=_NUL_ERR)
+                    raw_body.decode("utf-8")
+                except UnicodeDecodeError:
+                    return JSONResponse(status_code=422, content=_UTF8_ERR)
+                if _RAW_BODY_SUSPECT_RE.search(raw_body):
+                    try:
+                        parsed_json = _json.loads(raw_body)
+                    except Exception:  # noqa: BLE001
+                        parsed_json = None
+                    if b"\x00" in raw_body or _has_illegal_json_val(parsed_json):
+                        return JSONResponse(status_code=422, content=_NUL_ERR)
 
         from app.audit import describe as audit_describe
         from app.audit.service import record_request, wants_record
@@ -113,8 +143,20 @@ def create_app() -> FastAPI:
 
         audit_tokens = audit_describe.begin()
         try:
-            with llm_scope(), database_scope():
-                response = await call_next(request)
+            try:
+                with llm_scope(), database_scope():
+                    response = await call_next(request)
+            except Exception:  # noqa: BLE001
+                _logging.getLogger(__name__).error(
+                    "未预期服务端异常已兜底拦截: %s %s",
+                    request.method,
+                    request.url.path,
+                    exc_info=True,
+                )
+                response = JSONResponse(
+                    status_code=500,
+                    content={"detail": "服务处理请求时遇到异常，请稍后重试"},
+                )
             if wants_record(request.method, request.url.path):
                 await record_request(request, response.status_code)
         finally:
@@ -228,12 +270,26 @@ def create_app() -> FastAPI:
         "to_version": "目标版本号",
         "block": "修订段落序号",
         "filename": "文件名称",
+        "llm_redaction_terms": "脱敏词条列表",
+        "ocr_required": "扫描识别标识",
+        "ocr_confidence": "识别置信度",
+        "terms": "词条列表",
+        "recipients": "收件人列表",
+        "definition": "模板结构定义",
+        "entry_url": "采集入口网址",
+        "terms_url": "使用条款网址",
+        "publisher": "发布机构",
+        "source_term": "外文原词",
+        "target_zh": "标准中文译名",
+        "vehicle_model": "车型标识",
+        "scenario_type": "业务场景类型",
+        "ticket": "登录凭证",
+        "decision": "审核结论",
+        "translated_text": "译文正文",
+        "profile": "事项配置",
     }
 
-    _BANNED_VALIDATION_JARGON = re.compile(
-        r"input should be|field required|pydantic|uuid|json|llm|ocr|rag|value error",
-        re.IGNORECASE,
-    )
+    from app.core.jargon import contains_engineering_jargon, scrub_engineering_jargon
 
     def _loc_label_zh(loc: tuple | list) -> str:
         parts = [str(p) for p in loc if p not in ("body", "query", "path", "header", "cookie")]
@@ -246,9 +302,9 @@ def create_app() -> FastAPI:
             return _FIELD_LABELS_ZH[leaf]
         if leaf.endswith("_id") or leaf == "id":
             return "资源标识"
-        if re.fullmatch(r"[A-Za-z0-9_.-]+", leaf):
-            return f"参数“{leaf}”"
-        return f"“{leaf}”"
+        if re.search(r"[\u4e00-\u9fff]", leaf) and not contains_engineering_jargon(leaf):
+            return f"“{leaf}”"
+        return "该提交字段"
 
     def _translate_one_validation_error(err: dict) -> str:
         etype = str(err.get("type") or "")
@@ -261,7 +317,7 @@ def create_app() -> FastAPI:
         if etype in ("value_error", "assertion_error") or raw_msg.startswith("Value error,"):
             cleaned = re.sub(r"^(?:Value error|Assertion failed),\s*", "", raw_msg).strip()
             has_cjk = bool(re.search(r"[\u4e00-\u9fff]", cleaned))
-            if cleaned and has_cjk and not _BANNED_VALIDATION_JARGON.search(cleaned):
+            if cleaned and has_cjk and not contains_engineering_jargon(cleaned):
                 return cleaned
 
         if etype == "json_invalid":
@@ -315,8 +371,157 @@ def create_app() -> FastAPI:
         if etype.startswith("url"):
             return f"{label}网址格式无效，请填写以 http:// 或 https:// 开头的完整地址"
         if etype == "extra_forbidden":
-            return f"包含未定义的提交项：{label}"
+            return "提交了系统未定义的扩展字段，请检查请求参数"
         return f"{label}填写格式有误，请检查后重试"
+
+    _DEFAULT_HTTP_ERRORS_ZH = {
+        400: "请求内容格式不正确，请检查提交参数后重试",
+        401: "未登录或登录已失效",
+        403: "当前账号无权执行该操作",
+        404: "请求的接口或资源不存在",
+        405: "当前接口不支持该请求方式",
+        413: "提交的数据体积超出限制",
+        422: "请求参数格式有误，请检查后重试",
+        429: "操作过于频繁，请稍后再试",
+    }
+    _ENGLISH_HTTP_DEFAULTS = frozenset(
+        {
+            "Not Found",
+            "Method Not Allowed",
+            "Bad Request",
+            "Unauthorized",
+            "Forbidden",
+            "There was an error parsing the body",
+            "Malformed JSON",
+        }
+    )
+
+    def _scrub_http_detail_zh(text: str) -> str:
+        return scrub_engineering_jargon(
+            text,
+            ocr_zh="扫描文字识别",
+            llm_zh="智能分析",
+            rag_zh="条文检索",
+            json_zh="结构化数据",
+            uuid_zh="编号",
+            pydantic_zh="格式核验",
+            cjk_zh="中文汉字",
+        )
+
+    _RAW_ENGINE_DETAIL_RE = re.compile(
+        r"\d+\s+validation\s+errors?\s+for\b|"
+        r"\[type=[a-z0-9_]+,\s*input_value=|"
+        r"errors\.pydantic\.dev|"
+        r"Traceback\s*\(most recent call last\)|"
+        r"invalid literal for int\(\)|"
+        r"could not convert string to float",
+        re.IGNORECASE,
+    )
+
+    @app.exception_handler(_StarletteHTTPException)
+    async def handle_http_exception(_request, exc: _StarletteHTTPException):
+        detail = exc.detail
+        headers = getattr(exc, "headers", None)
+        if (
+            isinstance(detail, str)
+            and detail not in _ENGLISH_HTTP_DEFAULTS
+            and not _RAW_ENGINE_DETAIL_RE.search(detail)
+        ):
+            if re.search(r"[\u4e00-\u9fff]", detail):
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={"detail": _scrub_http_detail_zh(detail)},
+                    headers=headers,
+                )
+        msg = _DEFAULT_HTTP_ERRORS_ZH.get(exc.status_code, "请求无法完成，请稍后重试")
+        return JSONResponse(status_code=exc.status_code, content={"detail": msg}, headers=headers)
+
+    @app.exception_handler(_SAIntegrityError)
+    async def handle_db_integrity_error(request, exc: _SAIntegrityError):
+        _logging.getLogger(__name__).warning(
+            "数据库约束冲突已拦截: %s %s", request.method, request.url.path, exc_info=True
+        )
+        sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", "") or ""
+        if sqlstate == "23503":
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "关联的资源不存在或仍被业务记录引用，请刷新页面后重试"},
+            )
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "数据状态已发生变更或存在重复提交，请刷新后重试"},
+        )
+
+    @app.exception_handler(_SADBAPIError)
+    async def handle_db_data_error(request, exc: _SADBAPIError):
+        from sqlalchemy.exc import DataError as _SADataError
+
+        orig = getattr(exc, "orig", None)
+        orig_cls = type(orig).__name__ if orig is not None else ""
+        orig_msg = str(orig or exc).lower()
+        immutable_tokens = (
+            "immutable",
+            "append_only",
+            "no_change",
+            "禁止修改",
+            "禁止删除",
+            "不可修改",
+            "不可删除",
+            "不可单独删除",
+        )
+        if any(k in orig_msg for k in immutable_tokens):
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "审计或存证记录受防篡改保护，禁止修改或删除"},
+            )
+        if (
+            isinstance(exc, _SADataError)
+            or orig_cls in ("DataError", "OverflowError", "InvalidDatetimeFormatError")
+            or any(
+                k in orig_msg
+                for k in (
+                    "out of range",
+                    "value out of int",
+                    "invalid input",
+                    "character not in repertoire",
+                    "null byte",
+                    "numeric field overflow",
+                    "date/time field value out of range",
+                )
+            )
+        ):
+            _logging.getLogger(__name__).warning(
+                "数据库参数边界异常已拦截: %s %s", request.method, request.url.path, exc_info=True
+            )
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "提交的数据或时间范围超出有效界限，请修改后重试"},
+            )
+        _logging.getLogger(__name__).error(
+            "数据库运行期异常已拦截: %s %s (%s)",
+            request.method,
+            request.url.path,
+            orig_cls or type(exc).__name__,
+            exc_info=True,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "数据库服务繁忙或暂时不可用，请稍后重试"},
+        )
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_exception(request, exc: Exception):
+        _logging.getLogger(__name__).error(
+            "未捕获异常已兜底转换: %s %s (%s)",
+            request.method,
+            request.url.path,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "服务处理请求时遇到异常，请稍后重试"},
+        )
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request, exc: RequestValidationError):

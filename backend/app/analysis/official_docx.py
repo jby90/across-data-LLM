@@ -57,10 +57,17 @@ def _serialise(root, original: bytes) -> bytes:
     return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' + out
 
 
+_XML_BAD_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def _clean_xml_str(text: str) -> str:
+    return _XML_BAD_RE.sub("", text or "")
+
+
 def _clean_core_xml(title: str) -> bytes:
     from xml.sax.saxutils import escape as _esc
 
-    safe = _esc((title or "数据合规正式文件").strip())
+    safe = _esc(_clean_xml_str(title or "数据合规正式文件").strip() or "数据合规正式文件")
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
@@ -220,7 +227,8 @@ def _put_text(cell, value: str, props, after_print: bool = False) -> None:
     run = ET.SubElement(p, W + "r")
     if props is not None:
         run.append(copy.deepcopy(props))
-    for i, line in enumerate(value.split("\n")):
+    clean_val = _clean_xml_str(value)
+    for i, line in enumerate(clean_val.split("\n")):
         if i:
             ET.SubElement(run, W + "br")
         t = ET.SubElement(run, W + "t")
@@ -362,6 +370,13 @@ def fill_table_form(template: bytes, start_title: str, end_title: str, slots: li
     for sym in body.iter(W + "sym"):
         if (sym.get(W + "font") or "").lower() == "wingdings" and (sym.get(W + "char") or "").upper() == "00A8":
             sym.set(W + "char", "F06F")
+    for tr in body.iter(W + "tr"):
+        tr_pr = tr.find(W + "trPr")
+        if tr_pr is None:
+            tr_pr = ET.Element(W + "trPr")
+            tr.insert(0, tr_pr)
+        if tr_pr.find(W + "cantSplit") is None:
+            ET.SubElement(tr_pr, W + "cantSplit")
     _reset_sect_page_start(body)
     xml = _serialise(root, original)
     result.data = _write_clean_zip(zin, xml, "数据出境安全评估申报表")
@@ -372,11 +387,20 @@ def _first(value: str, choices: list[str]) -> list[str]:
     return [c for c in choices if c in (value or "")]
 
 
-def _yes_no(value: str) -> list[str]:
+def _yes_no(value: str, target: str = "") -> list[str]:
+    from app.analysis.cn_route import _yes as _cn_yes
+
     v = (value or "").strip()
     if not v or v.startswith("暂不确定"):
         return []
-    return ["否"] if re.match(r"^(否|不|无|没有|不含|不涉及)", v) else ["是"]
+    ans = _cn_yes(v, target)
+    if ans is False:
+        return ["否"]
+    if ans is True:
+        return ["是"]
+    if re.search(r"(?:^|[，,；;\s])(?:不涉及|不含|不包含|不属于|无|没有|否)(?:$|[，,。；;\s])", v):
+        return ["否"]
+    return ["是"]
 
 
 def _parse_person(raw: str) -> dict[str, str]:
@@ -467,34 +491,236 @@ def _parse_security_org(raw: str) -> tuple[str, str]:
     return name or text, cnt
 
 
+_CORP_TAIL_RE = re.compile(
+    r"^(?:Inc\.?|LLC|L\.?L\.?C\.?|Ltd\.?|Limited|Co\.?|Co\.?,?\s*Ltd\.?|Corp\.?|Corporation|GmbH|"
+    r"S\.?A\.?(?:R\.?L\.?)?|S\.?p\.?A\.?|Pte\.?\s*Ltd\.?|PLC|B\.?V\.?|N\.?V\.?|A\.?G\.?|K\.?K\.?)$",
+    re.IGNORECASE,
+)
+_ADDR_SEG_RE = re.compile(
+    r"位于|街道?|大道|路\s*\d|路\s*[^\s，,]{0,6}号|\d+\s*号|工业区|工业园|科技园|科技城|广场|大厦|园区|校区|大楼|商务区|"
+    r"\b\d{4,6}\s+[A-ZÀ-Ÿ][a-zA-ZÀ-ÿ]|"
+    r"\b(?:Street|St\.|Road|Rd\.|Avenue|Ave\.|Boulevard|Blvd\.|Straße|Str\.|Platz|Allee|Way|Drive|Dr\.|Lane|"
+    r"Campus|Park|Tower|Plaza|Building|District|Zone|Floor|Suite)\b",
+    re.IGNORECASE,
+)
+_BIZ_SEG_RE = re.compile(
+    r"主营|负责|提供|从事|承担|用于|研发|运维|运营|服务|诊断|测试|云计算|软件|技术支持|数据分析|存储|"
+    r"\b(?:R&D|Cloud|Operations|Services|Diagnostics|Engineering|Analytics|Support|Mobility\s+Services)\b",
+    re.IGNORECASE,
+)
+_ADDR_OR_BIZ_SEG_RE = re.compile(f"{_ADDR_SEG_RE.pattern}|{_BIZ_SEG_RE.pattern}", re.IGNORECASE)
+
+
+_EN_COUNTRY_NAMES = frozenset(
+    {
+        "china", "people's republic of china", "singapore", "republic of singapore",
+        "morocco", "kingdom of morocco", "egypt", "arab republic of egypt",
+        "tunisia", "republic of tunisia", "lebanon", "lebanese republic",
+        "france", "french republic", "germany", "federal republic of germany",
+        "italy", "italian republic", "spain", "kingdom of spain",
+        "netherlands", "kingdom of the netherlands", "belgium", "kingdom of belgium",
+        "sweden", "kingdom of sweden", "poland", "republic of poland",
+        "austria", "republic of austria", "ireland", "portugal", "portuguese republic",
+        "uk", "united kingdom", "switzerland", "swiss confederation", "norway", "kingdom of norway",
+        "japan", "korea", "south korea", "republic of korea", "thailand", "kingdom of thailand",
+        "malaysia", "indonesia", "republic of indonesia", "vietnam", "india", "republic of india",
+        "uae", "united arab emirates", "saudi arabia", "kingdom of saudi arabia",
+        "usa", "united states", "united states of america", "canada", "mexico", "brazil", "australia",
+        "eu", "european union", "maroc", "royaume du maroc", "égypte", "tunisie", "république tunisienne",
+        "liban", "république libanaise", "allemagne", "chine", "singapour",
+    }
+)
+
+
+def _merge_corp_tail_segs(segs: list[str]) -> list[str]:
+    merged: list[str] = []
+    for seg in segs:
+        if merged and _CORP_TAIL_RE.match(seg):
+            merged[-1] = f"{merged[-1]}, {seg}"
+        else:
+            merged.append(seg)
+    return merged
+
+
+def _is_country_seg(seg: str) -> bool:
+    from app.analysis.document_basis import ALIASES, NAMES
+
+    s = re.sub(r"\s*[（(][A-Za-z]{2,3}[）)]\s*$", "", (seg or "").strip())
+    if (
+        not s
+        or _CORP_TAIL_RE.match(s)
+        or _ADDR_OR_BIZ_SEG_RE.search(s)
+        or re.search(r"公司|有限|集团|事务所|研究院|工厂|车间|\b(?:GmbH|Ltd|Inc|Corp|LLC|S\.A)\b", s, re.I)
+    ):
+        return False
+    low = re.sub(r"^the\s+", "", s.lower()).strip()
+    if s in NAMES.values() or s in ALIASES or s.upper() in NAMES or low in _EN_COUNTRY_NAMES:
+        return True
+    if re.fullmatch(
+        r"[\u4e00-\u9fff]{2,16}(?:共和国|王国|联邦|大公国|公国|合众国|酋长国|苏丹国|特别行政区)", s
+    ):
+        return True
+    if re.fullmatch(
+        r"(?:federal\s+|arab\s+|islamic\s+|people'?s\s+|united\s+|grand\s+)?(?:republic|kingdom|federation|commonwealth|principality|sultanate|state|states|emirates)\s+of\s+[a-zA-ZÀ-ÿ\s'-]{3,35}",
+        low,
+    ):
+        return True
+    return False
+
+
+def _clean_recipient_entity_name(raw_name: str) -> str:
+    s = re.sub(r"^(?:境外接收方)?(?:名称|机构名称|公司名称|主体名称)\s*[:：]\s*", "", (raw_name or "").strip())
+    m_trail = re.search(r"\s*[（(]([^（）()]+)[）)]\s*$", s)
+    if m_trail and re.search(
+        r"位于|地址|注册地|办公地|主营|主要业务|业务范围|负责|从事|提供|承担", m_trail.group(1)
+    ):
+        s = s[: m_trail.start()].strip()
+    s = re.split(
+        r"[；;\n]|[，,]\s*(?=(?:地址|注册地|办公地|所在国家|所在地区|主营业务|主要业务|业务范围|职能|联系方式|位于))|"
+        r"[（(]\s*(?:地址|注册地|办公地|主营业务|主要业务|位于|负责|从事)",
+        s,
+        maxsplit=1,
+    )[0].strip()
+    if re.search(r"[，,]", s):
+        segs = _merge_corp_tail_segs([x.strip() for x in re.split(r"[，,]", s) if x.strip()])
+        if len(segs) >= 3:
+            s = segs[0]
+        elif len(segs) == 2 and (_is_country_seg(segs[1]) or _ADDR_OR_BIZ_SEG_RE.search(segs[1])):
+            s = segs[0]
+        elif len(segs) == 1:
+            s = segs[0]
+    return s.strip("，,；; ") or (raw_name or "").strip()
+
+
+def _assign_addr_or_biz(out: dict[str, str], seg: str) -> None:
+    s = (seg or "").strip()
+    if not s:
+        return
+    if _BIZ_SEG_RE.search(s) and not _ADDR_SEG_RE.search(s):
+        if not out["biz"]:
+            out["biz"] = s
+        elif not out["address"]:
+            out["address"] = s
+    else:
+        s_addr = re.sub(r"^(?:位于|地处)\s*", "", s).strip()
+        if not out["address"]:
+            out["address"] = s_addr
+        elif not out["biz"]:
+            out["biz"] = s
+
+
 def _parse_recipient_info(rec_raw: str, contact_raw: str) -> dict[str, str]:
     rec = (rec_raw or "").strip()
     con = (contact_raw or "").strip()
     out = {"name": "", "address": "", "biz": "", "head_name": "", "head_title": "", "contact": ""}
     if rec:
-        parts = [p.strip() for p in re.split(r"[；;\n]+", rec) if p.strip()]
+        m_lead = re.match(
+            r"^(?:境外接收方|接收方)?(?:名称|机构名称|公司名称|主体名称|单位名称)?\s*[：:]\s*(.+)$",
+            rec,
+            re.S,
+        )
+        if m_lead and "：" not in m_lead.group(1) and ":" not in m_lead.group(1):
+            rec = m_lead.group(1).strip()
+        m_paren = re.search(r"\s*[（(]([^（）()]+)[）)]\s*$", rec)
+        if (
+            m_paren
+            and "；" not in rec[: m_paren.start()]
+            and ";" not in rec[: m_paren.start()]
+            and re.search(
+                r"位于|地址|注册地|办公地|主营|主要业务|业务范围|负责|从事|提供|承担",
+                m_paren.group(1),
+            )
+        ):
+            head_part = rec[: m_paren.start()].strip()
+            inner_part = m_paren.group(1).strip()
+            rec = head_part
+            for sub in [x.strip() for x in re.split(r"[；;，,]+", inner_part) if x.strip()]:
+                kv = re.split(r"[：:]", sub, maxsplit=1)
+                if len(kv) == 2:
+                    k, val = kv[0].strip(), kv[1].strip()
+                    if "地址" in k or "注册地" in k or "办公地" in k:
+                        out["address"] = val
+                    elif "业务" in k or "经营" in k or "职能" in k:
+                        out["biz"] = val
+                    else:
+                        _assign_addr_or_biz(out, val)
+                elif not _is_country_seg(sub):
+                    _assign_addr_or_biz(out, sub)
+        parts = [
+            p.strip()
+            for p in re.split(
+                r"[；;\n]+|[，,]\s*(?=(?:地址|注册地|办公地|所在国家|所在地区|主营业务|主要业务|业务范围|职能)\s*[:：]?)",
+                rec,
+            )
+            if p.strip()
+        ]
         if len(parts) == 1 and "：" not in rec and ":" not in rec:
-            out["name"] = rec
+            segs = _merge_corp_tail_segs([x.strip() for x in re.split(r"[，,]", rec) if x.strip()])
+            sep_join = ", " if "," in rec and "，" not in rec else "，"
+            if len(segs) >= 4 and _is_country_seg(segs[1]):
+                out["name"] = _clean_recipient_entity_name(segs[0])
+                out["address"] = out["address"] or segs[2]
+                out["biz"] = out["biz"] or sep_join.join(segs[3:])
+            elif len(segs) == 3 and _is_country_seg(segs[1]):
+                out["name"] = _clean_recipient_entity_name(segs[0])
+                _assign_addr_or_biz(out, segs[2])
+            elif len(segs) >= 3 and _is_country_seg(segs[-1]):
+                out["name"] = _clean_recipient_entity_name(segs[0])
+                mid = segs[1:-1]
+                if len(mid) >= 2 and _BIZ_SEG_RE.search(mid[-1]) and not _ADDR_SEG_RE.search(mid[-1]):
+                    out["address"] = out["address"] or sep_join.join(mid[:-1])
+                    out["biz"] = out["biz"] or mid[-1]
+                else:
+                    out["address"] = out["address"] or sep_join.join(mid)
+            elif len(segs) >= 4 and _is_country_seg(segs[-2]):
+                out["name"] = _clean_recipient_entity_name(segs[0])
+                out["address"] = out["address"] or sep_join.join(segs[1:-2])
+                out["biz"] = out["biz"] or segs[-1]
+            elif len(segs) >= 3:
+                out["name"] = _clean_recipient_entity_name(segs[0])
+                out["address"] = out["address"] or segs[1]
+                out["biz"] = out["biz"] or sep_join.join(segs[2:])
+            elif len(segs) == 2 and _ADDR_OR_BIZ_SEG_RE.search(segs[1]):
+                out["name"] = _clean_recipient_entity_name(segs[0])
+                _assign_addr_or_biz(out, segs[1])
+            else:
+                out["name"] = _clean_recipient_entity_name(rec)
         else:
             unlabeled: list[str] = []
             for p in parts:
                 kv = re.split(r"[：:]", p, maxsplit=1)
                 if len(kv) == 2:
                     k, val = kv[0].strip(), kv[1].strip()
-                    if "名称" in k and not out["name"]:
-                        out["name"] = val
+                    if "国家" in k or "地区" in k:
+                        continue
                     elif "地址" in k or "注册地" in k or "办公地" in k:
                         out["address"] = val
                     elif "业务" in k or "经营" in k or "职能" in k:
                         out["biz"] = val
+                    elif (
+                        any(w in k for w in ("名称", "接收方", "公司", "主体", "机构", "单位", "企业"))
+                        and "联系" not in k
+                        and not out["name"]
+                    ):
+                        out["name"] = _clean_recipient_entity_name(val)
+                    else:
+                        unlabeled.append(val)
                 else:
                     unlabeled.append(p)
+            non_country = [u for u in unlabeled if not _is_country_seg(u)]
             if not out["name"]:
-                out["name"] = unlabeled[0] if unlabeled else rec
-            if not out["address"] and len(unlabeled) >= 2:
-                out["address"] = unlabeled[1]
-            if not out["biz"] and len(unlabeled) >= 3:
-                out["biz"] = unlabeled[2]
+                lead_u = non_country[0] if non_country else (unlabeled[0] if unlabeled else rec)
+                out["name"] = _clean_recipient_entity_name(lead_u)
+                rem = non_country[1:] if non_country else []
+            else:
+                rem = non_country
+            if len(rem) == 1 and not out["address"] and not out["biz"]:
+                _assign_addr_or_biz(out, rem[0])
+            else:
+                if not out["address"] and len(rem) >= 1:
+                    out["address"] = rem[0]
+                if not out["biz"] and len(rem) >= 2:
+                    out["biz"] = "，".join(rem[1:])
     if con:
         person = _parse_person(con)
         if ("：" in con or ":" in con or "；" in con or ";" in con) and person.get("name") and person["name"] != con:
@@ -513,6 +739,8 @@ def _parse_recipient_info(rec_raw: str, contact_raw: str) -> dict[str, str]:
 
 def cn_declaration(values: dict[str, str]) -> FillResult:
     """附件 3 数据出境安全评估申报表：在官方模板上填写。"""
+    from app.analysis.cn_route import has_no_personal_data
+
     v = {k: str(x or "").strip() for k, x in values.items()}
     v = {k: ("" if x.startswith("暂不确定") else x) for k, x in v.items()}
     industries = ["工业", "电信", "交通", "金融", "自然资源", "卫生健康", "教育", "科技", "能源", "国防科工", "文旅", "跨境电商", "零售", "互联网"]
@@ -521,11 +749,10 @@ def cn_declaration(values: dict[str, str]) -> FillResult:
     picked = _first(v.get("industry_field", ""), industries) or (["交通"] if not v.get("industry_field") or any(w in v.get("industry_field", "") for w in ("汽车", "车联网", "智能网联")) else [])
     v.setdefault("entity_nature", "企业") if v.get("entity_nature") else v.__setitem__("entity_nature", "企业")
     # 含敏感个人信息必然含个人信息；写了涉及多少自然人（不是“0/无”）的也含个人信息
-    sensitive_yes = _yes_no(v.get("sensitive_pi", "")) == ["是"]
+    sensitive_yes = _yes_no(v.get("sensitive_pi", ""), "sensitive_pi") == ["是"]
     volume = v.get("data_volume", "")
-    has_pi = sensitive_yes or (bool(volume) and not re.match(r"^\s*(0|零|无|不涉及|没有)", volume)) or (
-        bool(v.get("data_types")) and not re.match(r"^(无|不含|没有)", v.get("sensitive_pi", "") or "x")
-    )
+    no_pi_vol = has_no_personal_data(volume, v.get("sensitive_pi", ""), v.get("data_types", ""))
+    has_pi = sensitive_yes or ((bool(volume) or bool(v.get("data_types"))) and not no_pi_vol)
     rep = _parse_person(v.get("legal_rep", ""))
     sec = _parse_person(v.get("security_officer", ""))
     agt = _parse_person(v.get("agent_info", ""))
@@ -554,7 +781,7 @@ def cn_declaration(values: dict[str, str]) -> FillResult:
         Slot("办公所在地", v.get("office_place", "")),
         Slot("员工数量", v.get("staff_count", "")),
         Slot("统一社会信用代码", v.get("credit_code", "")),
-        Slot("是否为关键信息基础设施运营者", choose=_yes_no(v.get("is_cii", ""))),
+        Slot("是否为关键信息基础设施运营者", choose=_yes_no(v.get("is_cii", ""), "is_cii")),
         Slot("处理个人信息规模", v.get("pi_scale", "")),
         *_person_slots(rep, "2"),
         *_person_slots(sec, "3"),
@@ -563,9 +790,9 @@ def cn_declaration(values: dict[str, str]) -> FillResult:
         *_person_slots(agt, "4"),
         Slot("5数据处理者遵守中国法律、行政法规、部门规章情况", v.get("law_compliance", "")),
         Slot("出境场景简述", v.get("scenario_summary", "") or v.get("scenario", ""), group="6数据出境场景1"),
-        Slot("重要数据", choose=["重要数据"] if _yes_no(v.get("important_data", "")) == ["是"] else [], in_cell=True, group="6数据出境场景1"),
+        Slot("重要数据", choose=["重要数据"] if _yes_no(v.get("important_data", ""), "important_data") == ["是"] else [], in_cell=True, group="6数据出境场景1"),
         Slot("个人信息", choose=["个人信息"] if has_pi else [], in_cell=True, group="6数据出境场景1"),
-        Slot("是否包含敏感个人信息", choose=_yes_no(v.get("sensitive_pi", "")), group="6数据出境场景1"),
+        Slot("是否包含敏感个人信息", choose=_yes_no(v.get("sensitive_pi", ""), "sensitive_pi"), group="6数据出境场景1"),
         Slot("涉及行业/领域", choose=picked, other="" if picked else v.get("industry_field", ""), group="6数据出境场景1"),
         Slot("涉及自然人（去重）数量", v.get("data_volume", ""), group="6数据出境场景1"),
         Slot("境外接收方名称", rcp.get("name", ""), group="6数据出境场景1"),
@@ -711,7 +938,8 @@ def _para_like(guide, text: str):
     _set_font_family(props, "仿宋")
     _set_font_size(props, "28")
     _set_bold(props, False)
-    for i, line in enumerate(text.split("\n")):
+    clean_txt = _clean_xml_str(text)
+    for i, line in enumerate(clean_txt.split("\n")):
         run = ET.SubElement(p, W + "r")
         run.append(copy.deepcopy(props))
         if i:
@@ -934,7 +1162,7 @@ def fill_narrative_form(template: bytes, start_title: str, end_title: str, answe
         has_seal = "（盖章）" in orig_flat or "(盖章)" in orig_flat
         found_rpr = _run_props(para)
         base_rpr = found_rpr if found_rpr is not None else ET.Element(W + "rPr")
-        clean_val = value.strip()
+        clean_val = _clean_xml_str(value).strip()
         seal_text = "（盖章）" if has_seal else ""
         total_len = len(label.strip()) + len(clean_val) + (4 if has_seal else 0)
         cover_sz = _cover_font_size(total_len)
@@ -963,7 +1191,7 @@ def fill_narrative_form(template: bytes, start_title: str, end_title: str, answe
             r = ET.SubElement(date_para, W + "r")
             r.append(copy.deepcopy(d_rpr))
             t = ET.SubElement(r, W + "t")
-            t.text = _format_cn_cover_date(cover_date)
+            t.text = _clean_xml_str(_format_cn_cover_date(cover_date))
             t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
             _style_official_para(date_para, east_asia="仿宋", sz=cover_sz, bold=True, center=True)
             result.filled.append("年月日")
@@ -1351,7 +1579,7 @@ def cn_standard_contract(values: dict[str, str], blank: str = "") -> FillResult:
             else "<w:ind w:firstLine='0' w:firstLineChars='0'/>"
         )
         rfonts = f"<w:rFonts w:ascii='Times New Roman' w:hAnsi='Times New Roman' w:eastAsia='{font}' w:cs='Times New Roman'/>"
-        safe = _esc(text)
+        safe = _esc(_clean_xml_str(text))
         return (
             f"<w:p><w:pPr>{kn_xml}<w:spacing w:before='{before}' w:after='{after}' w:line='{line}' w:lineRule='exact'/>"
             f"{ind_xml}<w:jc w:val='{jc_val}'/></w:pPr>"
@@ -1533,7 +1761,7 @@ def cn_standard_contract(values: dict[str, str], blank: str = "") -> FillResult:
                 ("（二）处理方式", f"车端脱敏与去标识化预处理、跨境加密通道传输、境外受控云端存储分析及到期安全彻底删除（{chain_txt}）"),
                 ("（三）出境个人信息的规模", val("data_volume")),
                 ("（四）出境个人信息种类", val("data_types")),
-                ("（五）出境敏感个人信息种类", val("sensitive_pi_kinds", "不涉及" if re.match(r"^(否|无|不含)", v.get("sensitive_pi", "")) else fallback)),
+                ("（五）出境敏感个人信息种类", val("sensitive_pi_kinds", "不涉及" if _yes_no(v.get("sensitive_pi", ""), "sensitive_pi") == ["否"] else fallback)),
                 ("（六）境外接收方只向以下境外第三方提供个人信息", onward_txt),
                 ("（七）传输方式", chain_txt),
                 ("（八）出境后保存期限", ret_period),
@@ -1723,7 +1951,8 @@ def _replace_para_text(para, new_text: str) -> None:
     run = ET.SubElement(para, W + "r")
     if props is not None:
         run.append(copy.deepcopy(props))
-    for idx, line in enumerate(new_text.split("\n")):
+    clean_new = _clean_xml_str(new_text)
+    for idx, line in enumerate(clean_new.split("\n")):
         if idx:
             ET.SubElement(run, W + "br")
         t = ET.SubElement(run, W + "t")

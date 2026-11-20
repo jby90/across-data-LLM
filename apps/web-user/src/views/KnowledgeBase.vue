@@ -821,21 +821,37 @@ onMounted(async () => {
       </div>
     </header>
     <el-tabs v-model="tab" :key="country ? (country === 'CN' ? 'kb-cn' : 'kb-country') : 'kb-overview'" class="kb-tabs">
-      <el-tab-pane v-if="!country" :label="`国别法规（${countries.length || 6}）`" name="countries">
+      <el-tab-pane v-if="!country" :label="`国别法规（${countries.length}）`" name="countries">
         <section class="kb-pick" data-testid="kb-pick">
           <p class="kb-scope-note" data-testid="kb-scope-note">
             统计口径：默认聚焦企业日常检索的核心与常用现行法规（进入国别目录后可展开全部外围配套文件），条文按合并后的阅读条文展示。
           </p>
-          <div class="country-grid" data-testid="kb-country-cards">
-            <button v-for="c in countries" :key="c.country_code" type="button" class="country-tile" :data-testid="`kb-country-${c.country_code}`" @click="chooseCountry(c.country_code)">
-              <div class="tile-head">
-                <strong>{{ c.country_name_zh }}</strong>
-                <span class="tile-badge">{{ c.country_code === 'CN' ? '出境源头法规' : '法规与合规简报' }}</span>
-              </div>
-              <span class="tile-count">{{ c.documents_count }} 份核心常用法规 · 阅读条文</span>
-              <span class="tile-updated">法规最后更新 {{ localTime(c.last_updated_at, 'date') || '—' }}</span>
-            </button>
-          </div>
+          <el-empty
+            v-if="!countries.length"
+            description="当前法规库尚未收录国家与法规条文"
+            data-testid="kb-empty-countries"
+          />
+          <template v-else>
+            <el-alert
+              v-if="countries.every((c) => (c.documents_count ?? 0) === 0)"
+              type="info"
+              :closable="false"
+              show-icon
+              title="当前法规库尚未收录现行法规条文，待平台管理员在后台完成官方法规采集或上传后，即可在此检索条文与查阅国家合规简报。"
+              style="margin-bottom: 12px"
+              data-testid="kb-coldboot-notice"
+            />
+            <div class="country-grid" data-testid="kb-country-cards">
+              <button v-for="c in countries" :key="c.country_code" type="button" class="country-tile" :data-testid="`kb-country-${c.country_code}`" @click="chooseCountry(c.country_code)">
+                <div class="tile-head">
+                  <strong>{{ c.country_name_zh }}</strong>
+                  <span class="tile-badge">{{ c.country_code === 'CN' ? '出境源头法规' : '法规与合规简报' }}</span>
+                </div>
+                <span class="tile-count">{{ c.documents_count ? `${c.documents_count} 份核心常用法规 · 阅读条文` : '暂未收录现行法规条文' }}</span>
+                <span class="tile-updated">法规最后更新 {{ localTime(c.last_updated_at, 'date') || '—' }}</span>
+              </button>
+            </div>
+          </template>
         </section>
       </el-tab-pane>
       <el-tab-pane v-if="country && country !== 'CN'" label="国家合规简报" name="whitepaper" lazy
@@ -1132,7 +1148,7 @@ onMounted(async () => {
           layout="prev, pager, next, total"
       /></el-tab-pane>
       <el-tab-pane name="standards">
-        <template #label><span data-testid="kb-direct-standards">{{ country ? '标准目录' : `标准目录（${standards.length || 311}）` }}</span></template>
+        <template #label><span data-testid="kb-direct-standards">{{ country ? '标准目录' : `标准目录（${standards.length}）` }}</span></template>
         <div class="library-toolbar">
           <div class="knowledge-search in-tab">
             <el-input

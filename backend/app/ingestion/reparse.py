@@ -99,9 +99,13 @@ async def reparse_from_pages(
     allow_shrink: bool = False,
     preserve_page_count: int | None = None,
 ) -> dict:
+    from app.ingestion.models import Document
+
     old = await session.get(DocumentVersion, version_id)
     if old is None or old.state != VersionState.PARSED.value:
         raise ValueError("only a parsed version can be re-parsed")
+    await session.scalar(select(Document.id).where(Document.id == old.document_id).with_for_update())
+    await session.refresh(old)
     last = await session.scalar(
         select(func.max(DocumentVersion.version_no)).where(
             DocumentVersion.document_id == old.document_id

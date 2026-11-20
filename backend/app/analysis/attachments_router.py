@@ -27,9 +27,20 @@ UserDep = Annotated[Principal, Depends(require_user_side)]
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
-async def _task(session: AsyncSession, task_id: uuid.UUID, user: Principal) -> AnalysisTask:
-    task = await session.get(AnalysisTask, task_id)
-    if task is None or task.org_id != user.org_id:
+async def _task(session: AsyncSession, task_id: uuid.UUID, user: Principal, *, for_update: bool = False) -> AnalysisTask:
+    from app.analysis.chat_advisor import viewer_owner
+
+    if for_update:
+        task = await session.scalar(
+            select(AnalysisTask)
+            .where(AnalysisTask.id == task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    else:
+        task = await session.get(AnalysisTask, task_id)
+    owner = viewer_owner(task) if task is not None else None
+    if task is None or task.org_id != user.org_id or (owner is not None and owner != str(user.user_id)):
         raise HTTPException(404, "对话不存在")
     return task
 
@@ -127,7 +138,7 @@ async def upload_attachment(
     task_id: uuid.UUID, filename: str, request: Request, user: UserDep, session: SessionDep
 ) -> dict:
     """The request body is the file. Reads it in pieces and refuses anything over the size limit."""
-    task = _writable(await _task(session, task_id, user))
+    task = _writable(await _task(session, task_id, user, for_update=True))
     filename = filename.strip().replace("\\", "/").rsplit("/", 1)[-1][:255]
     if not filename:
         raise HTTPException(422, "缺少文件名")

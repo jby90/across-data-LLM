@@ -42,13 +42,15 @@ async def trace_events(session, task, tr):
         "workflow_version_id": str(task.workflow_version_id),
     }
     for tool in tr.tool_calls_json:
+        raw_tname = tool["tool_name"]
+        safe_tname = "model.analyze" if raw_tname == "llm.chat" else raw_tname
         await append_event(
             session,
             task,
             "tool_called",
             data
             | {
-                "tool_name": tool["tool_name"],
+                "tool_name": safe_tname,
                 "duration_ms": tool["duration_ms"],
             },
         )
@@ -192,8 +194,13 @@ async def stream_events(request, engine, principal, after=0, task_id=None):
                             cursor,
                         )
                         continue
+                    from app.analysis.router import _humanize_any_schema
+
+                    clean_payload = _humanize_any_schema(dict(event.payload or {}))
+                    if clean_payload.get("tool_name") == "llm.chat":
+                        clean_payload["tool_name"] = "model.analyze"
                     yield sse(
-                        event.event_type, {"task_id": str(event.task_id), **event.payload}, cursor
+                        event.event_type, {"task_id": str(event.task_id), **clean_payload}, cursor
                     )
                 if len(events) == 200:
                     continue

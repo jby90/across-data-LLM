@@ -188,8 +188,15 @@ def compute_next_digest_run(now: datetime, weekday: int = 1, hour_utc: int = 1) 
 
 
 async def get_or_create_config(session: AsyncSession) -> OpinionDigestConfig:
+    from sqlalchemy import text as sa_text
+
     now = datetime.now(UTC)
-    cfg = await session.scalar(select(OpinionDigestConfig).limit(1))
+    await session.execute(sa_text("SELECT pg_advisory_xact_lock(64042012)"))
+    cfg = await session.scalar(
+        select(OpinionDigestConfig)
+        .order_by(OpinionDigestConfig.updated_at.asc(), OpinionDigestConfig.id.asc())
+        .limit(1)
+    )
     if cfg is None:
         cfg = OpinionDigestConfig(
             enabled=True,
@@ -359,15 +366,22 @@ def _send_smtp_sync(
         smtp.send_message(msg)
 
 
+def _sanitize_header_val(val: str) -> str:
+    return re.sub(r"[\r\n\x00-\x1f\x7f]+", "", val or "").strip()
+
+
 def _archive_local_eml(run_id: str, subject: str, recipients: list[str], html_body: str) -> str:
-    out_dir = Path("data") / "opinion_digests"
+    from app.core.config import get_settings
+
+    out_dir = Path(get_settings().archive_dir) / "opinion_digests"
     out_dir.mkdir(parents=True, exist_ok=True)
     html_path = out_dir / f"digest_{run_id}.html"
     html_path.write_text(html_body, encoding="utf-8")
     msg = EmailMessage()
-    msg["Subject"] = subject
+    msg["Subject"] = _sanitize_header_val(subject)
     msg["From"] = "digest@cyshuhe.local"
-    msg["To"] = ", ".join(recipients) if recipients else "portal-subscribers@cyshuhe.local"
+    clean_rcpts = [_sanitize_header_val(r) for r in recipients if _sanitize_header_val(r)]
+    msg["To"] = ", ".join(clean_rcpts) if clean_rcpts else "portal-subscribers@cyshuhe.local"
     msg.set_content("请使用支持 HTML 的邮件客户端查阅本期合规周报。")
     msg.add_alternative(html_body, subtype="html")
     eml_path = out_dir / f"digest_{run_id}.eml"

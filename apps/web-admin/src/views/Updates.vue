@@ -82,7 +82,7 @@ onMounted(load)
 </script>
 <template>
   <div class="management-page" v-loading="busy">
-    <header class="page-heading"><div><h1>更新与时效</h1><p>跟踪各国官方法规条文变化、受影响的企业合规文件提醒及新资料收录入库进展。</p></div><div class="page-actions"><el-button type="primary" plain :loading="exporting" data-testid="updates-export-xlsx" @click="exportReport">导出时效统计报表（Excel）</el-button><el-button @click="load">刷新状态</el-button></div></header>
+    <header class="page-heading"><div><h1>更新与时效</h1><p>跟踪各国官方法规条文变化、受影响的企业合规文件提醒及新资料收录入库进展。</p></div><div class="page-actions"><el-button plain @click="router.push('/whitepapers')">国家合规简报增量管理</el-button><el-button type="primary" plain :loading="exporting" data-testid="updates-export-xlsx" @click="exportReport">导出时效统计报表（Excel）</el-button><el-button @click="load">刷新状态</el-button></div></header>
     <el-alert v-if="error" type="error" :closable="false" :title="`更新状态加载失败：${error}`" />
     <div class="sla-cards" data-testid="update-sla-summary">
       <article>
@@ -91,7 +91,7 @@ onMounted(load)
       </article>
       <article>
         <span>采集站点按期检查率（在用 {{ report?.patrol_timeliness.active_sites ?? '—' }} 个官方站点）</span>
-        <strong>{{ report ? `${report.patrol_timeliness.on_schedule_rate_pct}%` : '—' }}</strong>
+        <strong>{{ report ? ((report.patrol_timeliness.active_sites ?? 0) > 0 ? `${report.patrol_timeliness.on_schedule_rate_pct}%` : '暂无在用站点') : '—' }}</strong>
       </article>
       <article>
         <span>{{ (report?.intake_30d.tracked ?? 0) > 0 ? `近 30 日新收录法规（全库 ${report?.intake_30d.in_library_documents_total ?? (total || sla?.intake.completed || 0)} 份 · 近 30 日新收录 ${report!.intake_30d.tracked} 份）` : `近 30 日新收录法规（全库已收录 ${report?.intake_30d.in_library_documents_total ?? (total || sla?.intake.completed || 0)} 份）` }}</span>

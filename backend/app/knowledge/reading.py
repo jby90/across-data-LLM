@@ -76,7 +76,7 @@ def pieces(rows: list[Row]) -> dict:
         # 先找条号正好是 base 的那条（指南的段号“19.8”本身也带小数点）；找不到时取同页同标题、
         # 本身不像片段的前一行（如没有条号的目录）
         earlier = [r for r in same if (r.clause_number or "") == base] or [
-            r for r in same if not _PIECE.match(r.clause_number or "")
+            r for r in same if not _PIECE.match(r.clause_number or "") and not _is_note(r)
         ]
         if earlier and row.ordinal > earlier[-1].ordinal + 1:
             for r in run:
@@ -119,6 +119,10 @@ def reading_units(rows: list[Row]) -> list[Unit]:
             # 各段排在本条原有内容之后、注记之前（注记总在条文末尾）
             at = next((k for k, r in enumerate(unit.rows) if k and _is_note(r)), len(unit.rows))
             unit.rows.insert(at, row)
+        elif head is not None:
+            unit = Unit([row])
+            by_head[row.id] = unit
+            units.append(unit)
     return units
 
 

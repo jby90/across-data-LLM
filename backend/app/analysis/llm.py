@@ -109,26 +109,35 @@ async def post_model(payload, *, timeout, purpose, protected=None):
                 headers={"Authorization": f"Bearer {settings.llm_api_key}"},
                 json=safe_payload,
             )
-        stage = "success" if response.is_success else "http_error"
+        stage = "http_error"
         if response.is_success:
             body = response.json()
             if not isinstance(body, dict):  # 偶尔返回 200 但正文是 null：当作空回复，走重试
                 body = {}
-            usage = body.get("usage") or {}
-            for choice in body.get("choices") or []:
-                message = choice.get("message") or {}
-                content = message.get("content")
-                if not isinstance(content, str):
-                    continue
-                try:
-                    parsed = parse_model_json(content)
-                except ValueError:
-                    message["content"] = redactor.restore(content)
-                else:
-                    message["content"] = json.dumps(redactor.restore(parsed), ensure_ascii=False)
+            raw_usage = body.get("usage")
+            usage = raw_usage if isinstance(raw_usage, dict) else {}
+            raw_choices = body.get("choices")
+            if isinstance(raw_choices, list):
+                for choice in raw_choices:
+                    if not isinstance(choice, dict):
+                        raise ValueError("模型返回项结构异常")
+                    message = choice.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    content = message.get("content")
+                    if not isinstance(content, str):
+                        continue
+                    try:
+                        parsed = parse_model_json(content)
+                    except ValueError:
+                        message["content"] = redactor.restore(content)
+                    else:
+                        restored_obj = redactor.restore(parsed)
+                        message["content"] = json.dumps(restored_obj, ensure_ascii=False)
             response = httpx.Response(response.status_code, json=body, request=response.request)
+            stage = "success"
         return response
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, TypeError, AttributeError):
         stage = "response_format_error"
         raise
     finally:
@@ -180,10 +189,11 @@ async def call_llm_json(
     """调用大模型并要求返回 JSON;格式异常或网络错误时重试一次,仍失败抛出 LlmUnavailableError。"""
     settings = get_settings()
     if not settings.llm_api_key:
-        raise LlmUnavailableError("未配置大模型密钥(环境变量 CYSH_LLM_API_KEY)")
+        raise LlmUnavailableError("智能分析服务尚未完成连接配置，请稍后重试或联系管理员")
     requested_model = model or settings.llm_model
     request_timeout = timeout if timeout is not None else settings.llm_analysis_timeout_seconds
     last_error = ""
+    last_error_zh = "服务响应异常"
     error_kind = "model_unavailable"
     started = time.perf_counter()
     prompt_tokens = completion_tokens = 0
@@ -208,25 +218,42 @@ async def call_llm_json(
             )
             resp.raise_for_status()
             body = resp.json()
-            usage = body.get("usage") or {}
+            if not isinstance(body, dict):
+                raise ValueError("模型返回结构为空")
+            usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
             prompt_tokens += int(usage.get("prompt_tokens") or 0)
             completion_tokens += int(usage.get("completion_tokens") or 0)
-            choice = body["choices"][0]
+            choices = body.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise ValueError("模型未返回有效候选内容")
+            choice = choices[0]
             if choice.get("finish_reason") == "length":
                 raise ValueError("模型输出被长度上限截断")
-            data = parse_model_json(choice["message"]["content"])
-        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            msg_obj = choice.get("message")
+            raw_content = msg_obj.get("content") if isinstance(msg_obj, dict) else None
+            if not isinstance(raw_content, str) or not raw_content.strip():
+                raise ValueError("模型返回内容为空")
+            data = parse_model_json(raw_content)
+        except (httpx.HTTPError, LookupError, ValueError, TypeError, AttributeError) as exc:
             error_kind = (
                 "model_unavailable" if isinstance(exc, httpx.HTTPError) else "model_format_error"
             )
             # Do not retain provider URLs, request headers or arbitrary response bodies.
-            last_error = (
-                f"HTTP {exc.response.status_code}"
-                if isinstance(exc, httpx.HTTPStatusError)
-                else "output_truncated"
-                if isinstance(exc, ValueError) and str(exc) == "模型输出被长度上限截断"
-                else type(exc).__name__
-            )
+            if isinstance(exc, httpx.HTTPStatusError):
+                last_error = f"HTTP {exc.response.status_code}"
+                last_error_zh = f"上游服务繁忙（状态码 {exc.response.status_code}）"
+            elif isinstance(exc, httpx.TimeoutException):
+                last_error = "timeout"
+                last_error_zh = "网络请求超时"
+            elif isinstance(exc, httpx.HTTPError):
+                last_error = "network_error"
+                last_error_zh = "网络连接异常"
+            elif isinstance(exc, ValueError) and str(exc) == "模型输出被长度上限截断":
+                last_error = "output_truncated"
+                last_error_zh = "生成篇幅达到单次长度上限截断"
+            else:
+                last_error = type(exc).__name__
+                last_error_zh = "返回结构格式未通过核验"
             failures.append({"attempt": _attempt + 1, "kind": error_kind, "reason": last_error})
             continue
         return LlmResult(
@@ -239,7 +266,7 @@ async def call_llm_json(
             failures=failures,
         )
     raise LlmUnavailableError(
-        f"大模型调用失败(共 {MAX_ATTEMPTS} 次请求): {last_error}",
+        f"智能分析服务暂时繁忙（已重试 {MAX_ATTEMPTS} 次：{last_error_zh}）",
         kind=error_kind,
         tokens=prompt_tokens + completion_tokens,
         failures=failures,

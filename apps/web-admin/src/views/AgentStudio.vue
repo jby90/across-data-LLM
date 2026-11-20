@@ -355,7 +355,11 @@ const STUDIO_CLEAN_RULES: Array<[RegExp, string]> = [
   [new RegExp('SHA-?256\\s*归档状态及外文\\s*' + 'OCR\\s*[/／]\\s*翻译复核资格', 'gi'), '官方原文完整性与中文译文状态'],
   [new RegExp('外文\\s*' + 'OCR\\s*[/／]\\s*翻译复核(?:资格)?', 'gi'), '中文译文与扫描件核对状态'],
   [/SHA-?256\s*(?:归档状态|完整性|哈希|校验)?/gi, '官方原文完整性'],
-  [new RegExp('\\bO' + 'CR\\b', 'g'), '文字识别'],
+  [new RegExp('(?<![A-Za-z0-9])O' + 'CR(?![A-Za-z0-9])', 'gi'), '文字识别'],
+  [new RegExp('(?<![A-Za-z0-9])J' + 'SON(?![A-Za-z0-9])', 'gi'), '结构化数据'],
+  [new RegExp('(?<![A-Za-z0-9])L' + 'LM(?![A-Za-z0-9])', 'gi'), '智能模型'],
+  [new RegExp('(?<![A-Za-z0-9])U' + 'UID(?![A-Za-z0-9])', 'gi'), '资源标识'],
+  [new RegExp('(?<![A-Za-z0-9])Pyd' + 'antic(?![A-Za-z0-9])', 'gi'), '格式核验'],
   [/[（(]\s*in_force\s*[)）]/gi, '（现行有效）'],
   [/\bin_force\b/gi, '现行有效'],
   [/Clause\.original_text/gi, '在库现行法规条文原文'],
@@ -366,7 +370,7 @@ const STUDIO_CLEAN_RULES: Array<[RegExp, string]> = [
   [new RegExp('Fact\\s*' + 'Collector(?:\\s*&\\s*Sufficiency\\s*Guard)?', 'gi'), '业务信息采集与完备度核验'],
   [/Sufficiency\s*Guard/gi, '完备度核验'],
   [/Effective\s*Law\s*&\s*KG\s*RAG\s*Retriever|KG\s*RAG\s*Retriever|RAG\s*Retriever/gi, '现行法规与知识图谱检索'],
-  [/\bRAG\b/g, '法规检索'],
+  [new RegExp('(?:Graph)?R' + 'AG', 'gi'), '法规检索'],
   [/8-Dimension\s*Compliance\s*Matrix\s*Analyst/gi, '八方面合规分析'],
   [new RegExp('Programmatic\\s*Citation\\s*&\\s*Substring\\s*' + 'Gate(?:\\s*Verifier)?', 'gi'), '条文引用逐字核验'],
   [new RegExp('Substring\\s*' + 'Gate(?:\\s*Verifier)?', 'gi'), '条文引用逐字核验'],
@@ -3248,8 +3252,8 @@ onUnmounted(() => {
 .canvas-stage .node-collecting-banner,
 .canvas-stage .node-card-meta *,
 .canvas-stage .node-trace-footer *,
-.canvas-stage .node-lock-tag { font-size: calc(12.5px / max(var(--cz), 0.72)) !important; }
-.canvas-stage .node-card-title { font-size: calc(14.5px / max(var(--cz), 0.72)) !important; line-height: 1.38; }
+.canvas-stage .node-lock-tag { font-size: calc(13px / clamp(0.5, var(--cz), 1)) !important; }
+.canvas-stage .node-card-title { font-size: calc(15px / clamp(0.5, var(--cz), 1)) !important; line-height: 1.38; }
 .edge-group .edge-label { opacity: 0; pointer-events: none; transition: opacity 0.12s; }
 .edge-group { pointer-events: stroke; }
 .edge-group:hover .edge-label { opacity: 1; }

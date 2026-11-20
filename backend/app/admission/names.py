@@ -84,14 +84,19 @@ def normalize_body(t: str, cc: str = "") -> str:
         t = re.sub(rf"(?<![A-Za-z]){abbr}\s*[（(]\s*{re.escape(bare)}\s*[）)]", full, t)
         t = re.sub(rf"{re.escape(bare)}\s*[（(]\s*{abbr}\s*[）)]", full, t)
         t = re.sub(rf"{re.escape(bare)}\s+{abbr}(?![A-Za-z])", full, t)
-        t = re.sub(rf"{re.escape(bare)}(?![（(])", full, t)
+        t = re.sub(rf"{re.escape(bare)}(?![（(]|[\u4e00-\u9fff]{{1,12}}[（(]\s*{re.escape(abbr)}\s*[）)])", full, t)
     for short, full, abbr in _ALIAS.get((cc or "").upper(), []):
         t = re.sub(rf"(?<![A-Za-z]){abbr}\s*[（(]\s*(?:{_CN[cc.upper()]})?(?:{short})\s*[）)]", full, t)
-        t = re.sub(rf"(?:{_CN[cc.upper()]})?(?:{short})(?:\s*[（(]\s*{abbr}\s*[）)]|\s+{abbr}(?![A-Za-z]))?(?![（(])", full, t)
+        t = re.sub(
+            rf"(?:{_CN[cc.upper()]})?(?:{short})(?:\s*[（(]\s*{abbr}\s*[）)]|\s+{abbr}(?![A-Za-z]))?(?![（(]|[\u4e00-\u9fff]{{1,12}}[（(]\s*{re.escape(abbr)}\s*[）)])",
+            full,
+            t,
+        )
         t = re.sub(rf"(?<![A-Za-z（(\u4e00-\u9fff]){abbr}(?![A-Za-z）)])", full, t)
     if (cc or "").upper() == "TN":
         t = re.sub(r"(?<![’'A-Za-z])Instance(?![A-Za-z])", "突尼斯国家个人数据保护局（INPDP）", t)
         t = re.sub(r"（(ANCE|INPDP)）构", r"（\1）", t)
+    t = re.sub(r"[（(]([A-Za-z]{2,10})[）)]([\u4e00-\u9fff]{1,12})[（(]\1[）)]", r"\2（\1）", t)
     return t
 
 

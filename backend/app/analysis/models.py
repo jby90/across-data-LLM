@@ -139,6 +139,7 @@ class AnalysisStepTrace(TenantOwnedMixin, Base):
     """多智能体协同步骤轨迹表(记录每个 Agent 节点输入输出、MCP 工具调用、核验与退回补证)。"""
 
     __tablename__ = "analysis_step_traces"
+    __table_args__ = (UniqueConstraint("task_id", "seq_no", name="uq_step_trace_task_seq"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(

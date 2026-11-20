@@ -55,7 +55,7 @@ _COMMENCE = re.compile(
 _TRANSITION = re.compile(r"过渡|本(法|条例|规定)(公布|施行|生效)前|自[^。；]{0,20}设立之日起[^。；]{0,20}期限[^。；]{0,30}(符合|合规|调整)|最长[^。；]{0,6}年的期限|废止|予以撤销")
 _AUTHORITY_OWN = re.compile(r"(安全评估|评估|审查|审核)过程中，?发现|^\s*(第[^条]{1,8}条\s*)?(国家网信部门|各地网信部门|省级网信部门|网信部门|国务院有关部门|中心|委员会|国家委员会|该局|主管(机关|部门))(应当|应|负责|可以)?(加强|组织|制定|在|自|会同|定期|对)")
 # 车企用不上的条文
-_NOT_FOR_MAKERS = re.compile(r"政务数据|电子政务|国家机关(委托|应当|不得|收集)|协会、工会|俱乐部|数字证据|电子证据|解散或合并|解散、合并|主席和成员|(成员|工作人员)[^。；]{0,12}(保守|保密)|视频记录|视频监控|公共场所[^。；]{0,12}监控|(电信|网络)?运营商[^。；]{0,20}(日志|通信记录)|服务提供者[^。；]{0,12}(保存|留存)[^。；]{0,10}(日志|流量数据|通信数据)|直接营销|电子营销|营销活动|自然人(取得|申请|获得)[^。；]{0,6}(许可|批准|证书)|公共场所[^。；]{0,8}(视觉)?监控|视频监控|门禁|个人或家庭事务|为个人或家庭")
+_NOT_FOR_MAKERS = re.compile(r"政务数据|电子政务|国家机关(委托|应当|不得|收集)|协会、工会|俱乐部|数字证据|电子证据|解散或合并|解散、合并|主席和成员|(成员|工作人员)[^。；]{0,12}(保守|保密)|视频记录|视频监控|公共场所[^。；]{0,12}监控|(电信|网络)?运营商[^。；]{0,20}(日志|通信记录)|服务提供者[^。；]{0,12}(保存|留存)[^。；]{0,10}(日志|流量数据|通信数据)|直接营销|电子营销|营销活动|自然人(取得|申请|获得)[^。；]{0,6}(许可|批准|证书)|公共场所[^。；]{0,8}(视觉)?监控|视频监控|门禁|个人或家庭事务|为个人或家庭|驾驶学校|驾校|驾驶教练|教练车|计价器|出租汽车计价|行人违法|畜力车")
 # 涉及个人信息时不引“不含个人信息即免”的条文
 _RECEIVER_LAW = re.compile(r"个人(数据|信息)|数据主体|权利|投诉|申诉|诉讼|赔偿|监管|主管部门|委员会|中心|调查|检查")
 _ONWARD = re.compile(r"跨境|向境外|出境|境外传输|转移到?国外|向外国|传输至境外|transfer", re.IGNORECASE)
@@ -177,9 +177,13 @@ def overseas(source: str | None, recipient: str | None) -> str | None:
 
 def personal_involved(values: dict[str, str]) -> bool:
     """Whether the transfer carries personal information, unless the enterprise said it does not."""
-    if str(values.get("sensitive_pi", "")).strip().startswith("是"):
-        return True
-    return not _NO_PERSONAL.search(str(values.get("data_volume", "")))
+    from app.analysis.cn_route import has_no_personal_data
+
+    return not has_no_personal_data(
+        str(values.get("data_volume", "")),
+        str(values.get("sensitive_pi", "")),
+        str(values.get("data_types", "")),
+    )
 
 
 def _text(c: dict) -> str:
@@ -292,6 +296,49 @@ def applicable(citations: list[dict], values: dict[str, str], code: str, assesse
     return out
 
 
+_SQL_ELIGIBLE_DOC_VER_CLAUSE = """
+  and not exists (
+    select 1 from knowledge_change_proposals p
+    where p.target_type = 'documents' and p.target_id = d.id
+      and p.status in ('pending_review', 'approved')
+      and coalesce((p.payload->>'safety_hold')::boolean, false)
+  )
+  and not exists (
+    select 1 from knowledge_change_proposals p
+    where p.target_type = 'clauses'
+      and p.status in ('pending_review', 'approved')
+      and p.payload->'source_parse_revision'->>'scope' = 'whole_source_page'
+      and (
+        p.target_id = k.id
+        or (
+          p.payload->'source_parse_revision'->>'version_id' = k.version_id::text
+          and (p.payload->'source_parse_revision'->>'page_number')::int >= k.page_start
+          and (p.payload->'source_parse_revision'->>'page_number')::int <= k.page_end
+        )
+      )
+  )
+  and v.legal_status not in ('repealed', 'draft')
+  and v.review_status <> 'rejected'
+  and v.version_no = (
+    select max(x.version_no) from document_versions x
+    where x.document_id = d.id and x.state = 'parsed'
+      and x.legal_status <> 'draft'
+      and x.review_status <> 'rejected'
+  )
+"""
+
+
+_SQL_SINGLE_CURRENT_TR = (
+    "(select t.translated_text from clause_translations t "
+    "where t.clause_id=k.id and t.is_current and t.quality_check_passed "
+    "and t.review_status not in ('translation_failed','not_translated','rejected','stale','superseded') "
+    "and not exists (select 1 from clause_translations t2 where t2.clause_id=k.id and t2.id<>t.id "
+    "and t2.is_current and t2.quality_check_passed "
+    "and t2.review_status not in ('translation_failed','not_translated','rejected','stale','superseded')) "
+    "limit 1)"
+)
+
+
 async def core_clauses(session: AsyncSession, country: str | None, side: str) -> list[dict]:
     """The sending country's vehicle-data regulation (its articles on important data and transfers
     abroad), always part of the basis when the library holds it."""
@@ -300,12 +347,12 @@ async def core_clauses(session: AsyncSession, country: str | None, side: str) ->
     rows = (
         await session.execute(
             sql(
-                """select k.id::text, d.id::text, coalesce(d.title_zh, d.title), d.title, k.clause_number, k.original_text,
-                   (select t.translated_text from clause_translations t where t.clause_id=k.id and t.is_current limit 1)
+                f"""select k.id::text, d.id::text, coalesce(d.title_zh, d.title), d.title, k.clause_number, k.original_text,
+                   {_SQL_SINGLE_CURRENT_TR}, k.language
                    from clauses k join document_versions v on v.id=k.version_id and v.state='parsed' join documents d on d.id=v.document_id
                    where d.country_code=:c and d.relevance in ('relevant','related')
-                     and (coalesce(d.title_zh, d.title) ~ '汽车数据' or d.title ~* '(vehicle|automobile|véhicule).{0,20}(data|données)')
-                     and v.version_no=(select max(version_no) from document_versions x where x.document_id=v.document_id and x.state='parsed')
+                     and (coalesce(d.title_zh, d.title) ~ '汽车数据' or d.title ~* '(vehicle|automobile|véhicule).{{0,20}}(data|données)')
+                     {_SQL_ELIGIBLE_DOC_VER_CLAUSE}
                    order by k.ordinal"""
             ),
             {"c": country},
@@ -315,13 +362,16 @@ async def core_clauses(session: AsyncSession, country: str | None, side: str) ->
     from app.knowledge.reading import article_label
 
     out = []
-    for cid, did, title_zh, title, number, original, zh in rows:
+    for cid, did, title_zh, title, number, original, zh, clang in rows:
+        is_zh = str(clang or "").lower().startswith("zh")
+        if not zh and not is_zh:
+            continue
         body = zh or original or ""
         if not re.search(r"重要数据|向境外|出境|境外|transfer|abroad", body, re.IGNORECASE) or not number:
             continue
         out.append({
             "clause_id": cid, "document_id": did, "document_title": law_name(title_zh, did), "original_title": title if title != title_zh else "",
-            "clause_number": article_label(number) or number, "quote_original": for_reading(original or ""), "quote_zh": for_reading(zh or ""),
+            "clause_number": article_label(number) or number, "quote_original": for_reading(original or ""), "quote_zh": for_reading(zh or (original if is_zh else "")),
             "dimension_code": "D3", "side": side, "core": True,
         })
     # 讲出境的在前，最多三条：核心法规要在每张依据表里出现，但不能挤掉其他依据
@@ -363,11 +413,10 @@ async def _latest_clauses(session: AsyncSession, country: str, any_relevance: bo
         (
             await session.execute(
                 sql(
-                    """select coalesce(d.title_zh, d.title), k.clause_number, k.original_text, t.translated_text
+                    f"""select coalesce(d.title_zh, d.title), k.clause_number, k.original_text, {_SQL_SINGLE_CURRENT_TR}
                        from clauses k join document_versions v on v.id=k.version_id and v.state='parsed' join documents d on d.id=v.document_id
-                       left join clause_translations t on t.clause_id=k.id and t.is_current
                        where d.country_code=:c and (:any or d.relevance in ('relevant','related'))
-                         and v.version_no=(select max(version_no) from document_versions x where x.document_id=v.document_id and x.state='parsed')
+                         {_SQL_ELIGIBLE_DOC_VER_CLAUSE}
                        order by k.ordinal"""
                 ),
                 {"c": country, "any": any_relevance},
@@ -585,11 +634,19 @@ async def main_data_law(session: AsyncSession, country: str | None) -> str:
     """The country's principal data protection law in the library (its one Chinese name)."""
     if not country:
         return ""
-    rows = (await session.execute(sql(
-        """select coalesce(d.title_zh, d.title), count(k.id), d.document_type from documents d join document_versions v on v.document_id=d.id and v.state='parsed'
-           join clauses k on k.version_id=v.id where d.country_code=:c and d.relevance='relevant'
-             and v.version_no=(select max(version_no) from document_versions x where x.document_id=d.id and x.state='parsed')
-           group by 1, 3"""), {"c": country})).all()
+    rows = (
+        await session.execute(
+            sql(
+                f"""select coalesce(d.title_zh, d.title), count(k.id), d.document_type
+                   from documents d join document_versions v on v.document_id=d.id and v.state='parsed'
+                   join clauses k on k.version_id=v.id
+                   where d.country_code=:c and d.relevance='relevant'
+                     {_SQL_ELIGIBLE_DOC_VER_CLAUSE}
+                   group by 1, 3"""
+            ),
+            {"c": country},
+        )
+    ).all()
     best = [
         (t, n, dt)
         for t, n, dt in rows
@@ -636,20 +693,24 @@ async def named_clauses(session: AsyncSession, country: str | None, refs: list[t
     rows = (
         await session.execute(
             sql(
-                """select k.id::text, d.id::text, coalesce(d.title_zh, d.title), d.title, k.clause_number, k.original_text,
-                   (select t.translated_text from clause_translations t where t.clause_id=k.id and t.is_current limit 1)
+                f"""select k.id::text, d.id::text, coalesce(d.title_zh, d.title), d.title, k.clause_number, k.original_text,
+                   {_SQL_SINGLE_CURRENT_TR}, k.language
                    from clauses k join document_versions v on v.id=k.version_id and v.state='parsed' join documents d on d.id=v.document_id
-                   where d.country_code=:c and coalesce(d.title_zh, d.title) = any(:laws)
-                     and v.version_no=(select max(version_no) from document_versions x where x.document_id=v.document_id and x.state='parsed')"""
+                   where d.country_code=:c and d.relevance in ('relevant', 'related')
+                     and coalesce(d.title_zh, d.title) = any(:laws)
+                     {_SQL_ELIGIBLE_DOC_VER_CLAUSE}"""
             ),
             {"c": country, "laws": laws},
         )
     ).all()
     found = {}
-    for cid, did, title_zh, title, number, original, zh in rows:
+    for cid, did, title_zh, title, number, original, zh, clang in rows:
+        is_zh = str(clang or "").lower().startswith("zh")
+        if not zh and not is_zh:
+            continue
         label = article_label(number or "")
         if label:
-            found.setdefault((title_zh, label), (cid, did, title_zh, title, label, original, zh))
+            found.setdefault((title_zh, label), (cid, did, title_zh, title, label, original, zh or (original if is_zh else "")))
     out = []
     for key in dict.fromkeys(refs):
         r = found.get(key)

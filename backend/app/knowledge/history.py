@@ -44,21 +44,25 @@ def snapshot(session: AsyncSession, record, action: str, actor_id: uuid.UUID | N
 
 
 async def propose(session: AsyncSession, record, payload: dict):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     digest = payload_hash(payload)
-    proposal = await session.scalar(
-        select(KnowledgeChangeProposal).where(
-            KnowledgeChangeProposal.target_type == record.__tablename__,
-            KnowledgeChangeProposal.target_id == record.id,
-            KnowledgeChangeProposal.content_hash == digest,
-        )
-    )
-    if proposal is None:
-        proposal = KnowledgeChangeProposal(
+    await session.execute(
+        pg_insert(KnowledgeChangeProposal)
+        .values(
+            id=uuid.uuid4(),
             target_type=record.__tablename__,
             target_id=record.id,
             payload=payload,
             content_hash=digest,
             status="pending_review",
         )
-        session.add(proposal)
-    return proposal
+        .on_conflict_do_nothing(constraint="uq_knowledge_proposal")
+    )
+    return await session.scalar(
+        select(KnowledgeChangeProposal).where(
+            KnowledgeChangeProposal.target_type == record.__tablename__,
+            KnowledgeChangeProposal.target_id == record.id,
+            KnowledgeChangeProposal.content_hash == digest,
+        )
+    )

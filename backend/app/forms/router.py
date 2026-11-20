@@ -42,8 +42,18 @@ async def _task(session: AsyncSession, task_id: uuid.UUID, user: Principal) -> A
     return task
 
 
-async def _instance(session: AsyncSession, instance_id: uuid.UUID, user: Principal) -> FormInstance:
-    row = await session.get(FormInstance, instance_id)
+async def _instance(
+    session: AsyncSession, instance_id: uuid.UUID, user: Principal, *, for_update: bool = False
+) -> FormInstance:
+    if for_update:
+        row = await session.scalar(
+            select(FormInstance)
+            .where(FormInstance.id == instance_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    else:
+        row = await session.get(FormInstance, instance_id)
     if row is None or row.org_id != user.org_id:
         raise HTTPException(404, "表单不存在")
     return row
@@ -80,6 +90,11 @@ async def _admission_country_facts(session: AsyncSession, org_id, country: str |
     return out
 
 
+def _latin_part_if_bilingual(val: str, country: str | None) -> str:
+    """When a foreign form carries a bilingual '中文名称（Latin Legal Name）' string, keep only the Latin legal name."""
+    return service.latin_part_if_bilingual(val, country)
+
+
 async def org_profile(session: AsyncSession, org_id, country: str | None = None) -> dict[str, str]:
     """Company facts the enterprise already gave in an official form of the same country, plus its
     local applicant facts on an admission project there — scoped by country so another country's
@@ -103,6 +118,9 @@ async def org_profile(session: AsyncSession, org_id, country: str | None = None)
         name = await _known_company(session, org_id, country)
         if name:
             out["company_name"] = name
+    if cc and cc != "CN":
+        for k in list(out):
+            out[k] = _latin_part_if_bilingual(out[k], cc)
     return out
 
 
@@ -176,7 +194,14 @@ def facts_for_task(task: AnalysisTask, form_code: str) -> dict[str, str]:
     from app.analysis.doc_rules import entity_for
 
     if form.get("country"):  # 表格所在国的一方必须是该国境内的主体：别国公司名不填进表格
-        facts["company_name"] = entity_for(facts.get("company_name"), form["country"])
+        facts["company_name"] = _latin_part_if_bilingual(
+            entity_for(facts.get("company_name"), form["country"]),
+            form["country"],
+        )
+        if form["country"] != "CN":
+            for fk_key, fk_val in list(facts.items()):
+                if isinstance(fk_val, str) and fk_key not in ("source_country", "recipient_country", "recipient_adequate"):
+                    facts[fk_key] = _latin_part_if_bilingual(fk_val, form["country"])
     if form.get("country") and country_of(facts.get("source_country")) == form["country"]:
         facts["ma_processor"] = facts.get("company_name", "")
     elif form.get("country") and country_of(facts.get("recipient_country")) == form["country"]:
@@ -291,13 +316,14 @@ async def preview_form(
         proj = await session.get(AdmissionProject, project_id)
         if proj is not None and proj.org_id == user.org_id:
             if proj.applicant:
-                facts["company_name"] = proj.applicant.strip()
+                facts["company_name"] = _latin_part_if_bilingual(proj.applicant.strip(), form.get("country"))
             if proj.vehicle_model:
-                facts["vehicle_model"] = proj.vehicle_model.strip()
+                facts["vehicle_model"] = _latin_part_if_bilingual(proj.vehicle_model.strip(), form.get("country"))
             for rk, rv in (proj.facts or {}).items():
                 if str(rv or "").strip():
                     k = rk.removeprefix(DOC_FACT_PREFIX)
-                    facts["company_name" if k == "applicant" else k] = str(rv).strip()
+                    target_k = "company_name" if k == "applicant" else k
+                    facts[target_k] = _latin_part_if_bilingual(str(rv).strip(), form.get("country"))
     view = _view(virtual, form, facts, await _origins(session, virtual))
     view["id"] = f"preview:{form['code']}"
     return view
@@ -305,10 +331,16 @@ async def preview_form(
 
 @router.post("/instances", status_code=201)
 async def create_instance(body: CreateIn, request: Request, user: UserDep, session: SessionDep) -> dict:
+    from sqlalchemy import text as sa_text
+
     form = service.get_form(body.form_code)
     if form is None:
         raise HTTPException(404, "没有这份官方表单")
     task = await _task(session, body.task_id, user) if body.task_id else None
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"form_inst:{user.org_id}:{task.id if task else ''}:{form['code']}"},
+    )
     q_existing = (
         select(FormInstance)
         .where(FormInstance.org_id == user.org_id, FormInstance.form_code == form["code"])
@@ -381,7 +413,7 @@ async def get_instance(instance_id: uuid.UUID, user: UserDep, session: SessionDe
 async def save_answers(
     instance_id: uuid.UUID, body: AnswersIn, request: Request, user: UserDep, session: SessionDep
 ) -> dict:
-    row = await _instance(session, instance_id, user)
+    row = await _instance(session, instance_id, user, for_update=True)
     form = _form(row)
     clean = service.clean_answers(form, body.answers)
     # 企业把已填的内容删空后保存：这一栏回到未填（原先空值被丢掉，删不掉已保存的内容）
@@ -495,15 +527,25 @@ async def _export_instance_file(
         from app.analysis.document_templates import Rendered, _render_pdf
         from app.analysis.docx_pdf import PdfEngineUnavailable, docx_to_pdf, engine
 
+        is_foreign_form = str(form.get("country") or "").upper() not in ("", "CN")
+        pdf_header = (
+            str(form.get("name_orig") or form["code"].replace("_", " "))
+            if is_foreign_form
+            else label_part
+        )
         if engine() != "builtin":
             try:
                 data = await asyncio.to_thread(docx_to_pdf, data)
             except PdfEngineUnavailable:
                 blocks = await asyncio.to_thread(od.docx_preview_blocks, data)
-                data = await asyncio.to_thread(_render_pdf, Rendered(blocks=blocks), label_part)
+                data = await asyncio.to_thread(
+                    _render_pdf, Rendered(blocks=blocks), pdf_header, foreign=is_foreign_form
+                )
         else:
             blocks = await asyncio.to_thread(od.docx_preview_blocks, data)
-            data = await asyncio.to_thread(_render_pdf, Rendered(blocks=blocks), label_part)
+            data = await asyncio.to_thread(
+                _render_pdf, Rendered(blocks=blocks), pdf_header, foreign=is_foreign_form
+            )
     name = named(task_title or country, label_part, ext="pdf")
     return Response(data, media_type="application/pdf", headers={"Content-Disposition": content_disposition(name)})
 

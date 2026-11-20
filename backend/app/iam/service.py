@@ -85,16 +85,30 @@ async def company_by_full_name(session: AsyncSession, name: str) -> Organization
     clean = full_name(name)
     if len(clean) < 2:
         raise RuleError("请填写公司全称")
+    if is_trial_org_name(clean):
+        raise RuleError("企业名称不可包含系统体验空间保留标识")
     org = (await session.execute(select(Organization).where(Organization.name == clean))).scalar_one_or_none()
     if org is None:
-        org = Organization(name=clean)
-        session.add(org)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                cand = Organization(name=clean, is_active=True, is_demo=False)
+                session.add(cand)
+                await session.flush()
+            org = cand
+        except IntegrityError:
+            org = (
+                await session.execute(select(Organization).where(Organization.name == clean))
+            ).scalar_one()
     return org
 
 
 async def create_org(session: AsyncSession, name: str) -> Organization:
-    org = Organization(name=full_name(name))
+    clean = full_name(name)
+    if len(clean) < 2:
+        raise RuleError("请填写公司全称（至少 2 个非空字符）")
+    if is_trial_org_name(clean):
+        raise RuleError("企业名称不可包含系统体验空间保留标识")
+    org = Organization(name=clean)
     session.add(org)
     try:
         await session.commit()
@@ -120,6 +134,15 @@ async def create_user(
     existing company: the company is found by that name or created. Portal registration and the
     administrator's manual opening go through here alike, so the company is always named by the
     full name given when the account was opened."""
+    from pydantic import EmailStr, TypeAdapter
+    from pydantic import ValidationError as PydanticValidationError
+
+    norm_email = (email or "").strip().lower()
+    try:
+        norm_email = str(TypeAdapter(EmailStr).validate_python(norm_email)).lower()
+    except PydanticValidationError as exc:
+        raise RuleError("邮箱地址格式无效，请使用合法的企业或个人邮箱域名") from exc
+
     if role in ADMIN_ROLES and (org_id is not None or (org_name or "").strip()):
         raise RuleError("管理端角色不能属于企业")
     if role in USER_ROLES and org_id is None and (org_name or "").strip():
@@ -127,10 +150,15 @@ async def create_user(
     if role in USER_ROLES:
         if org_id is None:
             raise RuleError("用户端角色必须指定所属企业")
-        if await session.get(Organization, org_id) is None:
+        org_obj = await session.get(Organization, org_id)
+        if org_obj is None:
             raise RuleError("所属企业不存在")
+        if is_trial_org_name(org_obj.name) and (
+            signup_source == "admin" or role != Role.VIEWER or bool(can_export)
+        ):
+            raise RuleError("个人体验空间受隔离保护，不支持后台新增账号或开通正式成员权限")
     user = User(
-        email=email.lower(),
+        email=norm_email,
         display_name=display_name.strip(),
         password_hash=await hash_password_async(password),
         role=role.value,
@@ -202,6 +230,9 @@ async def exchange_portal_ticket(
         data = verify_portal_ticket(ticket)
     except ValueError as exc:
         raise AuthError(str(exc)) from exc
+    from pydantic import EmailStr, TypeAdapter
+    from pydantic import ValidationError as PydanticValidationError
+
     email = str(data.get("email") or "").strip().lower()
     display_name = str(data.get("display_name") or email.split("@")[0]).strip()
     org_name = str(data.get("org_name") or "").strip()
@@ -209,6 +240,10 @@ async def exchange_portal_ticket(
     target_role = Role.MEMBER if tier == "enterprise" else Role.VIEWER
     if not email or "@" not in email or len(org_name) < 2:
         raise RuleError("门户票据缺少有效的邮箱或单位全称")
+    try:
+        TypeAdapter(EmailStr).validate_python(email)
+    except PydanticValidationError:
+        raise RuleError("门户票据中的邮箱地址格式无效") from None
 
     await bind_identity(session, DatabaseIdentity(scope="system"))
     user = (
@@ -220,7 +255,7 @@ async def exchange_portal_ticket(
         org = await session.get(Organization, user.org_id) if user.org_id else None
         if org is None or not org.is_active:
             raise AuthError("所属单位已停用")
-        if tier == "enterprise" and user.role == Role.VIEWER.value:
+        if tier == "enterprise" and user.role == Role.VIEWER.value and not is_trial_org_name(org.name):
             user.role = Role.MEMBER.value
             user.can_export = False
         if display_name and user.display_name != display_name:
@@ -230,16 +265,25 @@ async def exchange_portal_ticket(
         org = await company_by_full_name(session, org_name)
         if not org.is_active:
             raise AuthError("所属单位已停用")
-        user = await create_user(
-            session,
-            email=email,
-            display_name=display_name[:100],
-            password=secrets.token_urlsafe(24),
-            role=target_role,
-            org_id=org.id,
-            signup_source="portal",
-            can_export=False,
-        )
+        try:
+            user = await create_user(
+                session,
+                email=email,
+                display_name=display_name[:100],
+                password=secrets.token_urlsafe(24),
+                role=target_role,
+                org_id=org.id,
+                signup_source="portal",
+                can_export=False,
+            )
+        except ConflictError:
+            await bind_identity(session, DatabaseIdentity(scope="system"))
+            user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
+            if user is None or not user.is_active or user.role not in {r.value for r in USER_ROLES}:
+                raise AuthError("该账号无法从用户端登录") from None
+            org = await session.get(Organization, user.org_id) if user.org_id else None
+            if org is None or not org.is_active:
+                raise AuthError("所属单位已停用") from None
     token = create_access_token(
         user_id=user.id, audience=AUD_USER, role=user.role, org_id=user.org_id
     )

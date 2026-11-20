@@ -36,17 +36,37 @@ def verified_fonts():
 
 
 RTL = "\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc"
-_RTL_RUN = re.compile(rf"[{RTL}](?:[{RTL}\s0-9\u0660-\u0669.,\u060c\u061b:/\-]*[{RTL}0-9\u0660-\u0669])?")
+_RTL_RUN = re.compile(
+    rf"[{RTL}](?:[{RTL}\s0-9\u0660-\u0669.,\u060c\u061b:/\-]*[{RTL}\u0660-\u0669]"
+    rf"|[{RTL}\s0-9\u0660-\u0669.,\u060c\u061b:/\-]*[0-9](?![A-Za-z]))?"
+)
+_LTR_TOKEN_IN_RTL = re.compile(
+    r"(?:[A-Za-z\u00C0-\u024F]|\d+[A-Za-z\u00C0-\u024F])"
+    r"(?:[A-Za-z0-9\u00C0-\u024F\s./_+\-]*[A-Za-z0-9\u00C0-\u024F])?"
+)
 
 
-def _text(value):
-    text = escape(str(value or ""), quote=True)
-    # 中文里夹着阿拉伯文等从右到左的片段时，把这些片段隔离（U+2068…U+2069），
-    # 避免“个人数据保护法（阿文名）”的括号被重排到行首或下一行
-    bidi = {unicodedata.bidirectional(c) for c in text}
-    if bidi & {"R", "AL"} and "L" in bidi:
-        text = _RTL_RUN.sub(lambda m: "\u2068" + m.group(0) + "\u2069", text)
-    return text
+def _text(value, *, base_dir: str = ""):
+    raw = str(value or "")
+    # 双向文字混排隔离：LTR 段落中隔离阿语片段（U+2068…U+2069），
+    # RTL 阿语段落中隔离含数字前缀的拉丁代号如 4G/5G、QH-S9（U+2066…U+2069）
+    bidi = {unicodedata.bidirectional(c) for c in raw}
+    if not (bidi & {"R", "AL"} and "L" in bidi):
+        return escape(raw, quote=True)
+    first_strong = next(
+        (
+            unicodedata.bidirectional(c)
+            for c in raw
+            if unicodedata.bidirectional(c) in {"R", "AL", "L"}
+        ),
+        "L",
+    )
+    eff_dir = base_dir or ("rtl" if first_strong in {"R", "AL"} else "ltr")
+    if eff_dir == "rtl":
+        raw = _LTR_TOKEN_IN_RTL.sub(lambda m: "\u2066" + m.group(0) + "\u2069", raw)
+    else:
+        raw = _RTL_RUN.sub(lambda m: "\u2068" + m.group(0) + "\u2069", raw)
+    return escape(raw, quote=True)
 
 
 def _p(value, cls=""):
@@ -177,12 +197,27 @@ _RISK_ZH = {
     "MEDIUM": "中",
     "LOW": "低",
     "INFO": "提示",
+    "UNKNOWN": "待核实",
+    "PENDING_VERIFICATION": "待核实",
+    "PENDING": "待核实",
+    "NONE": "无显著风险",
 }
+_INLINE_RISK_RE = re.compile(
+    r"(风险\s*[:：]\s*)(CRITICAL|HIGH|MEDIUM|LOW|INFO|PENDING_VERIFICATION|UNKNOWN)\b",
+    re.IGNORECASE,
+)
 
 
 def _risk_zh(value: object) -> str:
     s = str(value or "").strip()
     return _RISK_ZH.get(s.upper(), s)
+
+
+def _localize_inline_enums(value: object) -> str:
+    s = str(value or "")
+    return _INLINE_RISK_RE.sub(
+        lambda m: f"风险：{_RISK_ZH.get(m.group(2).upper(), m.group(2))}", s
+    )
 
 
 def report_html(
@@ -283,7 +318,7 @@ def report_html(
         )
         if dim.get("missing_gap_note"):
             parts.append(_p("核查缺口：" + dim["missing_gap_note"], "notice"))
-        parts.append(_rp(dim.get("content_markdown")))
+        parts.append(_rp(_localize_inline_enums(dim.get("content_markdown"))))
         for cite in dim.get("citations", []) or []:
             parts.extend(
                 [

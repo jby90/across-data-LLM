@@ -298,12 +298,11 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
     law = await doc_rules.main_data_law(session, country)
     body = await main_regulator(session, country)
     rows = (await session.execute(sql(
-        """select coalesce(d.title_zh, d.title), k.clause_number, coalesce(t.translated_text, case when k.language='zh' then k.original_text end), k.original_text, k.id::text, d.id::text, d.title
+        f"""select coalesce(d.title_zh, d.title), k.clause_number, coalesce({doc_rules._SQL_SINGLE_CURRENT_TR}, case when k.language like 'zh%' then k.original_text end), k.original_text, k.id::text, d.id::text, d.title
            from clauses k join document_versions v on v.id=k.version_id and v.state='parsed' join documents d on d.id=v.document_id
-           left join clause_translations t on t.clause_id=k.id and t.is_current
            where d.country_code=:c
              and d.relevance in ('relevant', 'related')
-             and v.version_no=(select max(version_no) from document_versions x where x.document_id=v.document_id and x.state='parsed')
+             {doc_rules._SQL_ELIGIBLE_DOC_VER_CLAUSE}
            order by case when coalesce(d.title_zh, d.title) ~ '个人数据|个人信息|数据保护|电子交易与个人数据' then 0 else 1 end,
                     case d.document_type when 'LAW' then 0 when 'REGULATION' then 1 else 2 end,
                     case coalesce(d.instrument_kind, '') when 'BASE' then 0 else 1 end,
@@ -467,7 +466,9 @@ async def admission_blocks(session: AsyncSession, task, values: dict[str, str]) 
             if p.get("kind") == "none":
                 continue
             prep = how.get(p["kind"], "企业递交时自带") + (f"（{p['what']}）" if p["kind"] == "original" and p.get("what") else "")
-            shown = re.sub(r"[（(][^）)]*[؀-ۿ][^）)]*[）)]", "", p["name"]).strip() or p["name"]  # 中文名后括注的阿拉伯原文不放进中文文件
+            shown = engine._clean_name(
+                re.sub(r"[（(][^）)]*[؀-ۿ][^）)]*[）)]", "", p["name"]).strip() or p["name"]
+            )  # 中文名后括注的阿拉伯原文及重复外文缩写不放进中文文件
             src = texts.get(str(clause_of.get(p["name"]) or ""), {}).get("source", "—")
             rows.append([shown, prep, "—" if clause_gate.is_form(src) else src])  # 官方表格不当法规依据
         rows += [[f"官方表格《{f}》", "填写官方表格，签字盖章", "—"] for f in forms if not any(p.get("kind") == "form" for p in plan)]
@@ -476,11 +477,16 @@ async def admission_blocks(session: AsyncSession, task, values: dict[str, str]) 
         lang = engine.known_value(detail.get("profile") or {}, "language").removeprefix("按官方表格：")
         first = re.split(r"[/、；;，,（(]", lang)[0].strip() if lang else ""
         first_adj = "英文" if first == "英语" else first
-        lang_clause = (
-            f"以{lang}提交"
-            if (lang and re.search(r"译文|译本|翻译|公证", lang))
-            else (f"以{lang}提交，非{first_adj}证明材料须附具{first_adj}正式译本" if lang else "申请语言条文未写明，递交前向受理机构确认")
-        )
+        if lang and re.search(r"译文|译本|翻译|公证", lang):
+            if re.search(r"[；;]", lang):
+                l_head, l_tail = re.split(r"[；;]", lang, maxsplit=1)
+                lang_clause = f"以{l_head.strip()}提交（{l_tail.strip()}）"
+            else:
+                lang_clause = f"以{lang}提交"
+        elif lang:
+            lang_clause = f"以{lang}提交，非{first_adj}证明材料须附具{first_adj}正式译本"
+        else:
+            lang_clause = "申请语言条文未写明，递交前向受理机构确认"
         portal = detail.get("portal")
         where = ("；递交入口：" + "、".join([f"官网 {portal['site']}", *(f"{x['label']} {x['url']}" for x in portal.get("links") or [])])) if portal else ""
         filing.append(f"{e.name_zh}：向{addressee(detail) or '主管部门（条文未写明受理机构）'}递交，" + lang_clause + where + "。")
@@ -493,7 +499,7 @@ async def admission_blocks(session: AsyncSession, task, values: dict[str, str]) 
         c = texts.get(str(cid))
         if c and c.get("verified") and not clause_gate.is_form(re.sub(r"第[^》]*$", "", c["source"])):  # 官方表格不当法规依据
             label = re.sub(r"^《[^》]*》", "", c["source"])
-            clauses.append({"type": "paragraph", "text": c["source"] + "：" + engine._cut(clause_gate.strip_own_label(label, c["zh"]), 700)})
+            clauses.append({"type": "paragraph", "text": c["source"] + "：" + engine._cut(clause_gate.strip_own_label(label, c["zh"]), 700), "verbatim_quote": True})
             clauses.append({"type": "paragraph", "text": "原文：" + engine._cut(c["original"], 700), "original": True})
     target_zh = NAMES.get(target or "", "目标国家")
     lead_summary = (
@@ -607,44 +613,135 @@ def _first_clause_phrase(val: str, fallback: str, limit: int = 56) -> str:
     return first or fallback
 
 
+_NEGATED_CLAUSE_RE = re.compile(
+    r"(?:(?:严禁|禁止|不得|绝不|从不|默认不|默认关闭|关闭|不予|未曾|不会|无需|不进行|不向境外|不|未|无|没有)"
+    r"(?:采集|收集|获取|抓取|录制|开启|启用|回传|上传|传输|出境|包含|涉及|纳入|处理|提取|同步|开展|上报|存在|生成)"
+    r"|不含|不包含|不涉及|不纳入|排除|(?:无|没有)(?=[^；。，\n]{0,16}(?:视频|图像|影像|摄像头|座舱|麦克风|人脸|声纹|生物|轨迹|定位|GNSS|GPS|点云|路人|行人|第三方|乘员|乘客|未成年|儿童|驾驶人))|不在[^；。，\n]{0,16}范围内)[^；。，\n]*|"
+    r"[^；。，\n（）()]{1,24}?(?:均?不(?:采集|收集|获取|录制|开启|启用|回传|上传|传输|出境|处理)|未(?:开启|启用|采集|收集))[^；。，\n]*|"
+    r"（(?:不含|不包含|不涉及|严禁|不采集|无|没有|排除)[^（）]*）|\((?:不含|不包含|不涉及|严禁|不采集|无|没有|排除)[^()]*\)"
+)
+_PROHIBITED_UNMASKED_RE = re.compile(
+    r"(?:严禁|禁止|不得|杜绝|防止|阻断|拦截)[^；。，\n]{0,16}?(?:未|未经|不做|未完成|不进行)\s*(?:任何|有效|不可逆)?\s*(?:脱敏|去标识化?|匿名化?|模糊|遮蔽|擦除|哈希|降精|假名化)[^；。，\n]*|"
+    r"(?:未|未经|不做|未完成|不进行)\s*(?:任何|有效|不可逆)?\s*(?:脱敏|去标识化?|匿名化?|模糊|遮蔽|擦除|哈希|降精|假名化)[^；。\n]{0,24}?(?:严禁|禁止|不得|不予|杜绝|防止|阻断|拦截)[^；。\n]*"
+)
+_UNMASKED_RE = re.compile(
+    r"(?:未|未经|不做|未完成|不进行|缺乏|无)\s*(?:任何|有效|不可逆)?\s*(?:脱敏|去标识化?|匿名化?|模糊|遮蔽|擦除|哈希|降精|假名化)"
+)
+
+
+def _strip_negated_clauses(text: str) -> str:
+    """Strip negated exclusion statements ('严禁采集车外视频' / '不含座舱音视频' / '默认关闭GNSS上报')
+    before positive keyword detection so excluded sensors are never misclassified as collected."""
+    return _NEGATED_CLAUSE_RE.sub(" ", text or "")
+
+
 def necessity_alternatives_blocks(task, code: str, values: dict[str, str]) -> list[dict]:
-    """Reference DPIA Chapter 3.2 & 3.3: four-option counterfactual necessity comparison and conditional proportionality."""
+    """Reference DPIA Chapter 3.2 & 3.3 / LIA Step 2 / Risk Report Ch. 3: four-option counterfactual necessity comparison differentiated by legal instrument."""
     facts = {**answered(task), **{k: v for k, v in values.items() if v}}
+    source_code, recipient_code = doc_rules.ends(facts, getattr(task, "country_code", None))
+    src_zh = NAMES.get(source_code or "", facts.get("source_country") or "发出国")
+    rcp_zh = NAMES.get(recipient_code or "", facts.get("recipient_country") or "接收国")
+    vehicle = _first_clause_phrase(facts.get("vehicle_model") or getattr(task, "vehicle_model", "") or "", "受评车型车队", 28)
     scenario = _first_clause_phrase(
-        facts.get("scenario") or getattr(task, "scenario_label", "") or task.scenario_type or "",
+        facts.get("scenario") or getattr(task, "scenario_label", "") or getattr(task, "scenario_type", "") or "",
         "车载网联服务与远程协同运维",
         36,
     )
     purpose = _first_clause_phrase(facts.get("purpose") or "", "保障在用车辆运行安全与跨区域工程协同", 56)
-    rows = [
-        [
-            "方案一：纯车端本地离线处理（数据不出车、不上云）",
-            "仅依赖车载终端本地控制器与边缘算力独立离线运算，不向境外或云端同步任何业务与工程参数。",
-            f"虽可将跨境暴露风险降至零，但无法支撑{scenario}所需的跨批次异常工况复现与协同分析，难以实现{purpose}之核心目标。",
-            "予以排除（无法达成既定业务与安全目标）",
-        ],
-        [
-            "方案二：原始全量未脱敏数据直接跨境传输",
-            "不做源端过滤与去标识化预处理，持续或批量回传车内外原始感知画面、完整精确轨迹及明文身份标识。",
-            "采集颗粒度与频次显著超出特定目的所需最小边界，对驾乘人员及道路参与者隐私合理预期侵入性过高，违背最小必要原则。",
-            "坚决排除（对个人权益侵入性过高）",
-        ],
-        [
-            "方案三：源端预处理脱敏＋按需触发最小白名单传输（现行方案）",
-            "在车端及发出国前置节点先行完成不可逆脱敏与字段过滤，仅在预设事件触发时按白名单传输最小必要工程与服务参数。",
-            "在完整达成车辆安全验证与服务履约目标的同时，从源头剥离直接识别特征并压缩留存窗口，兼顾安全效益与个人基本权利保护。",
-            "本项目采用（同等功能目标下侵入性最小）",
-        ],
-        [
-            "方案四：目标市场完全属地化独立部署（远期演进参照）",
-            "在各海外市场独立重建全套核心工程诊断平台、历史基线库及全天候专职支持体系，实现零跨法域数据交互。",
-            "受跨国研发体系集中维护核心算法基线及属地专职工程资源建设周期客观制约，短期内不具备全面替代可行性。",
-            "中长期演进参照（现阶段辅以补充措施过渡）",
-        ],
-    ]
-    cond_para = (
-        "相称性生效前提核定：上述现行方案的相称性以四项刚性控制持续有效为前提——默认关闭非必要采集、源端去标识化规则不可绕过、分层告知与撤回或异议通道畅通、以及留存期满连同全部备份副本彻底安全销毁。"
-    )
+    ret_short = _first_clause_phrase(facts.get("retention_and_blackbox") or "", "最短必要业务留存周期", 42)
+
+    if code == "lia":
+        rows = [
+            [
+                "替代路径 A：完全依赖车端本地闭环或人工模拟测试（零个人数据处理）",
+                f"仅凭 {vehicle} 车载本地算力或实验室合成样本运行，不接触任何真实工况关联记录。",
+                f"合成样本与单车孤立算力无法覆盖真实场景长尾故障与边界工况，无法实质达成“{purpose}”之合法利益目标。",
+                "不具备目的可实现性（排除）",
+            ],
+            [
+                "替代路径 B：持续静默采集全量原始身份与高精度感知轨迹",
+                "不设触发条件与源端遮蔽，后台常态化上传明文车架号、连续精确位置或原始音视频流。",
+                f"显著超出数据主体在“{scenario}”下的合理预期，存在同等目标下侵入性更轻的技术路径，无法通过最小侵害测试。",
+                "违反最小侵害要求（排除）",
+            ],
+            [
+                "替代路径 C：事件触发＋源端去标识化白名单处理（本评估选定路径）",
+                f"在 {src_zh} 端先行剥离直接身份标识并收敛精度，仅在预设事件触发时按白名单处理最小必要字段（留存受控：{ret_short}）。",
+                "在确保正当安全与履约利益落地的同时，将对相关自然人私密空间与行踪自决权的影响压降至客观最低限度。",
+                "通过必要性排他测试（采用）",
+            ],
+            [
+                "替代路径 D：逐笔实时弹窗索取临时授权替代合法利益/常态机制",
+                "每次产生后台安全诊断或路侧瞬时感知均中断操作请求人工逐次授权。",
+                "在行车高速动态环境或开放道路场景下不仅客观不可行，且频繁弹窗干扰驾驶注意力反而危及道路公共安全。",
+                "实操不可行且损及行车安全（排除）",
+            ],
+        ]
+        cond_para = (
+            f"相称性生效前提核定（合法利益第二步测试）：上述选定路径的最小侵害性以四项控制刚性存续为条件——"
+            f"严禁超白名单字段夹带、{src_zh}源端去标识化不可逆转、向数据主体开放便捷异议或退出通道、以及期满连同备份彻底清除。"
+        )
+    elif code == "risk_report":
+        rows = [
+            [
+                "比选方案一：纯境内单节点闭环处置（不出境）",
+                f"仅在{src_zh}境内节点留存分析 {vehicle} 运行数据，不向{rcp_zh}接收端传输任何字段。",
+                f"核心跨区域技术支持团队、算法基线或属地维保履约体系位于{rcp_zh}，零跨境协同将直接导致{purpose}无法闭环兑现。",
+                "业务与安全目标无法达成（排除）",
+            ],
+            [
+                "比选方案二：原始明文全量镜像跨境同步",
+                f"将境内数据库原始车架号、车主身份明细及未降精感知报文全量镜像同步至{rcp_zh}云端。",
+                "造成境外攻击面与潜在泄露影响人数成倍放大，违反数据出境“最小必要范围、最短留存周期、最少访问席位”法定红线。",
+                "跨境安全风险不可接受（排除）",
+            ],
+            [
+                "比选方案三：境内安全网关前置脱敏＋最小字段受控出境（现行方案）",
+                f"由{src_zh}前置安全网关执行字段白名单强过滤与假名化令牌替换，仅按需向{rcp_zh}受控专区传输最小业务参数。",
+                f"兼顾跨国工程履约刚需与主权密钥留存（{ret_short}），有效收敛境外数据沉淀规模与外部越权调取暴露面。",
+                "本项目采用（出境风险可控且最小必要）",
+            ],
+            [
+                "比选方案四：各海外区域全栈重建独立工程与诊断底座",
+                f"在{rcp_zh}本地完整复制全套核心算法训练集群、历史缺陷库及全天候二线专家团队。",
+                "受制于跨国车企统一安全基线治理架构与高昂重复建设周期，现阶段不具备工程与经济可行性，列为远期属地化演进方向。",
+                "中长期演进参照（现阶段辅以网关管控）",
+            ],
+        ]
+        cond_para = (
+            f"相称性生效前提核定（数据出境最小必要核查）：本方案持续满足出境必要性须严守四道防线——"
+            f"出境网关白名单硬拦截、还原主密钥独占托管于{src_zh}境内、严禁向未经约定第三方再转移、以及到期生产与备份副本同步擦除。"
+        )
+    else:
+        rows = [
+            [
+                "方案一：纯车端本地离线处理（数据不出车、不上云）",
+                f"仅依赖 {vehicle} 车载控制器与边缘算力独立离线运算，不向{rcp_zh}或云端同步任何业务与工程参数。",
+                f"虽可将跨境暴露风险降至零，但无法支撑{scenario}所需的跨批次异常工况复现与协同分析，难以实现{purpose}之核心目标。",
+                "予以排除（无法达成既定业务与安全目标）",
+            ],
+            [
+                "方案二：原始全量未脱敏数据直接跨境传输",
+                "不做源端过滤与去标识化预处理，持续或批量回传车内外原始感知画面、完整精确轨迹及明文身份标识。",
+                "采集颗粒度与频次显著超出特定目的所需最小边界，对驾乘人员及道路参与者基本权利与自由侵入性过高，违背默认隐私保护原则。",
+                "坚决排除（对个人基本权利侵入性过高）",
+            ],
+            [
+                "方案三：源端预处理脱敏＋按需触发最小白名单传输（现行方案）",
+                f"在车端及{src_zh}前置节点先行完成不可逆脱敏与字段过滤，仅在预设事件触发时向{rcp_zh}按白名单传输最小必要参数。",
+                f"在完整达成车辆安全验证与服务履约目标的同时，从源头剥离直接识别特征并锁定留存窗口（{ret_short}），兼顾安全效益与自然人权利保护。",
+                "本项目采用（同等功能目标下侵入性最小）",
+            ],
+            [
+                "方案四：目标市场完全属地化独立部署（远期演进参照）",
+                f"在{rcp_zh}独立重建全套核心工程诊断平台、历史基线库及全天候专职支持体系，实现零跨法域数据交互。",
+                "受跨国研发体系集中维护核心安全基线及属地专职工程资源建设周期客观制约，短期内不具备全面替代可行性。",
+                "中长期演进参照（现阶段辅以补充措施过渡）",
+            ],
+        ]
+        cond_para = (
+            "相称性生效前提核定：上述现行方案的相称性以四项刚性控制持续有效为前提——默认关闭非必要采集、源端去标识化规则不可绕过、分层告知与撤回或异议通道畅通、以及留存期满连同全部备份副本彻底安全销毁。"
+        )
     return [
         {"type": "paragraph", "text": "必要性与最小侵害替代方案排他比选表："},
         {
@@ -658,50 +755,124 @@ def necessity_alternatives_blocks(task, code: str, values: dict[str, str]) -> li
 
 
 def safeguard_adequacy_blocks(task, code: str, values: dict[str, str], route: dict) -> list[dict]:
-    """Reference DPIA Chapter 2.3: adequacy and effectiveness justification table for legal, technical, and organizational safeguards."""
+    """Adequacy and effectiveness justification table differentiated by legal instrument (DPIA Ch. 2.3 / TIA Ch. 4 / Risk Report Ch. 7)."""
     facts = {**answered(task), **{k: v for k, v in values.items() if v}}
+    source_code, recipient_code = doc_rules.ends(facts, getattr(task, "country_code", None))
+    src_zh = NAMES.get(source_code or "", facts.get("source_country") or "发出国")
+    rcp_zh = NAMES.get(recipient_code or "", facts.get("recipient_country") or "接收国")
     basis_raw = facts.get("lawful_basis") or facts.get("consent_and_notice") or facts.get("cross_border_mechanism") or ""
     data_raw = facts.get("exterior_video_and_gnss") or facts.get("data_types") or ""
     ret_raw = facts.get("retention_and_blackbox") or ""
-    sec_raw = facts.get("risk_measures") or facts.get("security_tech") or facts.get("supplementary_measures") or ""
+    sec_raw = facts.get("supplementary_measures") if code == "tia" else (facts.get("risk_measures") or facts.get("security_tech") or facts.get("supplementary_measures") or "")
+    if not sec_raw:
+        sec_raw = facts.get("risk_measures") or facts.get("security_tech") or ""
     contract_raw = facts.get("legal_doc_terms") or facts.get("cross_border_mechanism") or route.get("text") or ""
 
     def _status(raw: str) -> str:
         s = (raw or "").strip()
         return "待补充确认" if (not s or s == DRAFT_BLANK or s.startswith("暂不确定")) else "已核验纳入管控"
 
-    rows = [
-        [
-            "合法性基础与透明告知行权",
-            _clean_fact_snippet(basis_raw, "按业务场景区分合同履行必需、单独同意或法定机制，配套车机端与移动端分层隐私告知", 110),
-            "将每类车载数据处理严格锚定于明确法定事由，杜绝一揽子概括授权；通过显著告知与随时可触达的查阅、更正、删除及撤回同意入口，保障数据主体知情权与自决权实质落地。",
-            _status(basis_raw),
-        ],
-        [
-            "数据最小化与源端默认隐私保护",
-            _clean_fact_snippet(data_raw, "执行出境字段白名单审查，车端源头去标识化与降低定位及感知数据敏感精度", 110),
-            "在数据离开车端或发出国前置节点前先行剥离非必要直接识别符，按事件触发代替后台全量静默采集，从源头切断超范围收集与个体精准画像风险。",
-            _status(data_raw),
-        ],
-        [
-            "存储期限限制与到期彻底销毁",
-            _clean_fact_snippet(ret_raw, "严格按业务目的设定最短必要留存周期，期满自动触发生产库与备份副本同步清除", 110),
-            "留存窗口与故障排查、法规留痕或履约周期严格挂钩，到期后对主存储及全部灾备介质执行不可恢复的安全彻底删除，消除境外长期沉淀导致的暴露风险。",
-            _status(ret_raw),
-        ],
-        [
-            "全链路加密与最小权限隔离审计",
-            _clean_fact_snippet(sec_raw, "部署双向鉴权加密传输通道、逻辑隔离存储、独立密钥管控、岗位最小授权及不可篡改审计日志", 110),
-            "通信加密与完整性校验阻断跨网截获篡改；环境隔离、细粒度权限审批与全量操作留痕形成纵深防御，确保单一节点异常不演化为批量明文泄露。",
-            _status(sec_raw),
-        ],
-        [
-            "跨境契约约束与公权力调取阻断",
-            _clean_fact_snippet(contract_raw, "签署具备强制约束力的跨境传输法律文件，锁定唯一处理目的、禁止擅自再转移并约定外部调取审查通报义务", 110),
-            "通过连带违约责任将保护标准延伸至境外接收方；遇当地公权力机关调取请求时，强制执行职权与程序合法性审查、对宽泛要求依法抗辩并第一时间通报报批，结合源端脱敏阻却越权明文交付。",
-            _status(contract_raw),
-        ],
-    ]
+    if code == "tia":
+        rows = [
+            [
+                "发出端假名化与主权密钥物理隔离（技术补充）",
+                _clean_fact_snippet(data_raw, f"在{src_zh}前置节点剥离直接身份标识，还原密钥独占托管于{src_zh}硬件安全模块", 110),
+                f"对标 EDPB 第 01/2020 号建议书典型有效假名化场景：即便{rcp_zh}接收端存储介质受外部接触，在缺乏{src_zh}独立托管密钥与映射表的情况下亦无法逆向识别特定自然人。",
+                _status(data_raw),
+            ],
+            [
+                "跨境通道强密码学保护与防截获校验（技术补充）",
+                _clean_fact_snippet(sec_raw, "采用跨境专用加密链路、双向证书鉴权（mTLS 1.3）与静态高强度加密存储", 110),
+                "有效抵御跨国公网与海底光缆过境传输阶段的被动监听、中间人劫持与报文重放篡改，确保在途与静态密文机密性。",
+                _status(sec_raw),
+            ],
+            [
+                "境外最小访问席位与生命周期硬销毁（组织补充）",
+                _clean_fact_snippet(ret_raw, f"{rcp_zh}侧实行实名白名单只读访问、禁批量导出，到期主库与快照同步清零", 110),
+                f"大幅压缩数据在{rcp_zh}境内的时间窗口与可触达人员边界，从组织流程上降低内部越权调阅及历史存量数据被宽泛调取的概率。",
+                _status(ret_raw),
+            ],
+            [
+                "公权力调取合法性审查、通知与抗辩（合同补充）",
+                _clean_fact_snippet(contract_raw, f"合同明确约定遇{rcp_zh}机关调取须即时通报{src_zh}控制者、核查法定权限并依法抗辩", 110),
+                "将外部调取应对固化为具强制约束力的违约追责条款，杜绝非经司法令状或超比例原则的静默批量数据移交。",
+                _status(contract_raw),
+            ],
+            [
+                "法域环境监测与异常单路径熔断机制（治理补充）",
+                _clean_fact_snippet(facts.get("reevaluation") or basis_raw, f"持续跟踪{rcp_zh}数据立法与执法变化，异常时立即暂停跨境接口", 110),
+                f"一旦{rcp_zh}法制变更导致补充措施无法维持实质同等保护水平，可毫秒级切断跨境同步并退回{src_zh}本地留存。",
+                _status(facts.get("reevaluation") or basis_raw),
+            ],
+        ]
+    elif code == "risk_report":
+        mgmt_raw = facts.get("security_mgmt") or facts.get("effectiveness_proof") or basis_raw
+        rcp_m_raw = facts.get("recipient_measures") or ret_raw
+        rows = [
+            [
+                "境内分类分级内控与合规测评背书",
+                _clean_fact_snippet(mgmt_raw, "建立专职数据安全机构、分类分级与应急预案，落实等保测评或国际安全认证", 110),
+                "通过制度化出境审批门禁与第三方权威安全测评验证，确保数据处理者自身具备持续识别与管控跨境安全隐患的内生治理能力。",
+                _status(mgmt_raw),
+            ],
+            [
+                "车端默认克制采集与出境网关硬裁剪",
+                _clean_fact_snippet(data_raw, "落实车内处理优先与默认不采集规则，境内出境安全网关执行字段白名单强过滤", 110),
+                "将非必要原始识别符与高敏原始流阻截在出境边界之内，确保实际出境报文与申报字段清单保持逐字段精确一致。",
+                _status(data_raw),
+            ],
+            [
+                "全链路传输加密与密钥境内独占管控",
+                _clean_fact_snippet(sec_raw, f"部署双向认证加密传输通道，假名化主密钥由{src_zh}境内安全硬件独占持有", 110),
+                "阻断跨境链路窃听篡改风险，并凭借境内密钥主权切断境外单点失守向境内车主实名身份回溯扩散的传导链。",
+                _status(sec_raw),
+            ],
+            [
+                f"境外接收方（{rcp_zh}）隔离运维与按期擦除",
+                _clean_fact_snippet(rcp_m_raw, f"{rcp_zh}节点实施网络逻辑隔离、堡垒机最小授权审计，并按期自动销毁主备副本", 110),
+                "验证境外接收方安全防护基线与境内保护标准相匹配，杜绝境外环境混存污染、越权批量导出及超期滞留隐患。",
+                _status(rcp_m_raw),
+            ],
+            [
+                "跨境法律文件刚性追责与权利救济协同",
+                _clean_fact_snippet(contract_raw, "签署法定标准合同或数据出境保护协议，锁定唯一用途、禁再转移及应急通报机制", 110),
+                "压实境外接收方违约连带责任与审计配合义务，确保数据主体跨境查阅、更正、删除及索赔请求具备可执行法律抓手。",
+                _status(contract_raw),
+            ],
+        ]
+    else:
+        rows = [
+            [
+                "合法性基础与透明告知行权",
+                _clean_fact_snippet(basis_raw, "按业务场景区分合同履行必需、单独同意或法定机制，配套车机端与移动端分层隐私告知", 110),
+                "将每类车载数据处理严格锚定于明确法定事由，杜绝一揽子概括授权；通过显著告知与随时可触达的查阅、更正、删除及撤回同意入口，保障数据主体知情权与自决权实质落地。",
+                _status(basis_raw),
+            ],
+            [
+                "数据最小化与源端默认隐私保护",
+                _clean_fact_snippet(data_raw, "执行出境字段白名单审查，车端源头去标识化与降低定位及感知数据敏感精度", 110),
+                f"在数据离开车端或{src_zh}前置节点前先行剥离非必要直接识别符，按事件触发代替后台全量静默采集，从源头切断超范围收集与个体精准画像风险。",
+                _status(data_raw),
+            ],
+            [
+                "存储期限限制与到期彻底销毁",
+                _clean_fact_snippet(ret_raw, "严格按业务目的设定最短必要留存周期，期满自动触发生产库与备份副本同步清除", 110),
+                f"留存窗口与故障排查、法规留痕或履约周期严格挂钩，到期后对{rcp_zh}主存储及全部灾备介质执行不可恢复的安全彻底删除，消除境外长期沉淀暴露风险。",
+                _status(ret_raw),
+            ],
+            [
+                "全链路加密与最小权限隔离审计",
+                _clean_fact_snippet(sec_raw, "部署双向鉴权加密传输通道、逻辑隔离存储、独立密钥管控、岗位最小授权及不可篡改审计日志", 110),
+                "通信加密与完整性校验阻断跨网截获篡改；环境隔离、细粒度权限审批与全量操作留痕形成纵深防御，确保单一节点异常不演化为批量明文泄露。",
+                _status(sec_raw),
+            ],
+            [
+                "跨境契约约束与公权力调取阻断",
+                _clean_fact_snippet(contract_raw, "签署具备强制约束力的跨境传输法律文件，锁定唯一处理目的、禁止擅自再转移并约定外部调取审查通报义务", 110),
+                "通过连带违约责任将保护标准延伸至境外接收方；遇当地公权力机关调取请求时，强制执行职权与程序合法性审查、对宽泛要求依法抗辩并第一时间通报报批，结合源端脱敏阻却越权明文交付。",
+                _status(contract_raw),
+            ],
+        ]
     return [
         {"type": "paragraph", "text": "合规原则与安全保护措施适当性及有效性核验表："},
         {
@@ -714,10 +885,13 @@ def safeguard_adequacy_blocks(task, code: str, values: dict[str, str], route: di
 
 
 def verdict_decision_blocks(task, code: str, values: dict[str, str], route: dict, missing_count: int = 0) -> list[dict]:
-    """Reference DPIA Chapter 4.2 & Chapter 6 Table 29: authoritative four-tier conclusive decision table and circuit-breaker conditions."""
+    """Authoritative four-tier conclusive decision table and circuit-breaker conditions tailored by document type (DPIA / LIA / TIA / Risk Report)."""
     from app.analysis import risk_items
 
     facts = {**answered(task), **{k: v for k, v in values.items() if v}}
+    source_code, recipient_code = doc_rules.ends(facts, getattr(task, "country_code", None))
+    src_zh = NAMES.get(source_code or "", facts.get("source_country") or "数据发出国")
+    rcp_zh = NAMES.get(recipient_code or "", facts.get("recipient_country") or "数据接收国")
     raw_risk = facts.get("risk_rating") or ""
     r_sum = risk_items.summary(raw_risk) if raw_risk else None
     high_left = (r_sum["current_counts"]["高风险"] if r_sum else 0)
@@ -732,31 +906,135 @@ def verdict_decision_blocks(task, code: str, values: dict[str, str], route: dict
     blocked = missing_count > 0 or high_left > 0
 
     reject_mark = "■ 暂缓放行（待消除阻断项）" if blocked else "□ 不适用"
-    reject_reason = (
-        f"当前尚有 {missing_count} 项核心业务事实待补齐或存在 {high_left} 项未压降高风险事项；在补齐缺口并将高风险压降至中、低区间前，不得直接启动跨境传输。"
-        if blocked
-        else "经核查，本项目不存在违背法定禁止性规定或穷尽防控措施后仍无法压降的极高固有风险，无需驳回终止业务方案。"
-    )
-
     filing_mark = "■ 适用必办" if needs_filing else "□ 按需核验"
-    filing_reason = (
-        f"法定前置路径核定：{r_text}"
-        if r_text
-        else "须在启动正式跨境传输前对照数据发出国及接收国最新监管要求，确认并完结适用的申报、备案或授权手续。"
-    )
-
     cond_mark = "□ 待前置阻断项消除后转入" if blocked else "■ 正式核准（有条件通过）"
-    cond_list = (
-        "须同时刚性满足以下五项放行前提："
-        "（1）依法办结前述法定出境申报审批、标准合同备案或属地主管机关事先许可程序；"
-        "（2）车端及前置节点严格锁定最小必要字段白名单，默认关闭无关采集并确保去标识化规则持续生效；"
-        "（3）跨境双向鉴权加密通道、境外逻辑隔离存储、独立密钥管理及全量访问审计日志通过上线前核验；"
-        "（4）与境外接收方正式签署跨境数据传输法律文件，落实唯一目的限制、严禁擅自再转移、公权力调取合法性审查通报及连带违约责任；"
-        "（5）建立单路径暂停熔断与本地降级隔离机制——任一业务子场景或单一传输路径未获法定批准、未通过源端脱敏核验或监测到异常安全风险时，立即单独暂停该路径跨境传输并转入本地离线或境内留存预案，其余已合规路径保持逻辑隔离独立运行。"
-    )
-
     uncond_mark = "□ 不适用"
-    uncond_reason = "跨法域汽车数据处理兼具动态演进性与持续法定义务约束，必须受上述前置合规条件、到期含备份销毁及周期复审机制刚性绑定，不适用无条件放行。"
+
+    if code == "lia":
+        reject_reason = (
+            f"当前尚有 {missing_count} 项权衡要素待核实或存在未化解高侵害风险；未完成三步平衡补证前不得援引合法利益开展处理。"
+            if blocked
+            else "企业所主张的运行安全与履约协同利益真实合法，且未触及法律绝对禁止性红线，无需否决该处理活动。"
+        )
+        filing_reason = (
+            f"属地法域衔接核定：{r_text}"
+            if r_text
+            else f"须对照{src_zh}现行数据保护法规确认合法利益适用边界，涉及跨境传输时同步完结法定前置保障程序。"
+        )
+        cond_list = (
+            "维持三步测试权利平衡须刚性履行四项条件："
+            f"（1）严格限定于既定安全运维与质量履约目的，严禁将{src_zh}车载关联数据转用于商业营销或驾驶习惯画像；"
+            "（2）源端去标识化与最小字段白名单保持不可绕过状态；"
+            "（3）在车机与移动端显著披露处理逻辑，确保数据主体随时可免费行使反对权或关闭非核心采集且不影响基础行车安全；"
+            "（4）严格执行承诺的最短留存周期与到期含备份自动擦除。"
+        )
+        uncond_reason = "合法利益的成立高度依赖缓解措施与退出机制对个人权益减损的动态对冲，不得脱离上述平衡条件无限制适用。"
+        rationale_para = (
+            "正式裁断理由与动态复审触发机制：经目的正当性、最小侵害手段排他性及五维权利权衡测试，"
+            + (
+                "待补齐缺失要素并消除高风险项后方可确认平衡成立。"
+                if blocked
+                else "在落实源端脱敏、透明告知及便捷异议通道的前提下，企业正当安全与履约利益未凌驾于自然人基本权利之上，三步测试核定为“有条件通过”。"
+            )
+            + f"后续若处理目的外延、数据敏感度上升或收到{src_zh}数据主体集中合理异议，须立即暂停相关处理并重新开展合法利益评估。"
+        )
+    elif code == "tia":
+        reject_reason = (
+            f"当前尚有 {missing_count} 项跨境链路要素待核实或存在 {high_left} 项未受控法域冲突风险，暂缓启动向{rcp_zh}的数据传输。"
+            if blocked
+            else f"经核查{rcp_zh}数据保护法制与本项目主权密钥隔离架构，未发现导致跨境传输工具彻底失效的系统性法律障碍。"
+        )
+        filing_reason = (
+            f"跨境传输法定前置工具核定：{r_text}"
+            if r_text
+            else f"正式向{rcp_zh}启动传输前，须依{src_zh}法规完结事先授权审批、安全评估或标准合同备案程序。"
+        )
+        cond_list = (
+            f"维持向{rcp_zh}传输的实质同等保护水平须刚性满足五项条件："
+            f"（1）先期完结{src_zh}法定出境行政审批、备案或签约义务，严禁未批先传；"
+            f"（2）假名化映射表与根密钥独占留存于{src_zh}境内安全模块，向{rcp_zh}仅开放脱敏业务参数；"
+            "（3）全程启用双向证书加密专线与静态加密，封禁境外批量明文导出权限；"
+            f"（4）严格执行公权力调取即时通报、管辖合法性审查与最小化抗辩合同条款，严禁向第三国再转移；"
+            f"（5）单路径跨境熔断——一旦监测到{rcp_zh}调取实践恶化或链路异常，立即单独切断该跨境通道并回退{src_zh}本地存储。"
+        )
+        uncond_reason = f"跨法域传输受{rcp_zh}外部法律环境动态演变影响，必须受技术密码学隔离、合同抗辩条款及单路径熔断机制持续绑定。"
+        rationale_para = (
+            f"正式裁断理由与动态复审触发机制：对照 EDPB 第 01/2020 号建议书六步法核查自{src_zh}向{rcp_zh}的传输链路与补充措施实效，"
+            + (
+                "待补齐缺失项并压降高风险后方可放行跨境同步。"
+                if blocked
+                else f"在叠加{src_zh}源端假名化密钥留存、端到端强加密及外部调取抗辩机制后，出境数据在{rcp_zh}可持续获得与{src_zh}法定标准实质相当的保护，核定为“有条件通过”。"
+            )
+            + f"运行期间按年度例行复核，若{rcp_zh}数据调取立法修订、接收方控制权变更或拟扩充出境字段，须立即冻结增量传输并重启传输影响评估。"
+        )
+    elif code == "risk_report":
+        reject_reason = (
+            f"当前尚有 {missing_count} 项申报自评要素待补齐或存在 {high_left} 项未整改高风险隐患，完成闭环清零前严禁出境放行。"
+            if blocked
+            else "本次拟出境业务合法正当、不触碰国家安全与测绘禁区红线，且初评识别隐患均已落实工程化阻断，无需终止出境申报。"
+        )
+        filing_reason = (
+            f"法定出境监管路径核定：{r_text}"
+            if r_text
+            else f"须严格依据{src_zh}数据跨境流动监管规定办结安全评估申报、标准合同备案或法定豁免留档手续。"
+        )
+        cond_list = (
+            "正式投产运行须持续满足五项刚性安全门禁："
+            f"（1）依法取得{src_zh}主管部门安全评估通过批复或完成标准合同备案（免予申报场景须完备内控PIA与协议归档）；"
+            "（2）境内出境安全网关锁定字段白名单与规模计量预警阈值，超限或夹带敏感明文自动阻断；"
+            f"（3）跨境加密专线、{src_zh}境内密钥独占托管及{rcp_zh}接收端只读隔离专区持续通过渗透与审计核验；"
+            "（4）双方法律文件严格锁定唯一业务用途、到期连同备份安全销毁及违规连带赔偿责任；"
+            "（5）建立单路径暂停熔断机制——任一子场景未获批复或触发阈值预警时立即独立熔断该出境接口，不影响境内基础车辆服务。"
+        )
+        uncond_reason = "汽车数据跨境流动直接关涉个人权益与公共安全，必须受规模阈值监控、法定有效期复审及到期销毁机制刚性约束。"
+        risk_clause = (
+            f"本次自评估共识别 {r_sum['total']} 项风险，经技术与管理整改复测后当前高风险 {high_left} 项、中风险 {med_left} 项、低风险 {low_left} 项"
+            if (r_sum and r_sum["total"] > 0)
+            else "全链路脱敏、加密与境外隔离措施已完成上线前安全核验"
+        )
+        rationale_para = (
+            f"正式裁断理由与动态复审触发机制：综合出境必要性排他比对、境内与境外双端安全保障能力核查及风险压降实效（{risk_clause}），"
+            + (
+                "须待缺失事项补齐与高风险整改复测通过后方可进入法定申报或放行程序。"
+                if blocked
+                else f"自{src_zh}向{rcp_zh}传输的字段范围最小必要、整体出境安全风险可控，核定为“有条件通过”。"
+            )
+            + "在评估有效期内按年度开展数据出境安全合规审计；一旦累计出境人数逼近法定升级阈值、业务功能扩围或接收方安全环境发生重大变化，须立即重新开展风险自评估并履行更新申报。"
+        )
+    else:
+        reject_reason = (
+            f"当前尚有 {missing_count} 项核心业务事实待补齐或存在 {high_left} 项未压降高风险事项；在补齐缺口并将高风险压降至中、低区间前，不得直接启动跨境传输。"
+            if blocked
+            else "经核查，本项目不存在违背法定禁止性规定或穷尽防控措施后仍无法压降的极高固有风险，无需驳回终止业务方案。"
+        )
+        filing_reason = (
+            f"法定前置路径核定：{r_text}"
+            if r_text
+            else f"须在启动正式跨境传输前对照{src_zh}及{rcp_zh}最新监管要求，确认并完结适用的申报、备案或事先授权手续。"
+        )
+        cond_list = (
+            "须同时刚性满足以下五项放行前提："
+            "（1）依法办结前述法定出境申报审批、标准合同备案或属地主管机关事先许可程序；"
+            "（2）车端及前置节点严格锁定最小必要字段白名单，默认关闭无关采集并确保去标识化规则持续生效；"
+            "（3）跨境双向鉴权加密通道、境外逻辑隔离存储、独立密钥管理及全量访问审计日志通过上线前核验；"
+            "（4）与境外接收方正式签署跨境数据传输法律文件，落实唯一目的限制、严禁擅自再转移、公权力调取合法性审查通报及连带违约责任；"
+            "（5）建立单路径暂停熔断与本地降级隔离机制——任一业务子场景或单一传输路径未获法定批准、未通过源端脱敏核验或监测到异常安全风险时，立即单独暂停该路径跨境传输并转入本地离线或境内留存预案，其余已合规路径保持逻辑隔离独立运行。"
+        )
+        uncond_reason = "跨法域汽车数据处理兼具动态演进性与持续法定义务约束，必须受上述前置合规条件、到期含备份销毁及周期复审机制刚性绑定，不适用无条件放行。"
+        risk_clause = (
+            f"风险评估台账共识别 {r_sum['total']} 项风险，经防控措施压降与整改核销后剩余高风险 {high_left} 项、中风险 {med_left} 项、低风险 {low_left} 项"
+            if (r_sum and r_sum["total"] > 0)
+            else "各项跨境链路安全控制、合同约束与权利响应机制已纳入统一内控核验"
+        )
+        rationale_para = (
+            f"正式裁断理由与动态复审触发机制：综合合法性基础要件比对、多替代方案最小侵害排他论证及安全保护措施适当性核验（{risk_clause}），"
+            + (
+                "待上述缺失事实补齐及高风险事项完成整改降级、且全部刚性前置条件核验通过后，方可转入有条件放行状态。"
+                if blocked
+                else "本项目业务目的正当、出境字段控制在最小必要限度内、剩余风险处于低位可接受区间且无需启动监管事先磋商，核定为“有条件通过”（数据保护官审查意见已纳入上线门禁）。"
+            )
+            + "项目运行期间实行定期合规审计；一旦发生车载功能或采集字段扩张、自然人规模跨越法定申报阈值、境外接收方控制权或接收国法律执法环境重大变化、或出现数据安全事件，须立即启动专项重新评估。"
+        )
 
     rows = [
         ["驳回或暂缓实施（终止或重新设计）", reject_mark, reject_reason],
@@ -764,21 +1042,6 @@ def verdict_decision_blocks(task, code: str, values: dict[str, str], route: dict
         ["有条件通过（落实刚性前置条件后实施）", cond_mark, cond_list],
         ["无条件通过", uncond_mark, uncond_reason],
     ]
-
-    if r_sum and r_sum["total"] > 0:
-        risk_clause = f"风险评估台账共识别 {r_sum['total']} 项风险，经防控措施压降与整改核销后剩余高风险 {high_left} 项、中风险 {med_left} 项、低风险 {low_left} 项"
-    else:
-        risk_clause = "各项跨境链路安全控制、合同约束与权利响应机制已纳入统一内控核验"
-
-    rationale_para = (
-        f"正式裁断理由与动态复审触发机制：综合合法性基础要件比对、多替代方案最小侵害排他论证及安全保护措施适当性核验（{risk_clause}），"
-        + (
-            "待上述缺失事实补齐及高风险事项完成整改降级、且全部刚性前置条件核验通过后，方可转入有条件放行状态。"
-            if blocked
-            else "本项目业务目的正当、出境字段控制在最小必要限度内、剩余风险处于可接受区间，核定为“有条件通过”。"
-        )
-        + "项目运行期间实行定期合规审计；一旦发生车载功能或采集字段扩张、自然人规模跨越法定申报阈值、境外接收方控制权或接收国法律执法环境重大变化、或出现数据安全事件，须立即启动专项重新评估。"
-    )
 
     return [
         {"type": "paragraph", "text": "结论性研判结果与放行条件核定表："},
@@ -824,11 +1087,10 @@ async def dpia_overview_blocks(session: AsyncSession, task, values: dict[str, st
     purpose_short = _first_clause_phrase(facts.get("purpose") or "", "履行既定车载服务与跨区域协同运维目标", 56)
     retention_txt = _clean_fact_snippet(facts.get("retention_and_blackbox") or "", "按最短必要业务周期留存，期满主库与备份同步安全删除", 130)
     has_dpo = bool((facts.get("dpo_opinion") or "").strip() and not str(facts.get("dpo_opinion")).startswith("暂不确定"))
-    data_txt = facts.get("exterior_video_and_gnss") or facts.get("data_types") or ""
     subjects_txt = facts.get("data_subjects") or ""
 
-    pos_data_txt = re.sub(r"(?:不采集|未采集|不含|不包含|不涉及|不纳入)[^；。，\n]*", "", data_txt)
-    pos_subj_txt = re.sub(r"(?:不含|不包含|不涉及)[^；。，\n]*", "", subjects_txt)
+    pos_data_txt = _strip_negated_clauses(f"{facts.get('exterior_video_and_gnss') or ''} {facts.get('data_types') or ''}")
+    pos_subj_txt = _strip_negated_clauses(subjects_txt)
     triggers = [
         f"跨法域个人数据流转（自{src_zh}向{rcp_zh}传输车载关联数据）",
         "依托智能网联车载终端及边缘网关开展自动化、事件触发式数据处理",
@@ -880,12 +1142,14 @@ async def dpia_special_data_note_blocks(session: AsyncSession, task, values: dic
     data_raw = (facts.get("exterior_video_and_gnss") or facts.get("data_types") or "").strip()
     sens_raw = (facts.get("sensitive_pi") or "").strip()
     sens_kinds = _first_clause_phrase(facts.get("sensitive_pi_kinds") or "", "高敏感车载感知特征", 36)
-    pos_scope = re.sub(
-        r"(?:不采集|未采集|不含|不包含|不涉及|不纳入|不传输|不上传|不在[^；。，\n]{0,12}范围内)[^；。，\n]*",
-        "",
-        f"{data_raw} {sens_kinds if sens_raw.startswith('是') else ''}",
+    pos_scope = _strip_negated_clauses(
+        f"{data_raw} {facts.get('data_types') or ''} {sens_kinds if sens_raw.startswith('是') else ''}"
     )
-    masked = bool(re.search(r"脱敏|去标识|匿名|模糊|遮蔽|擦除|哈希|降精|不出车|本地处理|相对局部|假名化", data_raw))
+    cleaned_mask_probe = _PROHIBITED_UNMASKED_RE.sub(" ", data_raw)
+    is_unmasked = bool(_UNMASKED_RE.search(cleaned_mask_probe))
+    masked = (not is_unmasked) and bool(
+        re.search(r"脱敏|去标识|匿名|模糊|遮蔽|擦除|哈希|降精|不出车|本地处理|相对局部|假名化", cleaned_mask_probe)
+    )
     has_bio_or_health = bool(re.search(r"生物识别|指纹|虹膜|声纹|静脉|人脸识别|疲劳监测|驾驶员身份识别|健康|医疗|生理", pos_scope))
     has_vision = bool(re.search(r"视频|图像|影像|摄像头|环视|人脸|车牌|座舱画面|点云", pos_scope, re.I))
     has_loc = bool(re.search(r"轨迹|定位|位置|GNSS|GPS|坐标|网格编码", pos_scope, re.I))
@@ -914,6 +1178,11 @@ async def dpia_special_data_note_blocks(session: AsyncSession, task, values: dic
         note = (
             f"特殊类别与敏感个人数据边界判定说明：对照{law_disp}核验上表字段，本项目不采集车内外音视频与生物识别特征，仅在特定业务或告警事件触发时附带经源端降精模糊处理的区域位置与去标识化车辆令牌，不构成特殊类别生物识别数据处理或连续高精度行踪画像；所涉关联字段全程按高敏标准实施加密与只读权限管控。"
         )
+    elif has_vision or has_loc:
+        note = (
+            f"特殊类别与敏感个人数据边界判定说明：对照{law_disp}，上表所涉车内外光学影像或高精度空间行踪轨迹尚未完成源端不可逆去标识化与精度降级（未脱敏高敏状态），存在直接识别自然人面部特征或精准还原个人生活行踪的重大隐私风险。"
+            "未在车端或境内安全网关落实实时人脸车牌遮蔽、坐标降精脱敏并依法取得数据主体单独明示同意及前置出境许可前，严禁将未脱敏原始视频流或连续精确轨迹直接向境外传输。"
+        )
     elif sens_raw.startswith("是"):
         note = (
             f"特殊类别与敏感个人数据边界判定说明：对照{law_disp}，本项目虽涉及敏感个人数据范围，但不包含种族、宗教信仰、政治观点、健康生理指标，亦不提取唯一识别自然人的生物特征模板。"
@@ -938,15 +1207,21 @@ async def dpia_legal_basis_blocks(session: AsyncSession, task, values: dict[str,
 
     stype = str(getattr(task, "scenario_type", "") or "").lower()
     raw_scenario_txt = f"{facts.get('scenario', '')} {facts.get('purpose', '')} {facts.get('exterior_video_and_gnss', '')}"
-    scenario_txt = re.sub(
-        r"(?:不采集|未采集|不含|不包含|不涉及|不纳入|不传输|不上传)[^；。，\n]*",
-        "",
-        raw_scenario_txt,
-    )
+    scenario_txt = _strip_negated_clauses(raw_scenario_txt)
     has_legit_in_law = (source_code in _EU_EEA_CODES) or (lb_rule.get("state") == "有")
     route_short = _first_clause_phrase(route.get("text") or "", f"依法履行{src_zh}跨境传输法定保障机制", 64)
 
-    if stype in ("autonomous_trial", "hd_mapping") or re.search(r"自动驾驶|路测|道路测试|高精地图|测绘|点云", scenario_txt):
+    is_av_or_map = stype in ("autonomous_trial", "hd_mapping") or (
+        not stype and bool(re.search(r"自动驾驶|路测|道路测试|高精地图|测绘|点云", scenario_txt))
+    )
+    is_cockpit = stype == "cockpit_biometrics" or (
+        not stype and bool(re.search(r"座舱|生物识别|疲劳监测|声纹|人脸识别", scenario_txt))
+    )
+    is_sales = stype == "sales_service" or (
+        not stype and bool(re.search(r"销售|售后|客户数据|三包|维保|索赔", scenario_txt))
+    )
+
+    if is_av_or_map:
         rows = [
             [
                 "受雇测试安全员或测绘作业人员履职与接管记录管理",
@@ -965,7 +1240,7 @@ async def dpia_legal_basis_blocks(session: AsyncSession, task, values: dict[str,
             ],
         ]
         lia_focus = "提升智能驾驶系统在复杂道路气象条件下的主动避障安全性与感知可靠性"
-    elif stype == "cockpit_biometrics" or re.search(r"座舱|生物识别|疲劳监测|声纹|人脸识别", scenario_txt):
+    elif is_cockpit:
         rows = [
             [
                 "基础车联网账号绑定与驾乘配置同步服务",
@@ -984,7 +1259,7 @@ async def dpia_legal_basis_blocks(session: AsyncSession, task, values: dict[str,
             ],
         ]
         lia_focus = "排查座舱软件交互故障并保障行车注意力监测系统的运行可靠性"
-    elif stype == "sales_service" or re.search(r"销售|售后|客户数据|三包|维保|索赔", scenario_txt):
+    elif is_sales:
         rows = [
             [
                 "整车销售交付、三包质保兑现与售后维修工单履约",

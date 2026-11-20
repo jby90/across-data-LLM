@@ -241,7 +241,10 @@ async def understand(content: str, ctx: IntentCtx, *, match_country, match_scena
             logger.info("intent=%s answer=%s topic=%s", reading.intents, reading.answer_kind, reading.topic)
             return reading
     # 模型暂时不可用的降级：只把“明显是陈述”的话当作对当前问题的回答（和过去的行为一致）；
-    # 问句、长句里的诉求没法在这里理解，如实告知用户，而不是当成事实记下。
+    # 问句、无关闲聊、长句里的诉求没法在这里理解，如实告知用户，而不是当成事实记下。
+    _off_topic_degraded = re.compile(r"天气|气温|晴朗|下雨|写一?首诗|讲个笑话|吃什么|川菜|火锅|股票|彩票")
+    if not ctx.slot and _off_topic_degraded.search(content):
+        return Understanding(intents=["off_topic"], via="degraded")
     if ctx.slot and content.strip() and not _QUESTIONISH.search(content):
         logger.warning("intent model unavailable: statement taken as the answer to %s", ctx.slot)
         return Understanding(intents=["provide_info"], answer_kind="answer", via="degraded")

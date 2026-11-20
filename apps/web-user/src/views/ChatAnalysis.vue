@@ -175,6 +175,8 @@ interface TaskDetail {
 
 interface CitationCard {
   clause_id: string
+  language?: string
+  is_native_zh?: boolean
   section_path?: string | null
   source_review_status?: string
   translation_review_status?: string
@@ -584,26 +586,51 @@ async function batchArchiveChats() {
     )
   } catch { return }
   try {
-    const r = await api.post<{ archived_count: number; skipped_running: number }>('/api/analysis/tasks/batch-archive', {
-      kind: 'chat',
-      ids: manageableTasks.value.map((t) => t.id),
-    })
+    let archivedCount = 0
+    let skippedRunning = 0
+    if (!canEdit(auth.user)) {
+      for (const t of manageableTasks.value) {
+        if (t.status === 'running') { skippedRunning++; continue }
+        await api.delete(`/api/analysis/tasks/${t.id}`)
+        archivedCount++
+      }
+    } else {
+      const r = await api.post<{ archived_count: number; skipped_running: number }>('/api/analysis/tasks/batch-archive', {
+        kind: 'chat',
+        ids: manageableTasks.value.map((t) => t.id),
+      })
+      archivedCount = r.archived_count
+      skippedRunning = r.skipped_running
+    }
+    const closingIds = new Set(manageableTasks.value.map((t) => t.id))
     await refreshTasks()
-    if (detail.value && manageableTasks.value.some((t) => t.id === detail.value?.id)) await newChat()
-    ElMessage.success(`已归档 ${r.archived_count} 条对话${r.skipped_running ? `（${r.skipped_running} 条运行中已保留）` : ''}`)
+    if (detail.value && closingIds.has(detail.value.id)) await newChat()
+    ElMessage.success(`已归档 ${archivedCount} 条对话${skippedRunning ? `（${skippedRunning} 条运行中已保留）` : ''}`)
   } catch (e: unknown) { ElMessage.error((e as Error).message || '批量归档失败') }
 }
 async function batchRestoreChats() {
   if (!manageableArchivedTasks.value.length) return
   try {
-    const r = await api.post<{ restored_count: number; ids: string[] }>('/api/analysis/tasks/batch-restore', {
-      kind: 'chat',
-      ids: manageableArchivedTasks.value.map((t) => t.id),
-    })
+    let restoredCount = 0
+    let restoredIds: string[] = []
+    if (!canEdit(auth.user)) {
+      for (const t of manageableArchivedTasks.value) {
+        await api.post(`/api/analysis/tasks/${t.id}/restore`)
+        restoredCount++
+        restoredIds.push(t.id)
+      }
+    } else {
+      const r = await api.post<{ restored_count: number; ids: string[] }>('/api/analysis/tasks/batch-restore', {
+        kind: 'chat',
+        ids: manageableArchivedTasks.value.map((t) => t.id),
+      })
+      restoredCount = r.restored_count
+      restoredIds = r.ids || []
+    }
     await refreshTasks()
     showArchive.value = false
-    if (r.ids?.length) await openTask(r.ids[r.ids.length - 1])
-    ElMessage.success(`已一键恢复 ${r.restored_count} 条对话`)
+    if (restoredIds.length) await openTask(restoredIds[restoredIds.length - 1])
+    ElMessage.success(`已一键恢复 ${restoredCount} 条对话`)
   } catch (e: unknown) { ElMessage.error((e as Error).message || '批量恢复失败') }
 }
 async function batchPurgeChats() {
@@ -616,12 +643,21 @@ async function batchPurgeChats() {
     )
   } catch { return }
   try {
-    const r = await api.post<{ deleted_count: number }>('/api/analysis/tasks/batch-delete', {
-      kind: 'chat',
-      ids: manageableArchivedTasks.value.map((t) => t.id),
-    })
+    let deletedCount = 0
+    if (!canEdit(auth.user)) {
+      for (const t of manageableArchivedTasks.value) {
+        await api.delete(`/api/analysis/tasks/${t.id}?permanent=true`)
+        deletedCount++
+      }
+    } else {
+      const r = await api.post<{ deleted_count: number }>('/api/analysis/tasks/batch-delete', {
+        kind: 'chat',
+        ids: manageableArchivedTasks.value.map((t) => t.id),
+      })
+      deletedCount = r.deleted_count
+    }
     await refreshTasks()
-    ElMessage.success(`已彻底删除 ${r.deleted_count} 条归档对话`)
+    ElMessage.success(`已彻底删除 ${deletedCount} 条归档对话`)
   } catch (e: unknown) { ElMessage.error((e as Error).message || '批量删除失败') }
 }
 async function openArchived(t: { id: string }) {
@@ -1494,15 +1530,15 @@ onUnmounted(() => {
               card.source_url
             }}</a>
           </div>
-          <div class="dual">
+          <div class="dual" :style="(card.is_native_zh || card.language?.toLowerCase().startsWith('zh')) ? 'grid-template-columns: 1fr' : undefined">
             <div>
-              <div class="col-label">官方原文</div>
+              <div class="col-label">{{ (card.is_native_zh || card.language?.toLowerCase().startsWith('zh')) ? '官方原文（中文现行条文）' : '官方原文' }}</div>
               <LegalText :text="card.original_text" :terms="card.terms" :clause-id="card.clause_id" :section-path="card.section_path" />
               <div v-if="anchorQuote" class="anchor">
                 报告锚定的原文片段：<mark>{{ anchorQuote }}</mark>
               </div>
             </div>
-            <div>
+            <div v-if="!(card.is_native_zh || card.language?.toLowerCase().startsWith('zh'))">
               <div class="col-label">中文对照</div>
               <LegalText :text="card.translated_text || '暂无中文对照'" :terms="card.terms" :clause-id="card.clause_id" :section-path="card.section_path" />
             </div>

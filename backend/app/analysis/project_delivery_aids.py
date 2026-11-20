@@ -38,16 +38,16 @@ _DENSITY_FACETS: dict[str, list[tuple[str, re.Pattern[str]]]] = {
     "data_types": [
         ("具体车载或客户字段", re.compile(r"码|日志|参数|状态|电压|温度|转速|里程|坐标|轨迹|影像|视频|语音|姓名|电话|车架号|VIN|报文|传感器|特征")),
         ("个人/敏感属性说明", re.compile(r"敏感|定位|位置|轨迹|人脸|声纹|生物|个人|自然人|不含敏感|去标识")),
-        ("源端脱敏或精度控制", re.compile(r"脱敏|模糊|精度|假名|哈希|掩码|剥离|过滤|擦除|降频|匿名")),
+        ("源端脱敏或精度控制", re.compile(r"(?<!未)(?<!未经)(?<!不做)(?<!无)(?:脱敏|模糊|精度|假名|哈希|掩码|剥离|过滤|擦除|降频|匿名)")),
     ],
     "risk_measures": [
-        ("源端采集脱敏过滤", re.compile(r"脱敏|模糊|去标识|假名|白名单|剥离|掩码|最小")),
+        ("源端采集脱敏过滤", re.compile(r"(?<!未)(?<!未经)(?<!不做)(?<!无)(?:脱敏|模糊|去标识|假名|白名单|剥离|掩码|最小)")),
         ("跨境传输加密鉴权", re.compile(r"专线|加密|TLS|证书|双向鉴权|通道|校验|签名")),
         ("境外隔离与最小权限", re.compile(r"隔离|最小权限|审批|分级|角色|访问控制|密钥|专人")),
         ("操作审计与应急管理", re.compile(r"日志|审计|留痕|应急|制度|培训|协议|定期")),
     ],
     "security_tech": [
-        ("采集端脱敏预处理", re.compile(r"收集|采集|车端|脱敏|模糊|去标识|白名单|过滤")),
+        ("采集端脱敏预处理", re.compile(r"(?<!未)(?<!未经)(?<!不做)(?<!无)(?:脱敏|模糊|去标识|白名单|过滤)|车端(?:预处理|拦截|过滤)")),
         ("传输通道加密校验", re.compile(r"传输|专线|TLS|加密|鉴权|通道|完整性")),
         ("存储加密与访问控制", re.compile(r"存储|隔离|权限|审批|密钥|日志|审计")),
         ("期满安全删除机制", re.compile(r"删除|销毁|清除|到期|备份")),
@@ -315,18 +315,29 @@ def build_signoff_checklist(overview: dict[str, Any], values: dict[str, str]) ->
         if not v or _UNCONFIRMED_MARKER_RE.search(v):
             unconfirmed_fields.append(q.get("label") or q.get("key") or "")
 
+    is_cn_src = country_of(src) == "CN"
     credit_val = str(values.get("credit_code") or "").strip() or "（待核对营业执照 / 商业登记证原件）"
     legal_rep = str(values.get("legal_rep") or "").strip() or "（待核对法定代表人身份证件及职务）"
     sec_officer = str(values.get("security_officer") or "").strip() or "（待核对数据安全负责人 / DPO 正式任命书）"
-    eff_proof = str(values.get("effectiveness_proof") or "").strip() or "（待核对等保测评报告、ISO 27001/27701 或 UN R155/R156 证书编号）"
+    default_eff_proof = (
+        "（待核对等保测评报告、ISO 27001/27701 或 UN R155/R156 证书编号）"
+        if is_cn_src
+        else "（待核对属地法定安全审计报告、ISO 27001/27701 或 UN R155/R156 证书编号）"
+    )
+    eff_proof = str(values.get("effectiveness_proof") or "").strip() or default_eff_proof
     gov_law = str(values.get("governing_law") or "").strip() or "（待法务核定准据法与仲裁/管辖法院条款）"
     retention_val = str(values.get("retention_and_blackbox") or "").strip() or "（待研发与运维核实境外机房位置与到期自动清除脚本）"
 
+    penalty_check_desc = (
+        "对照国家企业信用信息公示系统及内部法务台账，确认近两年是否存在网信、工信或测绘主管部门行政处罚及整改结案证明"
+        if is_cn_src
+        else f"对照{src or '发出国'}官方商业登记簿及内部合规台账，确认近两年是否存在当地数据保护、电信或交通主管机关行政处罚及整改结案证明"
+    )
     entity_rows = [
         ["1", "申报主体法定全称与证照代码", f"当前填报：{company}｜代码：{credit_val}", "法务部 / 行政部", "□ 原件核对一致"],
         ["2", "法定代表人及经办人授权委托文件", f"当前填报：{legal_rep}；核验经办人授权委托书及身份证件复印件加盖公章情况", "法务部", "□ 已备齐签章件"],
         ["3", "数据安全负责人 / DPO 正式任命文件", f"当前填报：{sec_officer}；核对内部红头任命文件与管理架构图一致", "数据合规与安全部", "□ 已核对一致"],
-        ["4", "股权穿透与近两年行政处罚核实", "对照国家企业信用信息公示系统及内部法务台账，确认近两年是否存在网信、工信或测绘主管部门行政处罚及整改结案证明", "法务部", "□ 已核实无误"],
+        ["4", "股权穿透与近两年行政处罚核实", penalty_check_desc, "法务部", "□ 已核实无误"],
     ]
 
     tech_rows = [

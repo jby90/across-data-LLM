@@ -9,6 +9,7 @@ interface EditNode {
   node_type: string
   name_zh: string
   summary?: string | null
+  attributes?: Record<string, unknown>
   evidence_clause_id?: string | null
   review_status: string
 }
@@ -41,6 +42,19 @@ const NODE_TYPE_ZH: Record<string, string> = {
   PENALTY: '违规罚则',
 }
 
+const EDITABLE_ATTRS: Array<{ key: string; label: string; partyOnly?: boolean }> = [
+  { key: 'obligated_party', label: '义务主体', partyOnly: true },
+  { key: 'applicable_condition', label: '适用条件', partyOnly: true },
+  { key: 'applicable_industry', label: '1. 适用行业' },
+  { key: 'data_scope', label: '2. 数据范围' },
+  { key: 'cross_border_condition', label: '3. 出境条件' },
+  { key: 'retention_period', label: '4. 留存期限' },
+  { key: 'authorization_requirement', label: '5. 授权要求' },
+  { key: 'penalty_amount', label: '6. 处罚金额' },
+  { key: 'violation_level', label: '7. 违规等级' },
+  { key: 'admission_checklist', label: '8. 准入材料清单' },
+]
+
 const props = defineProps<{
   countryCode?: string
   node: EditNode
@@ -53,8 +67,15 @@ const emit = defineEmits<{ changed: [] }>()
 const RELATIONS = computed(() => Object.keys(props.relationLabels))
 const name = ref('')
 const summary = ref('')
+const attrDraft = ref<Record<string, string>>({})
 const saving = ref(false)
 const addOpen = ref(false)
+
+const visibleAttrs = computed(() =>
+  EDITABLE_ATTRS.filter(
+    (item) => !item.partyOnly || ['OBLIGATION', 'PENALTY'].includes(props.node.node_type),
+  ),
+)
 
 const myEdges = computed(() =>
   props.edges.filter(
@@ -70,6 +91,12 @@ watch(
   () => {
     name.value = props.node.name_zh
     summary.value = props.node.summary || ''
+    const nextAttrs: Record<string, string> = {}
+    for (const item of EDITABLE_ATTRS) {
+      const val = props.node.attributes?.[item.key]
+      nextAttrs[item.key] = typeof val === 'string' ? val : ''
+    }
+    attrDraft.value = nextAttrs
     addOpen.value = false
   },
   { immediate: true },
@@ -85,6 +112,7 @@ async function saveName() {
     await api.patch(`/admin/knowledge/nodes/${props.node.id}`, {
       name_zh: name.value,
       summary: summary.value,
+      attributes: attrDraft.value,
     })
     ElMessage.success('已保存，该要素回到待复核')
     emit('changed')
@@ -306,6 +334,13 @@ async function addEdge() {
         <el-form-item label="说明">
           <el-input v-model="summary" type="textarea" :rows="2" maxlength="4000" />
         </el-form-item>
+        <el-collapse style="margin-bottom: 12px" data-testid="kg-edit-attributes">
+          <el-collapse-item title="八类本体属性修订（选填，留空即条文未明确）" name="attrs">
+            <el-form-item v-for="item in visibleAttrs" :key="item.key" :label="item.label">
+              <el-input v-model="attrDraft[item.key]" maxlength="500" placeholder="按条文原文补充或修订" />
+            </el-form-item>
+          </el-collapse-item>
+        </el-collapse>
         <el-button :type="addOpen ? '' : 'primary'" :loading="saving" :disabled="!name.trim()" @click="saveName"
           >保存</el-button
         >

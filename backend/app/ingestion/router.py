@@ -16,7 +16,7 @@ from fastapi import (
 from fastapi import (
     Path as ApiPath,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +26,7 @@ from app.iam.deps import Principal, require_admin_side, require_platform_admin
 from app.ingestion.archive import ArchiveIntegrityError, ArchiveStore
 from app.ingestion.fetcher import validate_public_http_url
 from app.ingestion.models import Clause, Document, DocumentVersion, LegalStatus, PipelineEvent
-from app.ingestion.ocr import OcrEngine
+from app.ingestion.ocr import OcrEngine, OcrUnavailable
 from app.ingestion.pipeline import assess_document_relevance, parse_version
 from app.ingestion.safety import holds_for_documents
 from app.ingestion.source_observations import registered_acquisition
@@ -34,6 +34,35 @@ from app.knowledge.models import KnowledgeAuditRecord
 from app.sources.models import SourceSite
 
 router = APIRouter(prefix="/api/admin", tags=["documents"])
+
+
+def clean_admin_process_text(raw: str | None) -> str | None:
+    if not raw:
+        return raw
+    import re as _re
+
+    s = raw.strip()
+    if s.startswith("{") and s.endswith("}"):
+        return "已完成版面分栏、页码与页眉页脚结构校正"
+    if "Failed to load document" in s or "PDFium" in s or "Data format error" in s:
+        return "文件结构损坏或并非标准版式文档，无法解析"
+    from app.core.jargon import scrub_engineering_jargon
+
+    s = _re.sub(r"(?:Paddle)?OCR\s*(\d+)\s*页", r"版面文字识别共 \1 页", s, flags=_re.I)
+    s = _re.sub(r"\.json\b", "数据文件", s, flags=_re.I)
+    s = scrub_engineering_jargon(
+        s,
+        ocr_zh="版面文字识别",
+        llm_zh="智能分析模型",
+        rag_zh="法条检索增强",
+        json_zh="结构化数据",
+        uuid_zh="唯一标识",
+        pydantic_zh="字段校验",
+        cjk_zh="中文汉字",
+    )
+    s = _re.sub(r"[（(][A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout)[)）]", "", s)
+    s = _re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout)\s*[:：]?\s*", "", s)
+    return s.strip(" ：:;；,，") or "处理异常，请核查原文或稍后重试"
 
 
 class VersionOut(BaseModel):
@@ -64,6 +93,11 @@ class VersionOut(BaseModel):
     legal_status: str
     metadata_source: str | None
 
+    @field_validator("error", "check_note", mode="after")
+    @classmethod
+    def _scrub_error(cls, v: str | None) -> str | None:
+        return clean_admin_process_text(v)
+
 
 class DocumentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -88,6 +122,11 @@ class DocumentOut(BaseModel):
     news_marked_at: datetime | None = None
     has_date: bool = False  # 最新版有公布或施行日期（没有的首次入库不推送，可由管理员标记为新法规）
     latest_version: VersionOut | None = None
+
+    @field_validator("last_error", "safety_note", "relevance_note", mode="after")
+    @classmethod
+    def _scrub_last_error(cls, v: str | None) -> str | None:
+        return clean_admin_process_text(v)
 
 
 class DocumentDetail(DocumentOut):
@@ -124,6 +163,11 @@ class EventOut(BaseModel):
     status: str
     message: str | None
     created_at: datetime
+
+    @field_validator("message", mode="after")
+    @classmethod
+    def _scrub_message(cls, v: str | None) -> str | None:
+        return clean_admin_process_text(v)
 
 
 class ManualUploadIn(BaseModel):
@@ -212,7 +256,11 @@ async def upload_document_version(
 
     doc: Document | None = None
     if body.document_id is not None:
-        doc = await session.get(Document, body.document_id)
+        doc = (
+            await session.execute(
+                select(Document).where(Document.id == body.document_id).with_for_update()
+            )
+        ).scalar_one_or_none()
         if doc is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
     else:
@@ -228,28 +276,42 @@ async def upload_document_version(
             clean_url = validate_public_http_url(body.source_url)
         except ValueError as e:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from None
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
         doc = (
             await session.execute(
-                select(Document).where(
-                    Document.site_id == site.id, Document.source_url == clean_url
-                )
+                select(Document)
+                .where(Document.site_id == site.id, Document.source_url == clean_url)
+                .with_for_update()
             )
         ).scalar_one_or_none()
         if doc is None:
             title_val = (body.title or clean_url).strip()[:500]
-            rel_val, rel_note = assess_document_relevance(title_val, clean_url, site.document_type)
-            doc = Document(
-                site_id=site.id,
-                country_code=site.country_code,
-                source_url=clean_url,
-                title=title_val,
-                language=site.language,
-                document_type=site.document_type,
-                relevance=rel_val,
-                relevance_note=rel_note,
+            norm_dtype = (site.document_type or "OTHER").strip().upper() or "OTHER"
+            rel_val, rel_note = assess_document_relevance(title_val, clean_url, norm_dtype)
+            await session.execute(
+                pg_insert(Document)
+                .values(
+                    id=uuid.uuid4(),
+                    site_id=site.id,
+                    country_code=site.country_code,
+                    source_url=clean_url,
+                    title=title_val,
+                    language=site.language,
+                    document_type=norm_dtype,
+                    relevance=rel_val,
+                    relevance_note=rel_note,
+                )
+                .on_conflict_do_nothing(index_elements=["site_id", "source_url"])
             )
-            session.add(doc)
             await session.flush()
+            doc = (
+                await session.execute(
+                    select(Document)
+                    .where(Document.site_id == site.id, Document.source_url == clean_url)
+                    .with_for_update()
+                )
+            ).scalar_one()
 
     if body.title and body.title.strip():
         doc.title = body.title.strip()[:500]
@@ -300,7 +362,15 @@ async def upload_document_version(
             metadata_source="manual_upload",
         )
         session.add(version)
-        await session.flush()
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "同一文档正在并发上传新版本，请稍后重试"
+            ) from None
         session.add(
             PipelineEvent(
                 version_id=version.id,
@@ -707,10 +777,25 @@ async def reread_page(
     session: AsyncSession = Depends(get_session),
 ):
     """更高分辨率、按原文语言再读这一页；读通的段落自动处理掉。"""
+    import pypdfium2 as pdfium
+
     from app.ingestion.ocr_check import reread_pages
 
     version = await _version_or_404(session, version_id)
-    done = await reread_pages(session, version, [page])
+    if version.mime_type != "application/pdf":
+        raise HTTPException(404, "这份原文不是扫描版页面文档")
+    if page < 1:
+        raise HTTPException(404, "没有这一页")
+    try:
+        done = await reread_pages(session, version, [page])
+    except OcrUnavailable:
+        raise HTTPException(
+            422, "当前运行环境尚未启用版面文字识别服务，请使用人工核对或联系管理员"
+        ) from None
+    except (FileNotFoundError, ArchiveIntegrityError, OSError):
+        raise HTTPException(422, "归档原文缺失或已损坏，无法读取该页") from None
+    except pdfium.PdfiumError:
+        raise HTTPException(422, "原文文件结构异常，无法解析页面图像") from None
     await session.commit()
     return {**done, "review_status": version.review_status, "note": version.check_note}
 
@@ -722,20 +807,46 @@ async def page_image(
     _: Principal = Depends(require_admin_side),
     session: AsyncSession = Depends(get_session),
 ):
+    import asyncio
     import io
 
     import pypdfium2 as pdfium
 
+    from app.ingestion.parsing import _PDFIUM_LOCK
+
     version = await _version_or_404(session, version_id)
     if version.mime_type != "application/pdf":
-        raise HTTPException(404, "这份原文不是 PDF")
-    pdf = pdfium.PdfDocument(_archive_pdf(version))
-    if not 1 <= page <= len(pdf):
-        raise HTTPException(404, "没有这一页")
-    image = pdf[page - 1].render(scale=1.6).to_pil()
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "private, max-age=600"})
+        raise HTTPException(404, "这份原文不是扫描版页面文档")
+    raw_pdf = _archive_pdf(version)
+
+    def _render_png_sync() -> bytes:
+        with _PDFIUM_LOCK:
+            try:
+                pdf = pdfium.PdfDocument(raw_pdf)
+            except pdfium.PdfiumError:
+                raise HTTPException(422, "原文文件结构异常，无法渲染页面图像") from None
+            page_obj = None
+            bitmap = None
+            try:
+                if not 1 <= page <= len(pdf):
+                    raise HTTPException(404, "没有这一页")
+                page_obj = pdf[page - 1]
+                bitmap = page_obj.render(scale=1.6)
+                image = bitmap.to_pil()
+                buf = io.BytesIO()
+                image.save(buf, format="PNG")
+                return buf.getvalue()
+            except pdfium.PdfiumError:
+                raise HTTPException(422, "原文页面渲染失败，请核查归档文件完整性") from None
+            finally:
+                if bitmap is not None:
+                    bitmap.close()
+                if page_obj is not None:
+                    page_obj.close()
+                pdf.close()
+
+    png_bytes = await asyncio.to_thread(_render_png_sync)
+    return Response(png_bytes, media_type="image/png", headers={"Cache-Control": "private, max-age=600"})
 
 
 class VersionCheckIn(BaseModel):

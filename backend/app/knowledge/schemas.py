@@ -72,6 +72,30 @@ class ClauseTranslationOut(BaseModel):
     reviewed_at: datetime | None
 
 
+class PublicClauseTranslationOut(BaseModel):
+    is_current: bool = True
+    id: uuid.UUID
+    clause_id: uuid.UUID
+    document_id: uuid.UUID
+    country_code: str
+    document_title: str
+    clause_number: str | None
+    heading: str | None
+    section_path: str | None
+    original_text: str
+    translated_text: str
+    glossary_hits: list[dict]
+    unmatched_terms: list[dict]
+    quality_check_passed: bool
+    quality_issues: list[str]
+    review_status: str
+    status: str = ""
+    usable_as_legal_basis: bool
+    status_badge: str
+    reviewer_note: str | None = None
+    reviewed_at: datetime | None = None
+
+
 class TranslationReviewIn(BaseModel):
     decision: str = Field(pattern="^(approved|rejected)$")
     translated_text: str | None = None
@@ -239,6 +263,7 @@ class RegulationDetailOut(BaseModel):
 class NodeEditIn(BaseModel):
     name_zh: str = Field(min_length=1, max_length=255)
     summary: str | None = Field(default=None, max_length=4000)
+    attributes: dict[str, str] | None = Field(default=None)
 
 
 class NodeCreateIn(BaseModel):

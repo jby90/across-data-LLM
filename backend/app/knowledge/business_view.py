@@ -43,13 +43,13 @@ async def requirement_topics(session, country_code):
     for aspect, label in ASPECT_TOPICS:
         nodes = pools.get(aspect) or []
         items = await wg._claim_items(refs, nodes, penalty=aspect == "penalty")
-        for node, item in zip(nodes, items, strict=True):
+        for item in items:
             ref = refs.items[item.ref - 1] if item.ref else None
             if ref is None:
                 continue  # 依据条文已不可引用（废止版本等）的不列
             cards.append(
                 dict(
-                    id=str(node.id),
+                    id=item.node_id,
                     topic=aspect,
                     topic_label=label,
                     title=item.title,

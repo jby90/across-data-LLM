@@ -30,39 +30,253 @@ from app.core import dates
 BASIS = "《促进和规范数据跨境流动规定》第五条、第七条、第八条"
 
 
-def _yes(v: str) -> bool | None:
-    v = (v or "").strip()
-    if not v or v.startswith("暂不确定"):
+_EXPLICIT_YES_HEAD_RE = re.compile(r"^是(?:$|[\s，,。；;：:（(])")
+_TARGET_PATTERNS = {
+    "is_cii": r"关键信息基础设施(?:运营者)?|关基",
+    "important_data": r"重要数据",
+    "sensitive_pi": r"敏感个人(?:信息|数据)",
+    "": r"重要数据|敏感个人(?:信息|数据)|关键信息基础设施(?:运营者)?|关基",
+}
+_ADVERSATIVE_SPLIT_RE = re.compile(r"[，,；;]\s*(?:但|不过|惟|然而)是?")
+_HEAD_NEG_RE = re.compile(
+    r"^(?:否|没有|无|不含|不涉及|不包含|不属于|不是|未收到|未被|未经|非)|"
+    r"^(?:不|未)(?:$|[\s，,。；;：:（(])"
+)
+_HEAD_POS_RE = re.compile(
+    r"^(?:是|有|含|包含|涉及|属于)|(?:^|今年|现|目前|已)(?:已收到.*认定|已被认定|经认定)"
+)
+_UNIT_MUL = {"亿": 1e8, "万": 1e4, "千": 1e3, "百": 1e2}
+_CAL_DATE_RE = re.compile(
+    r"(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*[日号]?)?)?|\d{1,2}\s*月\s*\d{1,2}\s*[日号]"
+)
+_NON_PERSON_UNIT_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:亿|万|千|百)?\s*(?:个)?(?:"
+    r"年|月|周|天|日|小时|分钟|秒|工作日|岁|%|％|"
+    r"辆|台|部|套|次|条|项|类|种|个字段|字段|帧|张|段|家|个国家|路|份|"
+    r"公里|千米|km\b|GB\b|TB\b|MB\b|PB\b|KB\b|字节|元|万元|亿元"
+    r")",
+    re.IGNORECASE,
+)
+_PERSON_NOUN_OPT = r"(?:个|名|位)?(?:自然人|个人|车主|用户|驾驶员|乘客|员工|客户|消费者|主体|人)?"
+_CAP_PAREN_REFINE_RE = re.compile(
+    rf"(?:(?:不满|不足|少于|低于|小于|未满|未达)\s*(\d+(?:\.\d+)?)\s*(亿|万|千|百)?\s*{_PERSON_NOUN_OPT}"
+    rf"|(\d+(?:\.\d+)?)\s*(亿|万|千|百)?\s*{_PERSON_NOUN_OPT}\s*(?:以下|以内))"
+    r"\s*[（(]([^）)]+)[）)]"
+)
+_CAP_COMMA_REFINE_RE = re.compile(
+    rf"(?:(?:不满|不足|少于|低于|小于|未满|未达)\s*(\d+(?:\.\d+)?)\s*(亿|万|千|百)?\s*{_PERSON_NOUN_OPT}"
+    rf"|(\d+(?:\.\d+)?)\s*(亿|万|千|百)?\s*{_PERSON_NOUN_OPT}\s*(?:以下|以内))"
+    r"\s*[，,]\s*(?!(?:未来|今后|三年|3\s*年|累计))(?:预计|约|大概|实际|具体|目前|其中|即)\s*(?:约\s*|为\s*)?"
+    rf"(\d+(?:\.\d+)?\s*(?:亿|万|千|百)?\s*{_PERSON_NOUN_OPT})"
+)
+_EXCEPT_POS_RE = re.compile(
+    r"除(?:了)?([^，,。；;\n]{1,80}?)(?:以?外|之外)[，,\s]*(?:其余|其他|其他数据|均|皆|都)?\s*(?:不|无|没有|未|非)"
+)
+_ONLY_HEAD_RE = re.compile(r"^(?:仅|只)(?:含|有|涉及|包含|传输|处理|提供|限于|为|属于)\s*(.+)$")
+_SENSITIVE_SUBTYPE_RE = re.compile(
+    r"敏感个人(?:信息|数据)|生物识别|人脸|面部|指纹|声纹|虹膜|步态|基因|医疗|健康|生理|心率|"
+    r"行踪|行车轨迹|精准定位|精确位置|定位轨迹|身份证|护照|驾驶证|银行卡|金融账户|征信|信贷|财产|"
+    r"宗教|特定身份|不满十四周岁|未成年人|儿童"
+)
+_IMPORTANT_SUBTYPE_RE = re.compile(
+    r"重要数据|测绘|高精度地图|地理信息|军事|国防|政务|充电网运行|车外视频|车外图像|交通流量|敏感区域"
+)
+_NON_TARGET_DISCLAIMER_RE = re.compile(
+    r"一般|普通|常规|公开|匿名|脱敏后(?:的)?一般|非敏感|非重要|基础工况|纯机械|纯工况"
+)
+_POSITIVE_PI_TOKEN_RE = re.compile(
+    r"个人(?:信息|数据)|车主|用户|驾驶员|乘客|员工|客户|自然人|手机号|电话|邮箱|姓名|账号|身份证|轨迹|车牌|VIN\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_NO_PI_RE = re.compile(
+    r"不(?:涉及|含|包含|处理|传输)(?:任何)?个人(?:数据|信息)|无个人(?:数据|信息)|没有个人(?:数据|信息)|"
+    r"^\s*(?:0|零)\s*(?:人|个|名|位)?\s*$|^\s*(?:无|不涉及)\s*$"
+)
+
+
+def _eval_non_adversative(s: str, target: str) -> bool | None:
+    s = (s or "").strip()
+    if not s or s.startswith("暂不确定"):
         return None
-    if re.match(r"^(否|不|没有|无|未|非)", v) or re.search(r"不(是|属于|含|涉及)|不包含", v[:12]):
-        return False
-    if re.match(r"^(是|有|含|涉及|属于)", v):
+    if _EXPLICIT_YES_HEAD_RE.match(s):
         return True
+    tpat = _TARGET_PATTERNS.get(target, _TARGET_PATTERNS[""])
+    m_exc = _EXCEPT_POS_RE.search(s)
+    if m_exc:
+        exc = m_exc.group(1).strip()
+        if target == "is_cii":
+            if re.search(tpat, exc) and not re.search(r"^(?:非|不)", exc):
+                return True
+        else:
+            has_subtype = (
+                bool(re.search(tpat, exc))
+                or (target in ("", "sensitive_pi") and bool(_SENSITIVE_SUBTYPE_RE.search(exc)))
+                or (target in ("", "important_data") and bool(_IMPORTANT_SUBTYPE_RE.search(exc)))
+            )
+            if has_subtype or not _NON_TARGET_DISCLAIMER_RE.search(exc):
+                return True
+    cii_neg = (
+        r"未收到[^，。；;\n]{0,14}认定|未被认定|未经认定|非关键信息基础设施|不属于关键信息基础设施|"
+        if target in ("", "is_cii")
+        else ""
+    )
+    whole_neg_re = re.compile(
+        cii_neg
+        + rf"(?:不|非|无|未|没有)(?:属于|是|含|包含|涉及|构成|存在)?\s*(?:任何|相关)?(?:{tpat})"
+        + rf"|(?:{tpat})\s*[：:，,]?\s*(?:不涉及|不含|不包含|不属于|无|没有|否)(?:$|[，,。；;\s])"
+    )
+    if whole_neg_re.search(s):
+        return False
+    clauses = [c.strip() for c in re.split(r"[，,；;]+", s) if c.strip()]
+    has_pos = False
+    has_neg = False
+    for c in clauses:
+        m_only = _ONLY_HEAD_RE.match(c)
+        if m_only:
+            body_c = m_only.group(1).strip()
+            if re.search(r"^(?:非|不)", body_c):
+                has_neg = True
+            elif re.search(tpat, body_c):
+                has_pos = True
+            elif (
+                target in ("", "sensitive_pi")
+                and _SENSITIVE_SUBTYPE_RE.search(body_c)
+                and not _NON_TARGET_DISCLAIMER_RE.search(body_c)
+            ):
+                has_pos = True
+            elif (
+                target in ("", "important_data")
+                and _IMPORTANT_SUBTYPE_RE.search(body_c)
+                and not _NON_TARGET_DISCLAIMER_RE.search(body_c)
+            ):
+                has_pos = True
+            elif _NON_TARGET_DISCLAIMER_RE.search(body_c):
+                continue
+            elif target in ("sensitive_pi", "important_data") and has_neg:
+                has_pos = True
+            continue
+        if _HEAD_NEG_RE.match(c):
+            has_neg = True
+        elif _HEAD_POS_RE.search(c):
+            has_pos = True
+    if has_pos:
+        return True
+    if has_neg:
+        return False
     return None
 
 
+def _yes(v: str, target: str = "") -> bool | None:
+    v = (v or "").strip()
+    if not v or v.startswith("暂不确定"):
+        return None
+    if _ADVERSATIVE_SPLIT_RE.search(v):
+        parts = _ADVERSATIVE_SPLIT_RE.split(v)
+        tail_res = _eval_non_adversative(parts[-1], target)
+        if tail_res is not None:
+            return tail_res
+        return _eval_non_adversative(parts[0], target)
+    return _eval_non_adversative(v, target)
+
+
+def has_no_personal_data(volume: str, sensitive_pi: str = "", data_types: str = "") -> bool:
+    """True ONLY when the enterprise explicitly states no personal data / 0 persons AND no clause
+    affirms sensitive PI, positive person counts, or personal-data subtypes."""
+    if _yes(sensitive_pi, "sensitive_pi") is True:
+        return False
+    vol = (volume or "").strip()
+    dtypes = (data_types or "").strip()
+    if not vol and not dtypes:
+        return False
+    if vol:
+        n = persons(vol)
+        if n is not None and n > 0:
+            return False
+        if _ADVERSATIVE_SPLIT_RE.search(vol):
+            tail = _ADVERSATIVE_SPLIT_RE.split(vol)[-1].strip()
+            if _POSITIVE_PI_TOKEN_RE.search(tail) and not _EXPLICIT_NO_PI_RE.search(tail):
+                return False
+    if dtypes:
+        for seg in re.split(r"[；;\n]+", dtypes):
+            seg_clean = re.sub(r"[（(][^）)]*(?:不含|不涉及|无)个人(?:信息|数据)[^）)]*[）)]", "", seg).strip()
+            if not seg_clean or _EXPLICIT_NO_PI_RE.search(seg_clean):
+                continue
+            if _ADVERSATIVE_SPLIT_RE.search(seg_clean):
+                seg_clean = _ADVERSATIVE_SPLIT_RE.split(seg_clean)[-1].strip()
+            if _POSITIVE_PI_TOKEN_RE.search(seg_clean) and not _HEAD_NEG_RE.match(seg_clean):
+                return False
+    if vol:
+        return bool(_EXPLICIT_NO_PI_RE.search(vol))
+    return bool(_EXPLICIT_NO_PI_RE.search(dtypes))
+
+
+def _scan_person_numbers(s: str) -> list[int]:
+    vals: list[int] = []
+    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(亿|万|千|百)?", s):
+        n = int(float(m[1]) * _UNIT_MUL.get(m[2] or "", 1))
+        before = s[max(0, m.start() - 10) : m.start()]
+        after = s[m.end() : m.end() + 16]
+        is_strict_cap = bool(
+            re.search(r"(?:不满|不足|少于|低于|小于|未满|未达)\s*$", before)
+            or re.match(rf"^\s*{_PERSON_NOUN_OPT}\s*(?:以下|以内)(?!\s*以上)", after)
+        )
+        vals.append(max(0, n - 1) if is_strict_cap else n)
+    return vals
+
+
 def persons(v: str) -> int | None:
-    """The number of people a free-text answer gives (“已传 2 万人；三年内约 10 万人” → the larger)."""
-    v = (v or "").replace(",", "").replace("，", " ")
-    if re.search(r"(?:^|[\s：:，,（(=])-\s*\d", v):
+    """The number of people a free-text answer gives (“已传 2 万人；三年内约 10 万人” → the larger).
+    Upper-bound disclaimers like “不满 100 万人” / “不足 1 万人” are treated as strictly below the cap,
+    while parenthetical or comma-appositive estimates refining a cap (“不满 100 万人（预计约 15 万人）”,
+    “当年累计不满 100 万人，预计约 5 万人”) use that estimate."""
+    raw = str(v or "")
+    if re.search(r"(?:^|[\s：:，,（(=])-\s*\d", raw):
         return None
-    nums = []
-    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(亿|万|千|百)?", v):
-        n = float(m[1]) * {"亿": 1e8, "万": 1e4, "千": 1e3, "百": 1e2}.get(m[2] or "", 1)
-        nums.append(int(n))
-    if not nums:
-        if re.search(r"不足\s*10\s*万|少于\s*10\s*万|10\s*万以下", v):
-            return 50_000
-        return None
-    return max(nums)
+    cleaned = _NON_PERSON_UNIT_RE.sub(" ", _CAL_DATE_RE.sub(" ", raw.replace(",", "")))
+
+    def _refine_cap(m: re.Match) -> str:
+        num_s = m.group(1) or m.group(3)
+        unit_s = m.group(2) or m.group(4) or ""
+        cap_val = max(0, int(float(num_s) * _UNIT_MUL.get(unit_s, 1)) - 1)
+        inner = m.group(5)
+        if not re.search(r"不满|不足|少于|低于|小于|未满|未达|以下|以内", inner):
+            inner_vals = _scan_person_numbers(inner.replace("，", " "))
+            if inner_vals and max(inner_vals) <= cap_val:
+                return f" {max(inner_vals)}人 "
+        return m.group(0)
+
+    cleaned = _CAP_PAREN_REFINE_RE.sub(_refine_cap, cleaned)
+    cleaned = _CAP_COMMA_REFINE_RE.sub(_refine_cap, cleaned).replace("，", " ")
+    nums = _scan_person_numbers(cleaned)
+    if nums:
+        return max(nums)
+    if re.search(r"(?:不满|不足|少于)\s*百\s*万|百\s*万以下", cleaned):
+        return 999_999
+    if re.search(r"(?:不满|不足|少于)\s*十\s*万|十\s*万以下", cleaned):
+        return 50_000
+    if re.search(r"(?:不满|不足|少于)\s*一\s*万|一\s*万以下", cleaned):
+        return 5_000
+    raw_s = raw.strip()
+    if raw_s and _EXPLICIT_NO_PI_RE.search(raw_s):
+        if _ADVERSATIVE_SPLIT_RE.search(raw_s):
+            tail = _ADVERSATIVE_SPLIT_RE.split(raw_s)[-1].strip()
+            if _POSITIVE_PI_TOKEN_RE.search(tail) and not _EXPLICIT_NO_PI_RE.search(tail):
+                return None
+        return 0
+    return None
 
 
 def judge(values: dict[str, str]) -> dict:
-    cii = _yes(values.get("is_cii", ""))
-    important = _yes(values.get("important_data", ""))
+    cii = _yes(values.get("is_cii", ""), "is_cii")
+    important = _yes(values.get("important_data", ""), "important_data")
     sensitive_text = values.get("sensitive_pi", "")
-    sensitive = _yes(sensitive_text)
+    sensitive = _yes(sensitive_text, "sensitive_pi")
     n = persons(values.get("data_volume", ""))  # 出境涉及的人数（不是企业处理的总规模）
+    no_pi_explicit = has_no_personal_data(
+        values.get("data_volume", ""), sensitive_text, values.get("data_types", "")
+    )
+    if n is None and no_pi_explicit:
+        n = 0
     n_sensitive = persons(sensitive_text) if sensitive else 0
     if sensitive and not n_sensitive and n is not None and n < 10_000:
         n_sensitive = n  # 出境总人数不足 1 万，敏感个人信息涉及的人数必然也不足 1 万：不再追问
@@ -90,6 +304,24 @@ def judge(values: dict[str, str]) -> dict:
         if sensitive:
             why.append("含敏感个人信息（不足 1 万人）")
         return _out("standard_contract", "订立标准合同并备案（或通过个人信息保护认证）", why + ["非关键信息基础设施运营者、不含重要数据"], [])
+    if (n == 0 or no_pi_explicit) and not sensitive:
+        out = _out(
+            "exempt",
+            "免于申报安全评估、订立标准合同和认证",
+            ["不向境外提供个人信息（涉及自然人 0 人）", "不含敏感个人信息、重要数据"],
+            [],
+        )
+        out["docs"]["risk_report"] = {
+            "applies": False,
+            "why": "按规定免于申报安全评估，且不向境外提供个人信息，风险自评估报告与个人信息保护影响评估报告均不用准备",
+            "basis": _CP + "第五条、第七条",
+        }
+        out["docs"]["dpia"] = {
+            "applies": False,
+            "why": "不向境外提供个人信息，不用进行个人信息保护影响评估",
+            "basis": _CP + "第十条",
+        }
+        return out
     return _out("exempt", "免于申报安全评估、订立标准合同和认证", [f"涉及约 {n:,} 人（不足 10 万人）", "不含敏感个人信息、重要数据"], [])
 
 

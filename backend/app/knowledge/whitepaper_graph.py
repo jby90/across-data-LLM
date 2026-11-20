@@ -26,7 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.analysis.document_basis import NAMES as _ALL_COUNTRY_NAMES
 from app.analysis.workflow_engine import COUNTRY_NAMES_ZH, EIGHT_DIMENSIONS_SPEC, country_name_zh
 from app.ingestion.display_text import for_reading
+from app.ingestion.layout_safety import clause_layout_available
 from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
+from app.ingestion.safety import document_available
 from app.knowledge import business_topic as bt
 from app.knowledge import claim_tags as ct
 from app.knowledge import data_classes as dc
@@ -124,6 +126,7 @@ class Item:
     ref: int | None = None
     sub: str = ""  # 第二行：原名、类型等
     doc_id: str = ""  # 法规本身（D1）：可在法规浏览中打开
+    node_id: str = ""  # 对应的知识图谱节点 ID（供合规主题卡片直接对齐）
 
     def row(self, refs: _Refs) -> list[str]:
         """The three columns of the exported table."""
@@ -233,19 +236,30 @@ class _Refs:
                 select(Clause.id, Clause.version_id, DocumentVersion, Document)
                 .join(DocumentVersion, Clause.version_id == DocumentVersion.id)
                 .join(Document, Document.id == DocumentVersion.document_id)
-                .where(Clause.id.in_(wanted))
+                .where(
+                    Clause.id.in_(wanted),
+                    document_available(),
+                    clause_layout_available(),
+                )
             )
         ).all()
+        seen_cids = set()
         new_ver_ids = set()
         for cid, vid, ver, doc in rows:
+            seen_cids.add(cid)
+            if (
+                ver.legal_status in NOT_CITABLE_STATUSES
+                or ver.review_status == "rejected"
+                or getattr(doc, "relevance", "") in ("irrelevant", "out_of_scope")
+            ):
+                self.by_clause[cid] = None
+                continue
             self._ver_doc[cid] = (ver, doc)
             self._clause_ver[cid] = vid
-            if (
-                vid not in self.units
-                and ver.legal_status not in NOT_CITABLE_STATUSES
-                and getattr(doc, "relevance", "") not in ("irrelevant", "out_of_scope")
-            ):
+            if vid not in self.units:
                 new_ver_ids.add(vid)
+        for missing_cid in wanted - seen_cids:
+            self.by_clause[missing_cid] = None
         if new_ver_ids:
             all_clauses = (
                 await self.session.scalars(select(Clause).where(Clause.version_id.in_(new_ver_ids)))
@@ -290,12 +304,17 @@ class _Refs:
                     select(DocumentVersion, Document)
                     .join(Clause, Clause.version_id == DocumentVersion.id)
                     .join(Document, Document.id == DocumentVersion.document_id)
-                    .where(Clause.id == clause_id)
+                    .where(
+                        Clause.id == clause_id,
+                        document_available(),
+                        clause_layout_available(),
+                    )
                 )
             ).first()
         if (
             row is None
             or row[0].legal_status in NOT_CITABLE_STATUSES
+            or row[0].review_status == "rejected"
             or getattr(row[1], "relevance", "") in ("irrelevant", "out_of_scope")
         ):
             self.by_clause[clause_id] = None
@@ -356,6 +375,7 @@ async def _live_claims(session: AsyncSession, cc: str, skip: set[str]) -> list[K
                 KgNode.country_code == cc,
                 KgNode.node_type.in_(("OBLIGATION", "PENALTY")),
                 KgNode.review_status.notin_(DEAD),
+                func.coalesce(KgNode.verify_state, "") != "retired",
                 (KgNode.verify_state == "auto") | (KgNode.review_status == "approved"),
             )
         )
@@ -478,7 +498,10 @@ async def _claim_items(refs: _Refs, nodes: list[KgNode], *, penalty: bool = Fals
         ):
             core = re.sub(r"(?:的)?(?:合规)?(?:义务|要求)$", "", title).strip() or title
             title = f"违反“{core}”的法律责任"
-        items.append(Item(title, facts, await refs.number(n.evidence_clause_id)))
+        ref_no = await refs.number(n.evidence_clause_id)
+        if n.evidence_clause_id is not None and ref_no is None:
+            continue
+        items.append(Item(title, facts, ref_no, node_id=str(n.id)))
     return items
 
 
@@ -605,10 +628,46 @@ async def _regulators(session: AsyncSession, cc: str) -> list[KgNode]:
             )
         )
     ).all()
+    from sqlalchemy import or_ as sa_or
+
+    all_candidate_cids: set[uuid.UUID] = set()
+    for r in rows:
+        for raw_cid in (r.attributes or {}).get("evidence_clause_ids") or []:
+            try:
+                all_candidate_cids.add(uuid.UUID(str(raw_cid)))
+            except (ValueError, TypeError):
+                continue
+    disallowed_reg_cids = (
+        {
+            str(cid)
+            for cid in (
+                await session.scalars(
+                    select(Clause.id)
+                    .join(DocumentVersion, Clause.version_id == DocumentVersion.id)
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .where(
+                        Clause.id.in_(all_candidate_cids),
+                        sa_or(
+                            ~document_available(),
+                            ~clause_layout_available(),
+                            Document.relevance.in_(("irrelevant", "out_of_scope")),
+                            DocumentVersion.legal_status.in_(NOT_CITABLE_STATUSES),
+                            DocumentVersion.review_status == "rejected",
+                        ),
+                    )
+                )
+            ).all()
+        }
+        if all_candidate_cids
+        else set()
+    )
+    valid_by_node: dict[uuid.UUID, list[str]] = {}
     nodes = []
     for r in rows:
-        if not (r.attributes or {}).get("evidence_clause_ids") or (r.attributes or {}).get("merged_into"):
-            continue  # 没有条文依据的、在图谱里已并入别的节点的不列
+        raw_ev_cids = (r.attributes or {}).get("evidence_clause_ids") or []
+        usable_cids = [str(c) for c in raw_ev_cids if c and str(c) not in disallowed_reg_cids]
+        if not usable_cids or (r.attributes or {}).get("merged_into"):
+            continue  # 没有可用条文依据的、在图谱里已并入别的节点的不列
         if (r.attributes or {}).get("is_role"):
             continue  # 按条文原句判断只是泛指一种角色（主管机关、执法机构），不是具体机构
         name = (r.name_zh or "").strip()
@@ -616,6 +675,7 @@ async def _regulators(session: AsyncSession, cc: str) -> list[KgNode]:
             continue
         if any(w in name for w in LEGISLATURE):  # 制定法律的机关、刊登法规的网站不是监管机构
             continue
+        valid_by_node[r.id] = usable_cids
         nodes.append(r)
     # 同一机构的不同叫法归为一组（并查集：中文名归一、缩写、原名任一相同即同组）
     parent = list(range(len(nodes)))
@@ -653,7 +713,13 @@ async def _regulators(session: AsyncSession, cc: str) -> list[KgNode]:
             )
         )
         out.append(named[0])
-        _CLAUSES[named[0].id] = {str(c) for m in members for c in (m.attributes or {}).get("evidence_clause_ids") or []}
+        merged_cids: list[str] = []
+        for m in (named[0], *[x for x in members if x.id != named[0].id]):
+            for c in valid_by_node.get(m.id, []):
+                if c not in merged_cids:
+                    merged_cids.append(c)
+        _CLAUSES[named[0].id] = set(merged_cids)
+        _PRIMARY_CLAUSE[named[0].id] = merged_cids[0] if merged_cids else ""
         for m in members:
             for k in node_keys[nodes.index(m)]:
                 _KEYS.setdefault(cc, {})[k] = named[0].name_zh
@@ -664,6 +730,7 @@ async def _regulators(session: AsyncSession, cc: str) -> list[KgNode]:
 # 每个监管机构（合并各种叫法后）被多少条条文提到：排序用，提到得多的是主要监管机构
 _MENTIONS: dict[uuid.UUID, int] = {}
 _CLAUSES: dict[uuid.UUID, set[str]] = {}  # 每个监管机构（合并后）被提到的条文
+_PRIMARY_CLAUSE: dict[uuid.UUID, str] = {}  # 每个监管机构用于展示的首选可用依据条文
 _KEYS: dict[str, dict[str, str]] = {}  # 国家 → 机构的各种叫法 → 正式名称
 
 
@@ -738,16 +805,18 @@ async def _data_classes(session: AsyncSession, refs: _Refs, cc: str) -> tuple[in
             if k not in seen:
                 seen.add(k)
                 names.append(_plain(node.name_zh))
+        ref = None
+        for _, _, clause_id in members:  # 第一条依据不可引用（已废止版本等）时取下一条
+            if clause_id and (ref := await refs.number(uuid.UUID(clause_id))):
+                break
+        if ref is None:
+            continue
         total += len(names)
         requirements = sum(cnt for _, cnt, _ in members)
         facts = [
             ("包括", "、".join(names[:8]) + (f" 等 {len(names)} 类" if len(names) > 8 else "")),
             ("相关要求", f"{requirements} 项"),
         ]
-        ref = None
-        for _, _, clause_id in members:  # 第一条依据不可引用（已废止版本等）时取下一条
-            if clause_id and (ref := await refs.number(uuid.UUID(clause_id))):
-                break
         items.append(Item(dc.LABEL[code], facts, ref))
     return total, items
 
@@ -800,14 +869,26 @@ async def requirement_pools(
     ids = {n.evidence_clause_id for n in claims if n.evidence_clause_id}
     citable = {
         cid
-        for cid, status in (
+        for cid, status, rev_status, rel in (
             await session.execute(
-                select(Clause.id, DocumentVersion.legal_status)
+                select(
+                    Clause.id,
+                    DocumentVersion.legal_status,
+                    DocumentVersion.review_status,
+                    Document.relevance,
+                )
                 .join(DocumentVersion, Clause.version_id == DocumentVersion.id)
-                .where(Clause.id.in_(ids))
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(
+                    Clause.id.in_(ids),
+                    document_available(),
+                    clause_layout_available(),
+                )
             )
         ).all()
         if status not in NOT_CITABLE_STATUSES
+        and rev_status != "rejected"
+        and (rel or "") not in ("irrelevant", "out_of_scope")
     } if ids else set()
     claims = [n for n in claims if n.evidence_clause_id in citable]
     obligations = [n for n in claims if n.node_type == "OBLIGATION"]
@@ -851,7 +932,7 @@ async def build(session: AsyncSession, country_code: str) -> tuple[list[dict], d
     name = country_name_zh(cc)
     refs = _Refs(session)
     pools, docs, obligations = await requirement_pools(session, cc)
-    entries = await library(session, cc)
+    entries = await library(session, cc, in_force_only=True)
     docs_total, clauses_total = len(entries), sum(e.articles for e in entries)
     counts: dict[str, int] = {}
     sections: dict[str, tuple[str, list[Item]]] = {}
@@ -878,9 +959,9 @@ async def build(session: AsyncSession, country_code: str) -> tuple[list[dict], d
     )
     regulators = await _regulators(session, cc)
     first_clause = {
-        r.id: uuid.UUID(str(((r.attributes or {}).get("evidence_clause_ids") or [None])[0]))
+        r.id: uuid.UUID(_PRIMARY_CLAUSE[r.id])
         for r in regulators
-        if ((r.attributes or {}).get("evidence_clause_ids") or [None])[0]
+        if _PRIMARY_CLAUSE.get(r.id)
     }
     await _add_clauses(session, docs, set(first_clause.values()))
     # 专门个人数据保护主管机关优先排第一，网络安全/电信/车辆准入机构其次，综合统计/民航等非汽车专项机构排后
@@ -935,19 +1016,16 @@ async def build(session: AsyncSession, country_code: str) -> tuple[list[dict], d
                 doc_id=str(e.document.id),
             )
         )
-    reg_clause_ids = [
-        ((r.attributes or {}).get("evidence_clause_ids") or [None])[0]
-        for r in regulators
-    ]
+    reg_clause_ids = [first_clause.get(r.id) for r in regulators]
     await refs.preload([cid for cid in reg_clause_ids if cid])
     reg_items: list[Item] = []
     for r in regulators:
-        ids = (r.attributes or {}).get("evidence_clause_ids") or []
+        primary_cid = first_clause.get(r.id)
         reg_items.append(
             Item(
                 _display_regulator_name(r.name_zh),
                 [("职能说明", _clip(r.summary or f"{name}法定监管与主管机构", 160))],
-                await refs.number(ids[0]) if ids else None,
+                await refs.number(primary_cid) if primary_cid else None,
                 sub="监管与主管机构",
             )
         )
@@ -972,17 +1050,19 @@ async def build(session: AsyncSession, country_code: str) -> tuple[list[dict], d
         pool = pools[ASPECT_OF[code]]
         if code == "D5":  # 这一方面讲“存储、留存、销毁时效”：保存期限、销毁、存储地点的要求排在一般安全措施前面
             pool = sorted(pool, key=lambda n: 0 if _attr(n, "retention_period") or _matches(n, STORAGE_WORDS) else 1)
-        counts[code] = len(pool)
+        claim_list = await _claim_items(refs, pool)
+        counts[code] = len(claim_list)
         sections[code] = (
-            INTRO[code].format(name=name, n_total=len(pool), shown=len(pool)),
-            await _claim_items(refs, pool),
+            INTRO[code].format(name=name, n_total=len(claim_list), shown=len(claim_list)),
+            claim_list,
         )
 
     # D6 处罚（全量展示，处罚节点本身排在前面，带罚则的义务其次）
-    counts["D6"] = len(pools["penalty"])
+    pen_list = await _claim_items(refs, pools["penalty"], penalty=True)
+    counts["D6"] = len(pen_list)
     sections["D6"] = (
         INTRO["D6"].format(name=name, n_total=counts["D6"], shown=counts["D6"]),
-        await _claim_items(refs, pools["penalty"], penalty=True),
+        pen_list,
     )
 
     # D7 准入事项（与“海外属地准入”模块严格同一口径）

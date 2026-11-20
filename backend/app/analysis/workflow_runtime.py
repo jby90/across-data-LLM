@@ -102,10 +102,16 @@ def execution_settings(node: dict) -> dict:
         ):
             raise ValueError("分析节点的模型和实际提示词不能为空")
         params.update(model=node["model_name"], system_prompt=node["system_prompt"])
-    return NodeExecutionSettings.model_validate(params).model_dump(include=set(params))
+    from pydantic import ValidationError as PydanticValidationError
+
+    try:
+        return NodeExecutionSettings.model_validate(params).model_dump(include=set(params))
+    except PydanticValidationError as exc:
+        raise ValueError("工作流节点运行参数取值或模型名称格式不符合规范") from exc
 
 
 def validate_graph(nodes, edges) -> list[dict]:
+    from app.analysis.router import _humanize_node_for_ui
     from app.analysis.workflow_engine import DEFAULT_WORKFLOW_EDGES
 
     canonical = {n["node_id"]: n for n in baseline_nodes()}
@@ -129,21 +135,35 @@ def validate_graph(nodes, edges) -> list[dict]:
             raise ValueError("重复工作流节点")
         seen.add(nid)
         base = canonical[nid]
+        humanized_base = _humanize_node_for_ui(base)
         if node.keys() != base.keys():
-            raise ValueError(f"{nid}: 不允许增加或删除节点字段")
+            raise ValueError("不允许增加或删除工作流节点字段")
         mutable = {"parameters", "readonly_locked"}
         if nid in ("node_dimension_analyst", "node_mcp_retriever"):
             mutable |= {"model_name", "system_prompt"}
         for key in base.keys() - mutable:
-            if node[key] != base[key]:
-                raise ValueError(f"{nid}.{key}: 代码入口、工具、拓扑及固定参数不可修改")
+            if key in ("node_id", "node_type", "code_entrypoint"):
+                if node[key] != base[key]:
+                    raise ValueError("工作流节点代码入口、工具、拓扑及固定参数不可修改")
+            elif key == "mcp_tools":
+                if (
+                    not isinstance(node[key], list)
+                    or [t.get("tool_name") for t in node[key] if isinstance(t, dict)]
+                    != [t.get("tool_name") for t in base[key]]
+                    or node[key] not in (base[key], humanized_base[key])
+                ):
+                    raise ValueError("工作流节点代码入口、工具、拓扑及固定参数不可修改")
+            elif node[key] not in (base[key], humanized_base[key]):
+                raise ValueError("工作流节点代码入口、工具、拓扑及固定参数不可修改")
         params = node["parameters"]
         if not isinstance(params, dict) or params.keys() != base["parameters"].keys():
-            raise ValueError(f"{nid}: 参数只能使用当前节点白名单")
+            raise ValueError("工作流节点参数只能使用当前白名单配置项")
         for key in params.keys() - PARAMETERS[nid]:
             if params[key] != base["parameters"][key]:
-                raise ValueError(f"{nid}.{key}: 证据闸门及固定参数不可修改")
+                raise ValueError("工作流证据闸门及固定参数不可修改")
         clean = copy.deepcopy(node)
+        for key in base.keys() - mutable:
+            clean[key] = copy.deepcopy(base[key])
         clean["readonly_locked"] = True
         execution_settings(clean)  # Strict types/ranges; no silently ignored parameters.
         normalized.append(clean)
@@ -221,7 +241,7 @@ async def import_version(session, payload, change_note, user_id):
 
     workflow = payload.get("workflow")
     if not isinstance(workflow, dict):
-        raise ValueError("缺少 workflow 配置对象")
+        raise ValueError("缺少工作流核心配置对象")
     if workflow.keys() - {"graph", "report_dimensions", "required_facts_schema"}:
         raise ValueError("工作流只允许导入现有图与参数")
     dimensions = [{"code": code, "title": title} for code, title in EIGHT_DIMENSIONS_SPEC]
@@ -231,9 +251,9 @@ async def import_version(session, payload, change_note, user_id):
         raise ValueError("必填事实契约不可修改")
     graph = workflow.get("graph")
     if not isinstance(graph, dict):
-        raise ValueError("缺少 workflow.graph 配置")
+        raise ValueError("缺少工作流拓扑结构配置")
     if graph.keys() != {"nodes", "edges"}:
-        raise ValueError("graph 只能包含固定 nodes 与 edges")
+        raise ValueError("工作流拓扑结构只能包含标准流程节点与连线")
     nodes = validate_graph(graph.get("nodes"), graph.get("edges"))
     await workflow_lock(session)
     latest = await session.scalar(
@@ -246,9 +266,9 @@ async def import_version(session, payload, change_note, user_id):
     )
     meta = payload.get("app") or {}
     if not isinstance(meta, dict):
-        raise ValueError("app 元数据必须为对象")
+        raise ValueError("应用元数据必须为结构化对象")
     if meta.keys() - {"workflow_key", "name", "description", "version_no", "change_note"}:
-        raise ValueError("app 元数据包含非白名单字段")
+        raise ValueError("应用元数据包含未授权字段")
     cfg = AgentWorkflowConfig(
         workflow_key=WORKFLOW_KEY,
         version_no=(latest or 0) + 1,

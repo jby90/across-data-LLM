@@ -120,7 +120,7 @@ async def translate_prepared(prepared, effective_terms):
         whole_clause_translation_passed=False,
         standalone_translation=False,
         review_status="pending_review"
-        if all(r["quality_check_passed"] for r in results)
+        if bool(results) and all(r["quality_check_passed"] for r in results)
         else "translation_failed",
         active=False,
         usable_as_legal_basis=False,

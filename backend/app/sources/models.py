@@ -88,7 +88,7 @@ class SourceSite(Base):
         String(16), default="legacy", server_default="legacy"
     )
     terms_decided_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     terms_decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

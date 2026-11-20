@@ -80,32 +80,65 @@ class Rendered:
 
 def validate_definition(definition: dict) -> None:
     """Reject a template that refers to facts it does not declare, so mistakes surface on save."""
-    facts = {f["key"] for f in definition.get("facts", [])}
-    if len(facts) != len(definition.get("facts", [])):
+    if not isinstance(definition, dict):
+        raise TemplateError("模板定义格式不正确")
+    raw_facts = definition.get("facts", [])
+    if not isinstance(raw_facts, list):
+        raise TemplateError("事实项列表格式不正确")
+    fact_keys: list[str] = []
+    for f in raw_facts:
+        if not isinstance(f, dict) or not isinstance(f.get("key"), str) or not f["key"].strip():
+            raise TemplateError("事实项定义缺少有效的键名")
+        fact_keys.append(f["key"])
+    facts = set(fact_keys)
+    if len(facts) != len(fact_keys):
         raise TemplateError("事实项的键重复")
-    if not definition.get("sections"):
+    raw_sections = definition.get("sections")
+    if not isinstance(raw_sections, list) or not raw_sections:
         raise TemplateError("模板没有章节")
-    for section in definition["sections"]:
+    for section in raw_sections:
+        if not isinstance(section, dict):
+            raise TemplateError("模板章节结构格式不正确")
         for cond in ("when", "unless"):
-            unknown_keys = set(section.get(cond, {})) - facts
+            cond_val = section.get(cond, {})
+            if cond_val is None:
+                cond_val = {}
+            if not isinstance(cond_val, dict):
+                raise TemplateError("章节生效条件格式不正确")
+            unknown_keys = set(cond_val) - facts
             if unknown_keys:
-                raise TemplateError(f"章节条件引用了未声明的事实：{sorted(unknown_keys)}")
+                raise TemplateError("章节条件引用了未声明的事实项")
         if section.get("narrative"):
             if not definition.get("narrative"):
                 raise TemplateError("论述位置没有对应的论述部分定义")
             continue
-        if not section.get("heading"):
+        if not isinstance(section.get("heading"), str) or not section.get("heading", "").strip():
             raise TemplateError("章节缺标题")
-        for block in section.get("blocks", []):
+        raw_blocks = section.get("blocks", [])
+        if not isinstance(raw_blocks, list):
+            raise TemplateError("章节内容块列表格式不正确")
+        for block in raw_blocks:
+            if not isinstance(block, dict):
+                raise TemplateError("内容块结构格式不正确")
             kind = block.get("type")
             if kind not in ("text", "facts_table", "citations", "checklist", "static_table", "risk_matrix", "slot"):
-                raise TemplateError(f"未知内容块类型：{kind}")
-            refs: set[str] = set(block.get("keys", [])) | ({block["key"]} if block.get("key") else set())
-            for piece in [block.get("text", ""), *block.get("items", [])]:
+                raise TemplateError("未知内容块类型")
+            b_keys = block.get("keys", [])
+            if b_keys is not None and (not isinstance(b_keys, list) or any(not isinstance(x, str) for x in b_keys)):
+                raise TemplateError("内容块字段引用列表格式不正确")
+            b_key = block.get("key")
+            if b_key is not None and not isinstance(b_key, str):
+                raise TemplateError("内容块字段键名格式不正确")
+            refs: set[str] = set(b_keys or []) | ({b_key} if b_key else set())
+            b_text = block.get("text", "")
+            b_items = block.get("items", [])
+            if not isinstance(b_text, str) or not isinstance(b_items, list) or any(not isinstance(x, str) for x in b_items):
+                raise TemplateError("内容块文本或条目格式不正确")
+            for piece in [b_text, *b_items]:
                 refs |= set(PLACEHOLDER.findall(piece))
             unknown = refs - facts
             if unknown:
-                raise TemplateError(f"引用了未声明的事实：{sorted(unknown)}")
+                raise TemplateError("内容块引用了未声明的事实项")
 
 
 def resolve_facts(definition: dict, task_values: dict[str, str], answers: dict[str, str]) -> dict:
@@ -168,10 +201,51 @@ def render(
             return BLANK_FOR_COMPANY
         return DRAFT_BLANK if draft else ""
 
+    def _split_retention_and_location(raw: str) -> tuple[str, str]:
+        """Split a combined retention_and_blackbox sentence into (retention_period_part, storage_location_part)
+        for Standard Contract Appendix I (八) vs (九) when both are present; otherwise return (raw, raw)."""
+        txt = (raw or "").strip()
+        if not txt or "；" not in txt and "，" not in txt:
+            return txt, txt
+        clauses = [c.strip() for c in re.split(r"[；;]", txt) if c.strip()]
+        loc_parts: list[str] = []
+        dur_parts: list[str] = []
+        for cl in clauses:
+            sub_clauses = [sc.strip() for sc in cl.split("，") if sc.strip()]
+            has_loc = any(k in cl for k in ("存储于", "存放于", "保存在", "集群", "服务器", "数据中心", "专区", "云系统", "阵列"))
+            has_dur = any(k in cl for k in ("期限", "天", "日", "个月", "年", "期满", "删除", "销毁", "擦除", "清除"))
+            if has_loc and has_dur and len(sub_clauses) >= 2:
+                for sc in sub_clauses:
+                    if any(k in sc for k in ("期限", "天", "日", "个月", "年", "期满", "删除", "销毁", "擦除", "清除")):
+                        dur_parts.append(sc)
+                    else:
+                        loc_parts.append(sc)
+            elif has_dur and not has_loc:
+                dur_parts.append(cl)
+            elif has_loc and not has_dur:
+                loc_parts.append(cl)
+            else:
+                dur_parts.append(cl)
+                loc_parts.append(cl)
+        dur_str = "；".join(dur_parts).strip() if dur_parts else txt
+        loc_str = "；".join(loc_parts).strip() if loc_parts else txt
+        return dur_str, loc_str
+
     def fill(text: str) -> str:
         def one(match: re.Match) -> str:
-            needed.add(match.group(1))
-            return shown(match.group(1))
+            key = match.group(1)
+            needed.add(key)
+            val = shown(key)
+            if key == "recipient" and ("境外接收方" in text or "境外数据接收方" in text) and val:
+                from app.analysis.official_docx import _clean_recipient_entity_name
+
+                return _clean_recipient_entity_name(val)
+            if key == "retention_and_blackbox" and val:
+                if text.startswith("（八）出境后保存期限："):
+                    return _split_retention_and_location(val)[0]
+                if text.startswith("（九）出境后保存地点："):
+                    return _split_retention_and_location(val)[1]
+            return val
 
         # 回答自带句号或分号时，模板里的标点不再重复碰撞
         merged = PLACEHOLDER.sub(one, text)
@@ -237,7 +311,20 @@ def render(
             elif kind == "slot":
                 out.blocks.extend(copy.deepcopy((slots or {}).get(block["name"], [])))
             elif kind == "citations":
-                picked = [c for c in _pick([c for c in citations if _clause_key(c) not in shown_clauses], block)]
+                _cite_heads = (
+                    ["编号", "法规与条款", "条文摘录"],
+                    ["法规与条款", "条文摘录"],
+                    ["编号", "依据", "条款", "条文内容"],
+                    ["依据", "条款", "条文内容"],
+                )
+                has_paper_refs = bool(
+                    paper
+                    and any(
+                        b.get("type") == "table" and b.get("head") in _cite_heads
+                        for b in paper
+                    )
+                )
+                picked = [] if has_paper_refs else [c for c in _pick([c for c in citations if _clause_key(c) not in shown_clauses], block)]
                 shown_clauses.update(_clause_key(c) for c in picked)
                 cite_rows: list[list[str]] = []
                 for c in picked:
@@ -253,7 +340,7 @@ def render(
                             seen_laws.add(zh)
                         law_cell = f"《{zh}》"
                     cite_rows.append([law_cell, str(c.get("clause_number", "")), _quote(c)])
-                if cite_rows:
+                if cite_rows and not has_paper_refs:
                     out.blocks.append(
                         {
                             "type": "table",
@@ -289,8 +376,14 @@ def render(
             ]
         if (
             blk.get("type") == "table"
-            and isinstance(blk.get("rows"), list)
-            and blk.get("head") not in (["依据", "条款", "条文内容"], ["编号", "依据", "条款", "条文内容"])
+            and isinstance(blk["rows"], list)
+            and blk.get("head")
+            not in (
+                ["编号", "法规与条款", "条文摘录"],
+                ["法规与条款", "条文摘录"],
+                ["依据", "条款", "条文内容"],
+                ["编号", "依据", "条款", "条文内容"],
+            )
         ):
             blk["rows"] = [
                 [polish_legal_prose(cell) if isinstance(cell, str) else cell for cell in row]
@@ -374,16 +467,47 @@ def task_values(task: Any) -> dict[str, str]:
 
 
 def sensitive_kinds(answer: str) -> str:
-    """What the contract's “敏感个人信息种类” line says: the kinds the enterprise wrote after “是”,
-    “不涉及” for “否”, otherwise left to fill."""
+    """What the contract's “敏感个人信息种类” line says: the kinds the enterprise wrote when
+    sensitive PI is involved, “不涉及” when negated, otherwise left to fill."""
+    from app.analysis import cn_route
+
     a = (answer or "").strip()
-    if re.match(r"^(否|不|无|没有)", a):
+    if not a or a.startswith("暂不确定"):
+        return ""
+    ans = cn_route._yes(a, "sensitive_pi")
+    if ans is False:
         return "不涉及"
-    rest = re.sub(r"^是[，,。:：；;\s]*", "", a)
-    rest = re.sub(r"[，,；;]?\s*(约|共|涉及)?\s*[\d,.]+\s*(万|千)?\s*人.*$", "", rest).strip()
+    if ans is not True:
+        return ""
+    if cn_route._ADVERSATIVE_SPLIT_RE.search(a):
+        parts = cn_route._ADVERSATIVE_SPLIT_RE.split(a)
+        rest = parts[-1].strip() if cn_route._eval_non_adversative(parts[-1], "sensitive_pi") is True else a
+    elif m_exc := cn_route._EXCEPT_POS_RE.search(a):
+        rest = m_exc.group(1).strip()
+    else:
+        pos_clauses = [
+            c.strip()
+            for c in re.split(r"[，,；;]+", a)
+            if c.strip() and not cn_route._HEAD_NEG_RE.match(c.strip())
+        ]
+        rest = "、".join(pos_clauses) if pos_clauses else a
+    rest = re.sub(r"^是[，,。:：；;、\s]*", "", rest)
+    rest = re.sub(r"^(?:仅|只)?(?:涉及|包含|含|有|限于|为|属于)[：:\s]*", "", rest)
+    rest = re.sub(
+        r"[，,；;、（(]?\s*(?:预计|约|共|累计|涉及)?\s*(?:不满|不足|少于|低于)?\s*[\d,.]+\s*(?:亿|万|千|百)?\s*"
+        r"(?:名|位|个)?(?:自然人|车主|用户|驾驶员|乘客|员工|客户|人).*$",
+        "",
+        rest,
+    ).strip()
     rest = re.sub(r"^[（(]\s*(?:涉及)?", "", rest).strip()
-    rest = re.sub(r"\s*[）)]$", "", rest).strip()
-    return rest if a.startswith("是") and rest else ""
+    if "(" not in rest and "（" not in rest:
+        rest = re.sub(r"\s*[）)]$", "", rest).strip()
+    elif (rest.startswith("（") and rest.endswith("）")) or (rest.startswith("(") and rest.endswith(")")):
+        rest = rest[1:-1].strip()
+    rest = rest.strip("，,。；;、 ")
+    if rest in ("", "是", "有", "涉及", "含", "包含", "敏感个人信息", "敏感个人数据"):
+        return ""
+    return rest
 
 
 _DEFAULT_TEMPLATES_ENSURED = False
@@ -407,7 +531,13 @@ async def save_template(
     session: AsyncSession, code: str, name_zh: str, definition: dict, user_id: uuid.UUID | None
 ) -> DocumentTemplate:
     """Editing never overwrites: it adds the next version and retires nothing a document used."""
+    from sqlalchemy import text as sa_text
+
     validate_definition(definition)
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"doc_tpl:{code}"},
+    )
     last = await session.scalar(
         select(func.max(DocumentTemplate.version_no)).where(DocumentTemplate.code == code)
     )

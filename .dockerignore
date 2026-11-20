@@ -10,3 +10,4 @@
 **/*.log
 docs/reviews
 .pgdata
+**/app/forms/official/_auto_cache

@@ -72,6 +72,30 @@ def wants_record(method: str, path: str) -> bool:
     )
 
 
+def _is_trusted_proxy(peer: str, trusted: list[str] | tuple[str, ...]) -> bool:
+    if not peer or not trusted:
+        return False
+    if peer in trusted:
+        return True
+    import ipaddress
+
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    for item in trusted:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        try:
+            net = ipaddress.ip_network(raw, strict=False)
+        except ValueError:
+            continue
+        if peer_ip.version == net.version and peer_ip in net:
+            return True
+    return False
+
+
 def client_ip(request: Request) -> str:
     """The address the connection came from. A reverse proxy's X-Forwarded-For is honoured only
     when the platform is configured to sit behind one (trusted_proxies), never from arbitrary
@@ -81,8 +105,10 @@ def client_ip(request: Request) -> str:
     peer = request.client.host if request.client else ""
     trusted = getattr(get_settings(), "trusted_proxies", None) or []
     forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded and peer in trusted:
-        return forwarded.split(",")[0].strip()[:64]
+    if forwarded and _is_trusted_proxy(peer, trusted):
+        first_hop = forwarded.split(",")[0].strip()
+        if first_hop:
+            return first_hop[:64]
     return peer[:64]
 
 
@@ -91,19 +117,29 @@ def set_detail(request: Request, *, summary: str = "", before: Any = None, after
     request.state.audit_detail = {"summary": summary, "before": before, "after": after}
 
 
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")
+
+
+def _clean_text(val: str, limit: int = 4000) -> str:
+    cleaned = _CTRL_CHARS_RE.sub("", val)
+    if len(cleaned) <= limit:
+        return cleaned
+    return (cleaned[: limit - 1] + "…") if limit > 1 else cleaned[:limit]
+
+
 def redact(value: Any, depth: int = 0) -> Any:
     """Detail payloads never carry credentials: keys that look secret are masked."""
     if depth > 6:
         return "…"
     if isinstance(value, dict):
         return {
-            k: ("***" if _SECRET_KEYS.search(str(k)) else redact(v, depth + 1))
+            _clean_text(str(k), 200): ("***" if _SECRET_KEYS.search(str(k)) else redact(v, depth + 1))
             for k, v in list(value.items())[:60]
         }
     if isinstance(value, (list, tuple)):
         return [redact(v, depth + 1) for v in list(value)[:60]]
-    if isinstance(value, str) and len(value) > 4000:
-        return value[:4000] + "…"
+    if isinstance(value, str):
+        return _clean_text(value, 4000)
     return value
 
 
@@ -189,17 +225,17 @@ async def record_request(request: Request, status_code: int) -> None:
                     summary = fallback_summary(category, action, method, path, status_code)
                 row = {
                     "actor_id": actor_id,
-                    "actor_name": name,
-                    "actor_email": email,
-                    "actor_role": role,
+                    "actor_name": _clean_text(name or "", 128),
+                    "actor_email": _clean_text(email or "", 320),
+                    "actor_role": _clean_text(role or "", 32),
                     "org_id": org_id,
-                    "ip": client_ip(request),
-                    "category": category,
-                    "action": action,
-                    "method": method,
-                    "path": path[:512],
+                    "ip": _clean_text(client_ip(request), 64),
+                    "category": _clean_text(category, 16),
+                    "action": _clean_text(action, 128),
+                    "method": _clean_text(method, 8),
+                    "path": _clean_text(path, 512),
                     "status": status_code,
-                    "summary": summary,
+                    "summary": _clean_text(summary, 1000),
                     "before": redact(before),
                     "after": redact(after),
                 }

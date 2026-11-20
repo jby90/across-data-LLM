@@ -56,7 +56,18 @@ WORLD = {
     "US": "美国", "CA": "加拿大", "MX": "墨西哥", "BR": "巴西", "AR": "阿根廷", "CL": "智利", "PE": "秘鲁", "CO": "哥伦比亚",
     "AU": "澳大利亚", "NZ": "新西兰", "HK": "中国香港", "MO": "中国澳门",
 }
-ALIASES = {"印尼": "ID", "沙特": "SA", "阿拉伯联合酋长国": "AE", "大韩民国": "KR", "香港": "HK", "澳门": "MO"}
+ALIASES = {
+    "印尼": "ID", "沙特": "SA", "阿拉伯联合酋长国": "AE", "大韩民国": "KR", "香港": "HK", "澳门": "MO",
+    "中华人民共和国": "CN", "新加坡共和国": "SG", "摩洛哥王国": "MA", "阿拉伯埃及共和国": "EG",
+    "突尼斯共和国": "TN", "黎巴嫩共和国": "LB", "德意志联邦共和国": "DE", "法兰西共和国": "FR",
+    "意大利共和国": "IT", "西班牙王国": "ES", "荷兰王国": "NL", "比利时王国": "BE", "瑞典王国": "SE",
+    "波兰共和国": "PL", "奥地利共和国": "AT", "爱尔兰共和国": "IE", "葡萄牙共和国": "PT",
+    "大不列颠及北爱尔兰联合王国": "GB", "瑞士联邦": "CH", "挪威王国": "NO", "俄罗斯联邦": "RU",
+    "土耳其共和国": "TR", "日本国": "JP", "泰王国": "TH", "印度尼西亚共和国": "ID",
+    "越南社会主义共和国": "VN", "菲律宾共和国": "PH", "印度共和国": "IN", "美利坚合众国": "US",
+    "墨西哥合众国": "MX", "巴西联邦共和国": "BR", "澳大利亚联邦": "AU",
+    "香港特别行政区": "HK", "澳门特别行政区": "MO",
+}
 NAMES = {**COUNTRY_NAMES_ZH, CN: "中国", **WORLD}
 
 
@@ -85,12 +96,14 @@ def official_forms(country: str | None, role: str, sensitive: str = "") -> list[
     (“是”/“否”, from the project) picks one; not yet answered, both are offered."""
     if not country:
         return []
+    from app.analysis.cn_route import _yes as _cn_yes
     from app.forms.service import CatalogError, catalog
 
     # 申报表只对应发出国的出境申报；处理申报/事先授权是属地准入事项（见 processing_forms）
     wanted = ("export",) if role == "source" else ()
     answer = (sensitive or "").strip()
-    flag = "sensitive" if answer.startswith("是") else "not_sensitive" if answer.startswith(("否", "不", "无")) else ""
+    yes_val = _cn_yes(answer, "sensitive_pi")
+    flag = "sensitive" if yes_val is True else "not_sensitive" if yes_val is False else ""
     try:
         forms = [f for f in catalog().values() if f["country"] == country and f["direction"] in wanted]
     except CatalogError:

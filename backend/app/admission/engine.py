@@ -82,10 +82,38 @@ async def clause_texts(session: AsyncSession, ids: list[str]) -> dict[str, dict]
             sql(
                 """select k.id::text, k.clause_number, coalesce(d.title_zh, d.title), k.original_text, d.id::text,
                    (select t.translated_text from clause_translations t where t.clause_id = k.id and t.is_current
-                      and t.quality_check_passed and t.review_status <> 'superseded'
+                      and t.quality_check_passed and t.review_status not in ('translation_failed', 'not_translated', 'rejected', 'stale', 'superseded')
+                      and not exists (
+                        select 1 from clause_translations t2
+                        where t2.clause_id = k.id and t2.id <> t.id and t2.is_current
+                          and t2.quality_check_passed and t2.review_status not in ('translation_failed', 'not_translated', 'rejected', 'stale', 'superseded')
+                      )
                     order by (t.review_status = 'approved') desc, t.updated_at desc limit 1)
                    from clauses k join document_versions v on v.id = k.version_id join documents d on d.id = v.document_id
-                   where k.id = any(cast(:ids as uuid[]))"""
+                   where k.id = any(cast(:ids as uuid[]))
+                     and d.relevance not in ('irrelevant', 'out_of_scope')
+                     and v.legal_status not in ('repealed', 'draft')
+                     and v.review_status <> 'rejected'
+                     and not exists (
+                       select 1 from knowledge_change_proposals p
+                       where p.target_type = 'documents' and p.target_id = d.id
+                         and p.status in ('pending_review', 'approved')
+                         and coalesce((p.payload->>'safety_hold')::boolean, false)
+                     )
+                     and not exists (
+                       select 1 from knowledge_change_proposals p
+                       where p.target_type = 'clauses'
+                         and p.status in ('pending_review', 'approved')
+                         and p.payload->'source_parse_revision'->>'scope' = 'whole_source_page'
+                         and (
+                           p.target_id = k.id
+                           or (
+                             p.payload->'source_parse_revision'->>'version_id' = k.version_id::text
+                             and (p.payload->'source_parse_revision'->>'page_number')::int >= k.page_start
+                             and (p.payload->'source_parse_revision'->>'page_number')::int <= k.page_end
+                           )
+                         )
+                     )"""
             ),
             {"ids": ids},
         )
@@ -123,6 +151,7 @@ def _tighten_zh_spaces(text: str) -> str:
     s = re.sub(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])", "", text)
     s = re.sub(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[，。；：、！？）》】])", "", s)
     s = re.sub(r"(?<=[（《【])[ \t]+(?=[\u4e00-\u9fff])", "", s)
+    s = re.sub(r"(?<=[）》】\)])[ \t]+(?=[\u4e00-\u9fff，。；：、！？])", "", s)
     s = re.sub(r"(?<=[向在由从对与及或按报经至为])[ \t]+(?=[A-Za-z0-9\u4e00-\u9fff])", "", s)
     return s
 
@@ -460,7 +489,21 @@ def official_authority(detail: dict) -> str:
 
 
 def _clean_name(name: str) -> str:
-    return re.sub(r"[（(][^）)]*[؀-ۿ][^）)]*[）)]", "", name).strip() or name
+    s = re.sub(r"[（(][^）)]*[؀-ۿ][^）)]*[）)]", "", name or "").strip() or (name or "")
+    # 消除中文材料名后重复或嵌套的外文括注（含中间夹有“（原件）”等括注的情形）
+    m_abbr = re.search(r"[（(]([A-Za-z0-9/\-]{2,16})[）)]", s)
+    if m_abbr:
+        abbr = m_abbr.group(1)
+        tail_after = s[m_abbr.end() :]
+        for m_tail in list(re.finditer(r"[（(](?:[^（）()]|\([^()]*\)|（[^（）]*）)+[）)]", tail_after)):
+            inner = m_tail.group(0)[1:-1]
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(abbr)}(?![A-Za-z0-9])", inner, re.IGNORECASE):
+                cut_s = m_abbr.end() + m_tail.start()
+                cut_e = m_abbr.end() + m_tail.end()
+                s = (s[:cut_s].rstrip() + s[cut_e:]).strip()
+                break
+    s = re.sub(r"([（(][^（）()]{1,40}[）)])\s*\1", r"\1", s)
+    return s.strip() or (name or "")
 
 
 def _describe_rows(plan: list[dict], known: dict[str, str], answers: dict[str, str], asked: set[str], rendered: Rendered) -> list[list[str]]:
@@ -587,7 +630,7 @@ def bring_list(plan: list[dict], forms: list[str]) -> list[dict]:
             if key in seen:  # 同一份材料，条文前后各提了一次（“银行保函原件”“银行保函”）
                 continue
             seen.add(key)
-            out.append({"name": p["name"], "what": p.get("what") or ""})
+            out.append({"name": _clean_name(p["name"]), "what": p.get("what") or ""})
     return out
 
 

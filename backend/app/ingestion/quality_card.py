@@ -184,7 +184,7 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
     """A card for the latest parsed version of every in-scope document (optionally one country)."""
     import copy
 
-    from sqlalchemy import exists, func, select, text
+    from sqlalchemy import func, select, text
 
     from app.ingestion.intake_scope import scoped
     from app.ingestion.models import Clause, Document, DocumentVersion
@@ -233,8 +233,9 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
         return []
 
     ver_ids = [v.id for _, v in doc_vers]
-    has_tr = exists(
-        select(1).where(
+    has_tr = (
+        select(func.count(ClauseTranslation.id))
+        .where(
             ClauseTranslation.clause_id == Clause.id,
             ClauseTranslation.is_current.is_(True),
             ClauseTranslation.quality_check_passed.is_(True),
@@ -242,6 +243,9 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
                 ("machine_translated", "pending_review", "approved")
             ),
         )
+        .correlate(Clause)
+        .scalar_subquery()
+        == 1
     )
     all_clause_rows = (
         await s.execute(

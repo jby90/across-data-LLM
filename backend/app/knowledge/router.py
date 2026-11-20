@@ -47,6 +47,7 @@ from app.knowledge.schemas import (
     KgNodeOut,
     NodeCreateIn,
     NodeEditIn,
+    PublicClauseTranslationOut,
     RegulationClauseItemOut,
     RegulationDetailOut,
     RegulationSummaryOut,
@@ -111,6 +112,10 @@ async def parsed_graph_revisions(
 def _status_badge(review_status: str) -> tuple[bool, str]:
     if review_status == TranslationReviewStatus.APPROVED.value:
         return True, "已复核（可作法律依据）"
+    if review_status == "native_zh":
+        return False, "中文原文（免译）"
+    if review_status == "ambiguous_current":
+        return False, "多现行译文待消歧（不可作法律依据）"
     if review_status == TranslationReviewStatus.REJECTED.value:
         return False, "已驳回（待重译）"
     if review_status == TranslationReviewStatus.STALE.value:
@@ -184,10 +189,40 @@ async def _build_translation_outs(
                     standalone_translation=False,
                 ),
             )
+    ambiguous_clause_ids: set[uuid.UUID] = set()
+    if rows:
+        cids = list({clause.id for _, clause, _ in rows})
+        ambiguous_clause_ids = set(
+            (
+                await session.scalars(
+                    select(ClauseTranslation.clause_id)
+                    .where(
+                        ClauseTranslation.clause_id.in_(cids),
+                        ClauseTranslation.is_current.is_(True),
+                        ClauseTranslation.quality_check_passed.is_(True),
+                        ClauseTranslation.review_status.in_(
+                            ("machine_translated", "pending_review", "approved")
+                        ),
+                    )
+                    .group_by(ClauseTranslation.clause_id)
+                    .having(func.count(ClauseTranslation.id) > 1)
+                )
+            ).all()
+        )
+    engine_zh_map = {
+        "llm": "智能翻译引擎",
+        "glossary_assisted": "术语辅助翻译",
+        "rule": "术语直译",
+        "manual": "人工译定",
+    }
     out: list[ClauseTranslationOut] = []
     for tr, clause, doc in rows:
         usable, badge = _status_badge(tr.review_status)
-        usable = usable and tr.is_current and tr.quality_check_passed
+        if clause.id in ambiguous_clause_ids:
+            usable = False
+            badge = "多现行译文待消歧（不可作法律依据）"
+        else:
+            usable = usable and tr.is_current and tr.quality_check_passed
         out.append(
             ClauseTranslationOut(
                 source_context_revision=contexts.get(clause.id),
@@ -203,7 +238,7 @@ async def _build_translation_outs(
                 section_path=clause.section_path,
                 original_text=clause.original_text,
                 translated_text=tr.translated_text,
-                engine=tr.engine,
+                engine=engine_zh_map.get(tr.engine, _scrub_quality_issues_zh([tr.engine])[0] if tr.engine else ""),
                 model_name=tr.model_name,
                 prompt_version=tr.prompt_version,
                 tokens_in=int(tr.tokens_in or 0),
@@ -212,7 +247,7 @@ async def _build_translation_outs(
                 glossary_hits=_clean_glossary_hits(tr.glossary_hits),
                 unmatched_terms=tr.unmatched_terms or [],
                 quality_check_passed=tr.quality_check_passed,
-                quality_issues=tr.quality_issues or [],
+                quality_issues=_scrub_quality_issues_zh(tr.quality_issues),
                 review_status=tr.review_status,
                 status=tr.review_status,
                 usable_as_legal_basis=usable,
@@ -222,6 +257,35 @@ async def _build_translation_outs(
             )
         )
     return out
+
+
+def _scrub_quality_issues_zh(issues: list | None) -> list[str]:
+    import re
+
+    from app.core.jargon import scrub_engineering_jargon
+
+    if not issues:
+        return []
+    cleaned: list[str] = []
+    for raw in issues:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        if s.lower().startswith("llm unavailable"):
+            s = "智能翻译服务暂不可用或尚未配置密钥，暂未更新译文"
+        s = re.sub(r"LLM\s*服务", "智能翻译服务", s, flags=re.I)
+        s = scrub_engineering_jargon(
+            s,
+            ocr_zh="版面文字识别",
+            llm_zh="智能翻译模型",
+            rag_zh="法条检索增强",
+            json_zh="结构化数据",
+            uuid_zh="唯一标识",
+            pydantic_zh="字段校验",
+            cjk_zh="中文汉字",
+        )
+        cleaned.append(s)
+    return cleaned
 
 
 _DOC_TYPE_ZH: dict[str, str] = {
@@ -281,6 +345,44 @@ def _compute_eight_attributes(
     }
 
 
+def _active_kg_node_filters(*, include_out_of_scope_structural: bool = False):
+    from app.ingestion.layout_safety import clause_layout_available
+
+    doc_rel_cond = (
+        Document.relevance != "irrelevant"
+        if include_out_of_scope_structural
+        else Document.relevance.in_(("relevant", "related"))
+    )
+    return (
+        KgNode.review_status.notin_(("superseded", "stale", "rejected")),
+        func.coalesce(KgNode.verify_state, "") != "retired",
+        or_(
+            KgNode.document_id.is_(None),
+            KgNode.document_id.in_(
+                select(Document.id).where(
+                    document_available(),
+                    doc_rel_cond,
+                )
+            ),
+        ),
+        or_(
+            KgNode.evidence_clause_id.is_(None),
+            KgNode.evidence_clause_id.in_(
+                select(Clause.id)
+                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(
+                    document_available(),
+                    clause_layout_available(),
+                    doc_rel_cond,
+                    DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+                    DocumentVersion.review_status != "rejected",
+                )
+            ),
+        ),
+    )
+
+
 async def _build_graph_payload(
     session: AsyncSession,
     country_code: str,
@@ -292,12 +394,7 @@ async def _build_graph_payload(
         select(KgNode)
         .where(
             KgNode.country_code == cc,
-            KgNode.review_status.notin_(("superseded", "stale", "rejected")),
-            func.coalesce(KgNode.verify_state, "") != "retired",
-            or_(
-                KgNode.document_id.is_(None),
-                KgNode.document_id.in_(select(Document.id).where(document_available())),
-            ),
+            *_active_kg_node_filters(include_out_of_scope_structural=not user_view),
         )
         .order_by(KgNode.node_type)
     )
@@ -486,39 +583,68 @@ async def _build_graph_payload(
         )
 
     # 统计本国有效范围内条款总数、未挂接义务/关系的条款数、OCR/阿语需人工核对条款数
-    total_clauses = int(
-        (
-            await session.execute(
-                select(func.count(Clause.id))
-                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
-                .join(Document, Document.id == DocumentVersion.document_id)
-                .where(
-                    Document.country_code == cc,
-                    DocumentVersion.state == "parsed",
-                    _in_scope(),
-                )
+    from app.ingestion.layout_safety import clause_layout_available
+
+    valid_ver_rows = (
+        await session.scalars(
+            select(DocumentVersion)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(
+                Document.country_code == cc,
+                document_available(),
+                _in_scope(),
+                DocumentVersion.state == "parsed",
+                DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+                DocumentVersion.review_status != "rejected",
             )
-        ).scalar_one()
-        or 0
+            .order_by(DocumentVersion.document_id, DocumentVersion.version_no.desc())
+        )
+    ).all()
+    latest_valid_by_doc: dict = {}
+    for vv in valid_ver_rows:
+        latest_valid_by_doc.setdefault(vv.document_id, vv)
+    latest_valid_vids = [vv.id for vv in latest_valid_by_doc.values()]
+    valid_clause_ids_set = (
+        set(
+            (
+                await session.scalars(
+                    select(Clause.id).where(
+                        Clause.version_id.in_(latest_valid_vids),
+                        clause_layout_available(),
+                    )
+                )
+            ).all()
+        )
+        if latest_valid_vids
+        else set()
     )
-    ocr_or_rtl_clauses = int(
-        (
-            await session.execute(
-                select(func.count(Clause.id))
-                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
-                .join(Document, Document.id == DocumentVersion.document_id)
-                .where(
-                    Document.country_code == cc,
-                    DocumentVersion.state == "parsed",
-                    _in_scope(),
-                    or_(
-                        DocumentVersion.text_source == "ocr",
-                        Document.language == "ar",
-                    ),
+    total_clauses = len(valid_clause_ids_set)
+    linked_clause_ids = {
+        e.evidence_clause_id
+        for e in edge_outs
+        if e.evidence_clause_id is not None and e.evidence_clause_id in valid_clause_ids_set
+    }
+    ocr_or_rtl_clauses = (
+        int(
+            (
+                await session.execute(
+                    select(func.count(Clause.id))
+                    .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .where(
+                        Clause.version_id.in_(latest_valid_vids),
+                        clause_layout_available(),
+                        or_(
+                            DocumentVersion.text_source == "ocr",
+                            Document.language == "ar",
+                        ),
+                    )
                 )
-            )
-        ).scalar_one()
-        or 0
+            ).scalar_one()
+            or 0
+        )
+        if latest_valid_vids
+        else 0
     )
     isolated_ids = [str(n.id) for n in nodes if n.id not in connected_node_ids]
     pending_edges = sum(1 for e in edge_outs if e.review_status == "pending_review")
@@ -634,8 +760,8 @@ async def _build_graph_payload(
             "isolated_nodes_count": len(isolated_ids),
             "isolated_node_ids": isolated_ids,
             "total_clauses_count": total_clauses,
-            "linked_clauses_count": len(clause_ids),
-            "unlinked_clauses_count": max(0, total_clauses - len(clause_ids)),
+            "linked_clauses_count": len(linked_clause_ids),
+            "unlinked_clauses_count": max(0, total_clauses - len(linked_clause_ids)),
             "pending_review_edges_count": pending_edges,
             "approved_edges_count": approved_edges,
             "auto_verified_edges_count": sum(
@@ -674,12 +800,26 @@ async def trigger_country_extraction(
     max_clauses_per_doc: int | None = Query(default=None, ge=1, le=500),
 ) -> dict:
     """一键初始化术语库/解读要点,并对指定国家执行六要素+十二关系知识图谱抽取与核心条款翻译。"""
-    return await extract_knowledge_for_country(
+    res = await extract_knowledge_for_country(
         session,
         country_code.upper(),
         translate_sample_per_doc=translate_sample_per_doc,
         max_clauses_per_doc=max_clauses_per_doc,
     )
+    if isinstance(res, dict) and res.get("reason"):
+        import re as _re
+
+        reason_map = {
+            "country_extraction_already_running": "该国知识图谱正在后台梳理中，请稍候刷新",
+            "document_relevance_unavailable": "相关法规范围尚未核定完成，已保留既有图谱结果",
+            "no_parsed_documents": "当前国家暂无已解析完成的法规条文",
+        }
+        raw_r = str(res["reason"])
+        if raw_r in reason_map:
+            res = {**res, "reason": reason_map[raw_r]}
+        elif _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout)", raw_r):
+            res = {**res, "reason": "智能分析服务暂不可用或连接超时，已保留既有图谱结果"}
+    return res
 
 
 @admin_router.get("/glossary", response_model=list[GlossaryTermOut])
@@ -711,23 +851,49 @@ async def create_glossary_term(
 ) -> GlossaryTerm:
     import re
 
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.exc import IntegrityError
+
     from app.knowledge.legal_terms import is_stopword_term
 
-    if is_stopword_term(body.source_term, body.target_zh):
+    src_clean = body.source_term.strip()
+    zh_clean = body.target_zh.strip()
+    lang_clean = body.language.lower().strip()
+    cc_clean = body.country_code.upper().strip() if body.country_code and body.country_code.strip() else None
+    if not src_clean or not zh_clean:
+        raise HTTPException(status_code=422, detail="外文原词和标准中文译名均不能为空")
+    if is_stopword_term(src_clean, zh_clean):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="不能将常见英文介词、冠词或无效同词映射收录为专业法律术语",
         )
+    if body.evidence_clause_id is not None:
+        clause_exists = await session.scalar(select(Clause.id).where(Clause.id == body.evidence_clause_id))
+        if clause_exists is None:
+            raise HTTPException(status_code=422, detail="关联的依据条款不存在，请重新选择")
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"glossary:{cc_clean or ''}:{lang_clean}:{src_clean.lower()}"},
+    )
+    dup_stmt = select(GlossaryTerm.id).where(
+        GlossaryTerm.language == lang_clean,
+        func.lower(GlossaryTerm.source_term) == src_clean.lower(),
+    )
+    dup_stmt = dup_stmt.where(
+        GlossaryTerm.country_code == cc_clean if cc_clean else GlossaryTerm.country_code.is_(None)
+    )
+    if await session.scalar(dup_stmt.limit(1)) is not None:
+        raise HTTPException(status_code=409, detail="该语种与国别下已存在相同的专业术语词条")
     raw_code = (body.concept_code or "").strip()
     if not raw_code:
-        slug = re.sub(r"[^a-z0-9]+", "_", body.source_term.strip().lower()).strip("_")[:48]
+        slug = re.sub(r"[^a-z0-9]+", "_", src_clean.lower()).strip("_")[:48]
         raw_code = slug or f"term_{uuid.uuid4().hex[:8]}"
     term = GlossaryTerm(
         concept_code=raw_code,
-        country_code=body.country_code.upper() if body.country_code else None,
-        language=body.language.lower().strip(),
-        source_term=body.source_term.strip(),
-        target_zh=body.target_zh.strip(),
+        country_code=cc_clean,
+        language=lang_clean,
+        source_term=src_clean,
+        target_zh=zh_clean,
         priority_level=body.priority_level,
         statutory_definition=body.statutory_definition,
         source_reference=body.source_reference,
@@ -737,7 +903,11 @@ async def create_glossary_term(
         reviewed_at=datetime.now(UTC),
     )
     session.add(term)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="该专业术语已存在或关联条款无效") from None
     await session.refresh(term)
     return term
 
@@ -915,28 +1085,57 @@ async def review_clause_translation(
 
     if body.decision == "approved" and await document_is_held(session, doc.id):
         raise HTTPException(409, "来源绑定异常尚未解决，不可审批为法律依据")
+    from app.ingestion.models import ClauseReading
+    from app.ingestion.noise import clean_text
+    from app.knowledge.translator import unwrap_layout_lines
+
     proposed_text = (body.translated_text or tr.translated_text).strip()
-    passed, issues, checked_hits = verify_translation(
-        clause.original_text, proposed_text, tr.glossary_hits or []
+    rd_txt = await session.scalar(
+        select(ClauseReading.reading_text).where(ClauseReading.clause_id == clause.id)
     )
+    cleaned_src = unwrap_layout_lines(clean_text(rd_txt or clause.original_text))
+    passed, issues, checked_hits = verify_translation(
+        cleaned_src, proposed_text, tr.glossary_hits or []
+    )
+    if not passed and cleaned_src != clause.original_text:
+        passed_raw, issues_raw, hits_raw = verify_translation(
+            clause.original_text, proposed_text, tr.glossary_hits or []
+        )
+        if passed_raw:
+            passed, issues, checked_hits = passed_raw, issues_raw, hits_raw
     if body.decision == "approved" and (not passed or tr.review_status in ("superseded", "stale")):
+        clean_issues = _scrub_quality_issues_zh((issues or [])[:3])
+        suffix = f"（{'；'.join(clean_issues)}）" if clean_issues else "（历史或已失效版本请另建修订）"
         raise HTTPException(
             status_code=409,
-            detail={
-                "message": "该译文不能审批通过：请修正校验问题，历史/失效版本须另建修订",
-                "issues": issues,
-            },
+            detail=f"该译文不能审批通过，请先修正校验问题{suffix}",
         )
     return await _apply_translation_review(session, tr, clause, doc, body, proposed_text, passed, issues, checked_hits, user.user_id)
 
 
 async def _apply_translation_review(session, tr, clause, doc, body, proposed_text, passed, issues, checked_hits, actor_id):
+    from app.admission.router import _BASIS_MEMO, _DETAIL_MEMO
     from app.knowledge.history import snapshot
 
+    await session.execute(select(Clause.id).where(Clause.id == clause.id).with_for_update())
     snapshot(session, tr, "before_human_review", actor_id)
+    effective_passed = False if body.decision == "rejected" else passed
     if proposed_text != tr.translated_text:
         # Corrections are new revisions. Approval of the old text is never inherited.
         old = tr
+        if old.is_current:
+            siblings = (
+                await session.scalars(
+                    select(ClauseTranslation).where(
+                        ClauseTranslation.clause_id == old.clause_id,
+                        ClauseTranslation.is_current.is_(True),
+                    )
+                )
+            ).all()
+            for sib in siblings:
+                sib.is_current = False
+                if sib.review_status not in ("approved", "rejected"):
+                    sib.review_status = "superseded"
         tr = ClauseTranslation(
             clause_id=old.clause_id,
             translated_text=proposed_text,
@@ -945,14 +1144,13 @@ async def _apply_translation_review(session, tr, clause, doc, body, proposed_tex
             prompt_version="human-edit",
             glossary_hits=checked_hits,
             unmatched_terms=old.unmatched_terms,
-            quality_check_passed=passed,
+            quality_check_passed=effective_passed,
             quality_issues=issues,
-            is_current=old.is_current,
+            is_current=True,
         )
-        old.is_current = False
         session.add(tr)
         await session.flush()
-    tr.quality_check_passed = passed
+    tr.quality_check_passed = effective_passed
     tr.quality_issues = issues
     tr.glossary_hits = checked_hits
     tr.review_status = body.decision
@@ -962,6 +1160,8 @@ async def _apply_translation_review(session, tr, clause, doc, body, proposed_tex
     tr.updated_at = datetime.now(UTC)
     snapshot(session, tr, "after_human_review", actor_id)
     await session.commit()
+    _BASIS_MEMO.pop(str(clause.id), None)
+    _DETAIL_MEMO.clear()
     outs = await _build_translation_outs(session, [(tr, clause, doc)])
     return outs[0]
 
@@ -987,11 +1187,7 @@ async def _count_needs_confirmation_edges(
             await session.scalars(
                 select(KgNode).where(
                     KgNode.country_code.in_(country_codes),
-                    KgNode.review_status.notin_(("superseded", "stale", "rejected")),
-                    or_(
-                        KgNode.document_id.is_(None),
-                        KgNode.document_id.in_(select(Document.id).where(document_available())),
-                    ),
+                    *_active_kg_node_filters(include_out_of_scope_structural=True),
                 )
             )
         ).all()
@@ -1265,34 +1461,70 @@ async def review_knowledge_edge(
     edge = await session.get(KgEdge, edge_id)
     if edge is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="图谱关系边不存在")
+    from app.ingestion.safety import held_citation_ids
+    from app.knowledge.extractor import (
+        ALLOWED_RELATION_ENDPOINT_TYPES,
+        validate_entity_specificity_and_penalty_fidelity,
+    )
+    from app.knowledge.graph_verify import clean_verify_note, verify_edge
     from app.knowledge.history import snapshot
 
+    src = await session.get(KgNode, edge.source_node_id)
+    dst = await session.get(KgNode, edge.target_node_id)
     clause = await session.get(Clause, edge.evidence_clause_id)
-    from app.ingestion.safety import held_citation_ids
+    ver = await session.get(DocumentVersion, clause.version_id) if clause is not None else None
+    doc = await session.get(Document, ver.document_id) if ver is not None else None
 
-    if body.decision == "approved" and await held_citation_ids(session, [edge.evidence_clause_id]):
-        raise HTTPException(409, "原文绑定异常已隔离，不能批准为法律依据")
-    if body.decision == "approved" and (
-        edge.review_status in ("superseded", "stale")
-        or edge.extractor_model == "kg-rule-extractor-v1"
-        or not clause
-        or not edge.evidence_quote
-        or edge.evidence_quote not in clause.original_text
-        or (not edge.is_structural and edge.judge_verdict not in ("yes", "title_inferred"))
-        or (edge.is_structural and edge.judge_verdict not in ("structural", "title_inferred"))
-    ):
-        raise HTTPException(status_code=409, detail="关系证据/裁判未通过或已失效；请先建立有效修订")
+    if body.decision == "approved":
+        if await held_citation_ids(session, [edge.evidence_clause_id]):
+            raise HTTPException(409, "原文绑定异常已隔离，不能批准为法律依据")
+        if (
+            edge.review_status in ("superseded", "stale")
+            or edge.extractor_model == "kg-rule-extractor-v1"
+            or not clause
+            or not edge.evidence_quote
+            or edge.evidence_quote not in clause.original_text
+            or (not edge.is_structural and edge.judge_verdict not in ("yes", "title_inferred"))
+            or (edge.is_structural and edge.judge_verdict not in ("structural", "title_inferred"))
+        ):
+            raise HTTPException(status_code=409, detail="关系证据/裁判未通过或已失效；请先建立有效修订")
+        if (
+            ver is None
+            or ver.legal_status in NOT_CITABLE_STATUSES
+            or ver.review_status == "rejected"
+            or (doc is not None and doc.relevance in ("irrelevant", "out_of_scope"))
+        ):
+            raise HTTPException(409, "依据条款所属法规已废止、属草案或不在收录范围内，不能批准为法律依据")
+        if (
+            src is None
+            or dst is None
+            or src.review_status in ("rejected", "superseded", "stale")
+            or dst.review_status in ("rejected", "superseded", "stale")
+        ):
+            raise HTTPException(409, "该关系关联的起点或终点节点已停用或已驳回，不能批准为法律依据")
+        allowed_pairs = ALLOWED_RELATION_ENDPOINT_TYPES.get(RelationType(edge.relation_type), set())
+        if (NodeType(src.node_type), NodeType(dst.node_type)) not in allowed_pairs:
+            raise HTTPException(409, "该关系类型的起点或终点要素类别不匹配，不能批准为法律依据")
+        if not edge.is_structural:
+            ok_spec, _, spec_reason = validate_entity_specificity_and_penalty_fidelity(
+                relation_type=RelationType(edge.relation_type),
+                source_type=NodeType(src.node_type),
+                source_name=src.name_zh,
+                target_type=NodeType(dst.node_type),
+                target_name=dst.name_zh,
+                evidence_quote=edge.evidence_quote or "",
+            )
+            if not ok_spec:
+                raise HTTPException(409, spec_reason)
     snapshot(session, edge, "before_human_review", user.user_id)
     edge.review_status = body.decision
+    if body.decision == "approved" and edge.verify_state == "retired":
+        edge.verify_state = None
+        edge.verify_note = None
     edge.reviewed_by = user.user_id
     edge.reviewed_at = datetime.now(UTC)
     snapshot(session, edge, "after_human_review", user.user_id)
     await session.commit()
-    src = await session.get(KgNode, edge.source_node_id)
-    dst = await session.get(KgNode, edge.target_node_id)
-    clause = await session.get(Clause, edge.evidence_clause_id)
-    from app.knowledge.graph_verify import clean_verify_note, verify_edge
-
     v_status, v_reason = (
         verify_edge(
             edge,
@@ -1343,15 +1575,85 @@ async def review_knowledge_node(
     node = await session.get(KgNode, node_id)
     if node is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="图谱节点不存在")
+    from app.ingestion.safety import document_is_held, held_citation_ids
+    from app.knowledge.extractor import (
+        _GENERIC_HOLLOW_PENALTY_NAMES,
+        _PENALTY_QUANTIFIER_IN_TARGET_RE,
+        _QUOTE_NUMERIC_PENALTY_RE,
+        _ULTRA_VAGUE_ENTITY_NAMES_ZH,
+    )
     from app.knowledge.graph_verify import verify_node
     from app.knowledge.history import snapshot
 
-    if body.decision == "approved" and node.review_status in ("superseded", "stale"):
-        raise HTTPException(status_code=409, detail="节点已停用，不能确认保留")
+    if body.decision == "approved":
+        if node.review_status in ("superseded", "stale"):
+            raise HTTPException(status_code=409, detail="节点已停用，不能确认保留")
+        if node.document_id is not None:
+            if await document_is_held(session, node.document_id):
+                raise HTTPException(409, "原文绑定异常已隔离，不能确认保留")
+            node_doc = await session.get(Document, node.document_id)
+            if node_doc is not None and node_doc.relevance in ("irrelevant", "out_of_scope"):
+                raise HTTPException(409, "所属法规不在收录范围内，不能确认保留")
+        cl_obj = None
+        if node.evidence_clause_id is not None:
+            if await held_citation_ids(session, [node.evidence_clause_id]):
+                raise HTTPException(409, "原文绑定异常已隔离，不能确认保留")
+            cl_obj = await session.get(Clause, node.evidence_clause_id)
+            if cl_obj is None:
+                raise HTTPException(409, "依据条款不存在，不能确认保留")
+            cl_ver = await session.get(DocumentVersion, cl_obj.version_id)
+            cl_doc = await session.get(Document, cl_ver.document_id) if cl_ver is not None else None
+            if (
+                cl_ver is None
+                or cl_ver.legal_status in NOT_CITABLE_STATUSES
+                or cl_ver.review_status == "rejected"
+                or (cl_doc is not None and cl_doc.relevance in ("irrelevant", "out_of_scope"))
+            ):
+                raise HTTPException(409, "依据条款所属法规已废止、属草案或不在收录范围内，不能确认保留")
+        clean_nm = "".join((node.name_zh or "").split())
+        if node.node_type in ("DATA_CATEGORY", "OBLIGATION", "PENALTY") and (
+            len(clean_nm) <= 1 or clean_nm in _ULTRA_VAGUE_ENTITY_NAMES_ZH
+        ):
+            raise HTTPException(
+                409, f"节点名称“{node.name_zh}”颗粒度过于宽泛空洞，请先修改补充限定语后再确认"
+            )
+        if node.node_type == "PENALTY":
+            if clean_nm in _GENERIC_HOLLOW_PENALTY_NAMES:
+                raise HTTPException(
+                    409, f"罚则名称“{node.name_zh}”过于宽泛，请先补充具体罚金数额、比例或监禁期限"
+                )
+            pen_quotes = list(
+                (
+                    await session.scalars(
+                        select(KgEdge.evidence_quote).where(
+                            KgEdge.target_node_id == node.id,
+                            KgEdge.relation_type == "PENALIZES",
+                            KgEdge.review_status.notin_(("superseded", "stale", "rejected")),
+                        )
+                    )
+                ).all()
+            )
+            if cl_obj is not None and cl_obj.original_text:
+                pen_quotes.append(cl_obj.original_text)
+            if any(_QUOTE_NUMERIC_PENALTY_RE.search(q or "") for q in pen_quotes) and not _PENALTY_QUANTIFIER_IN_TARGET_RE.search(node.name_zh or ""):
+                raise HTTPException(
+                    409,
+                    f"依据条文载有明确罚金数额、比例或监禁期限，罚则名称“{node.name_zh}”不得省略量化标准",
+                )
     snapshot(session, node, "before_human_review", user.user_id)
+    reviewed_ts = datetime.now(UTC)
     node.review_status = body.decision
-    node.reviewed_by = user.user_id
-    node.reviewed_at = datetime.now(UTC)
+    if body.decision == "approved" and node.verify_state == "retired":
+        node.verify_state = None
+        node.verify_note = None
+    node.attributes = {
+        **(node.attributes or {}),
+        "human_review": {
+            "decision": body.decision,
+            "by": str(user.user_id),
+            "at": reviewed_ts.isoformat(timespec="seconds"),
+        },
+    }
     snapshot(session, node, "after_human_review", user.user_id)
     if body.decision == "rejected":
         incident = (
@@ -1394,6 +1696,7 @@ def _node_brief(node: KgNode) -> dict:
         "country_code": node.country_code,
         "node_type": node.node_type,
         "name_zh": node.name_zh,
+        "attributes": node.attributes or {},
         "review_status": node.review_status,
     }
 
@@ -1503,7 +1806,12 @@ async def edit_knowledge_node(
     node = await _edited(
         session,
         graph_edit.rename_node(
-            session, node_id, name_zh=body.name_zh, summary=body.summary, actor_id=user.user_id
+            session,
+            node_id,
+            name_zh=body.name_zh,
+            summary=body.summary,
+            attributes=body.attributes,
+            actor_id=user.user_id,
         ),
     )
     return _node_brief(node)
@@ -1666,19 +1974,24 @@ def _validate_batch_node_dict(raw: Any, idx: int, *, from_csv: bool = False) -> 
         cid = _parse_uuid_field(raw.get("evidence_clause_id"), "依据条款编号", prefix)
     except ValueError as exc:
         return None, {loc_key: idx, "kind": "节点", "name_zh": name_zh, "error": str(exc)}
-    return (
-        BatchNodeItemIn(
-            country_code=cc,
-            node_type=ntype,
-            name_zh=name_zh,
-            name_orig=name_orig,
-            summary=summary,
-            evidence_clause_id=cid,
-            document_title=doc_title,
-            clause_number=clause_no,
-        ),
-        None,
-    )
+    from pydantic import ValidationError as PydanticValidationError
+
+    try:
+        return (
+            BatchNodeItemIn(
+                country_code=cc,
+                node_type=ntype,
+                name_zh=name_zh,
+                name_orig=name_orig,
+                summary=summary,
+                evidence_clause_id=cid,
+                document_title=doc_title,
+                clause_number=clause_no,
+            ),
+            None,
+        )
+    except PydanticValidationError:
+        return None, {loc_key: idx, "kind": "节点", "name_zh": name_zh[:40], "error": f"{prefix}节点字段内容格式不合法，请检查填写内容"}
 
 
 def _validate_batch_edge_dict(raw: Any, idx: int, *, from_csv: bool = False) -> tuple[BatchEdgeItemIn | None, dict | None]:
@@ -1705,21 +2018,26 @@ def _validate_batch_edge_dict(raw: Any, idx: int, *, from_csv: bool = False) -> 
         cid = _parse_uuid_field(raw.get("evidence_clause_id"), "依据条款编号", prefix)
     except ValueError as exc:
         return None, {loc_key: idx, "kind": "关联关系", "relation_type": rtype, "error": str(exc)}
-    return (
-        BatchEdgeItemIn(
-            country_code=cc,
-            source_node_id=src_id,
-            target_node_id=tgt_id,
-            source_node_name=src_name,
-            target_node_name=tgt_name,
-            relation_type=rtype,
-            evidence_clause_id=cid,
-            document_title=doc_title,
-            clause_number=clause_no,
-            evidence_quote=quote,
-        ),
-        None,
-    )
+    from pydantic import ValidationError as PydanticValidationError
+
+    try:
+        return (
+            BatchEdgeItemIn(
+                country_code=cc,
+                source_node_id=src_id,
+                target_node_id=tgt_id,
+                source_node_name=src_name,
+                target_node_name=tgt_name,
+                relation_type=rtype,
+                evidence_clause_id=cid,
+                document_title=doc_title,
+                clause_number=clause_no,
+                evidence_quote=quote,
+            ),
+            None,
+        )
+    except PydanticValidationError:
+        return None, {loc_key: idx, "kind": "关联关系", "relation_type": rtype[:40], "error": f"{prefix}关联关系字段内容格式不合法，请检查填写内容"}
 
 
 _NODE_TYPE_ZH_MAP = {
@@ -1767,25 +2085,69 @@ def _resolve_cc_input(raw: str) -> str:
 async def _resolve_clause_by_title(
     session: AsyncSession, country_code: str, doc_title: str | None, clause_no: str | None
 ) -> uuid.UUID | None:
+    import re as _re
+
+    from app.ingestion.layout_safety import clause_layout_available
+    from app.knowledge.reading import article_label
+
     dt_val = (doc_title or "").strip().strip("《》")
     cn_val = (clause_no or "").strip()
     if not dt_val or not cn_val:
         return None
-    stmt = (
-        select(Clause.id)
-        .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
-        .join(Document, Document.id == DocumentVersion.document_id)
-        .where(
-            DocumentVersion.state == "parsed",
-            or_(Document.title_zh.ilike(f"%{dt_val}%"), Document.title.ilike(f"%{dt_val}%")),
-            Clause.clause_number.ilike(f"%{cn_val}%"),
-        )
-        .order_by(DocumentVersion.version_no.desc(), Clause.ordinal.asc())
-        .limit(1)
+    doc_stmt = select(Document.id).where(
+        document_available(),
+        _in_scope(),
+        or_(Document.title_zh.ilike(f"%{dt_val}%"), Document.title.ilike(f"%{dt_val}%")),
     )
     if country_code:
-        stmt = stmt.where(Document.country_code == country_code.upper())
-    return await session.scalar(stmt)
+        doc_stmt = doc_stmt.where(Document.country_code == country_code.upper())
+    doc_ids = list((await session.scalars(doc_stmt)).all())
+    if not doc_ids:
+        return None
+    ver_rows = (
+        await session.scalars(
+            select(DocumentVersion)
+            .where(
+                DocumentVersion.document_id.in_(doc_ids),
+                DocumentVersion.state == "parsed",
+                DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+                DocumentVersion.review_status != "rejected",
+            )
+            .order_by(DocumentVersion.document_id, DocumentVersion.version_no.desc())
+        )
+    ).all()
+    latest_vids: list[uuid.UUID] = []
+    seen_docs: set = set()
+    for vr in ver_rows:
+        if vr.document_id not in seen_docs:
+            seen_docs.add(vr.document_id)
+            latest_vids.append(vr.id)
+    if not latest_vids:
+        return None
+    c_rows = (
+        await session.execute(
+            select(Clause.id, Clause.clause_number)
+            .where(
+                Clause.version_id.in_(latest_vids),
+                clause_layout_available(),
+                Clause.clause_number.is_not(None),
+            )
+            .order_by(Clause.ordinal.asc())
+        )
+    ).all()
+    cn_low = cn_val.lower()
+    cn_label = article_label(cn_val).lower() if article_label(cn_val) else ""
+    for cid, cnum in c_rows:
+        raw_num = (cnum or "").strip()
+        if raw_num.lower() == cn_low or (cn_label and article_label(raw_num).lower() == cn_label):
+            return cid
+    digits_m = _re.search(r"\d+(?:[.-]\d+)*", cn_val)
+    if digits_m:
+        tok_pat = _re.compile(rf"(?<!\d){_re.escape(digits_m.group(0))}(?!\d)", _re.I)
+        for cid, cnum in c_rows:
+            if tok_pat.search(cnum or ""):
+                return cid
+    return None
 
 
 async def _resolve_node_by_name(
@@ -1796,7 +2158,8 @@ async def _resolve_node_by_name(
         return None
     stmt = (
         select(KgNode.id)
-        .where(KgNode.name_zh == nm, KgNode.review_status.notin_(("rejected", "superseded")))
+        .where(KgNode.name_zh == nm, KgNode.review_status.notin_(("rejected", "superseded", "stale")))
+        .order_by((KgNode.review_status == "approved").desc(), KgNode.id)
         .limit(1)
     )
     if country_code:
@@ -1998,6 +2361,7 @@ async def _knowledge_overview(session: AsyncSession) -> list[dict]:
     Documents and articles are counted from the user's library (same rules as library_view), with a
     constant number of queries regardless of country count; newly discovered available countries
     whose versions are not parsed yet are still surfaced."""
+    from app.ingestion.layout_safety import clause_layout_available
     from app.knowledge.library_view import _Light
     from app.knowledge.reading import reading_units
 
@@ -2014,76 +2378,128 @@ async def _knowledge_overview(session: AsyncSession) -> list[dict]:
             await session.scalars(
                 select(DocumentVersion)
                 .join(Document, Document.id == DocumentVersion.document_id)
-                .where(*doc_filter, DocumentVersion.state == "parsed")
-                .order_by(DocumentVersion.document_id, DocumentVersion.version_no.desc())
+                .where(
+                    *doc_filter,
+                    DocumentVersion.state == "parsed",
+                    DocumentVersion.review_status != "rejected",
+                )
+                .order_by(
+                    DocumentVersion.document_id,
+                    (DocumentVersion.legal_status == "draft").asc(),
+                    DocumentVersion.version_no.desc(),
+                )
             )
         ).all()
     )
     latest_by_doc: dict = {}
     for v in versions:
         latest_by_doc.setdefault(v.document_id, v)
+    citable_ver_ids = [
+        v.id
+        for v in latest_by_doc.values()
+        if (v.legal_status or "in_force") not in NOT_CITABLE_STATUSES
+    ]
     clause_rows = (
-        await session.execute(
-            select(
-                Clause.version_id,
-                Clause.id,
-                Clause.ordinal,
-                Clause.clause_number,
-                Clause.heading,
-                Clause.page_start,
-                func.left(Clause.original_text, 80),
-                func.length(Clause.original_text),
+        (
+            await session.execute(
+                select(
+                    Clause.version_id,
+                    Clause.id,
+                    Clause.ordinal,
+                    Clause.clause_number,
+                    Clause.heading,
+                    Clause.page_start,
+                    func.left(Clause.original_text, 80),
+                    func.length(Clause.original_text),
+                    Clause.language,
+                    Clause.needs_review,
+                ).where(Clause.version_id.in_(citable_ver_ids))
             )
-            .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
-            .join(Document, Document.id == DocumentVersion.document_id)
-            .where(*doc_filter, DocumentVersion.state == "parsed")
-        )
-    ).all()
+        ).all()
+        if citable_ver_ids
+        else []
+    )
     rows_by_ver: dict = {}
-    for vid, cid, ordinal, number, heading, page, head, length in clause_rows:
+    clause_meta: dict = {}
+    for vid, cid, ordinal, number, heading, page, head, length, clang, c_nr in clause_rows:
         text = head if (length or 0) <= 80 else head + " " * ((length or 0) - 80)
         rows_by_ver.setdefault(vid, []).append(_Light(cid, ordinal, number, heading, page, text))
+        clause_meta[cid] = (str(clang or ""), bool(c_nr))
+    tr_status_rows = (
+        (
+            await session.execute(
+                select(ClauseTranslation.clause_id, ClauseTranslation.review_status)
+                .join(Clause, Clause.id == ClauseTranslation.clause_id)
+                .where(
+                    Clause.version_id.in_(citable_ver_ids),
+                    ClauseTranslation.is_current.is_(True),
+                    ClauseTranslation.quality_check_passed.is_(True),
+                    ClauseTranslation.review_status.notin_(
+                        ("superseded", "not_translated", "translation_failed", "rejected", "stale")
+                    ),
+                )
+            )
+        ).all()
+        if citable_ver_ids
+        else []
+    )
+    tr_buckets: dict[uuid.UUID, list[str]] = {}
+    for cid, rstatus in tr_status_rows:
+        tr_buckets.setdefault(cid, []).append(rstatus)
+    translated_cids: set = {cid for cid, rs in tr_buckets.items() if len(rs) == 1}
+    approved_cids: set = {cid for cid, rs in tr_buckets.items() if rs == ["approved"]}
     discovered_docs: dict[str, int] = {}
+    has_parsed_cc: set[str] = set()
     parsed_docs: dict[str, int] = {}
     clauses: dict[str, int] = {}
+    translations: dict[str, tuple[int, int]] = {}
     last_updated: dict[str, datetime] = {}
     for d in all_docs:
         cc = d.country_code
         discovered_docs[cc] = discovered_docs.get(cc, 0) + 1
         v = latest_by_doc.get(d.id)
+        if v is not None:
+            has_parsed_cc.add(cc)
         ts = (v.fetched_at or v.parsed_at) if v is not None else (d.discovered_at or d.last_checked_at)
         if ts is not None and (cc not in last_updated or ts > last_updated[cc]):
             last_updated[cc] = ts
-        if v is not None and rows_by_ver.get(v.id):
+        if (
+            v is not None
+            and (v.legal_status or "in_force") not in NOT_CITABLE_STATUSES
+            and rows_by_ver.get(v.id)
+        ):
+            units = reading_units(rows_by_ver[v.id])
             parsed_docs[cc] = parsed_docs.get(cc, 0) + 1
-            clauses[cc] = clauses.get(cc, 0) + len(reading_units(rows_by_ver[v.id]))
-    translations = {
-        code: (total, approved)
-        for code, total, approved in (
-            await session.execute(
-                select(
-                    Document.country_code,
-                    func.count(ClauseTranslation.id),
-                    func.count(ClauseTranslation.id).filter(
-                        ClauseTranslation.review_status == "approved"
-                    ),
+            clauses[cc] = clauses.get(cc, 0) + len(units)
+            prev_t, prev_a = translations.get(cc, (0, 0))
+            doc_is_zh = str(d.language or "").lower().startswith("zh")
+            u_trans = sum(
+                1
+                for u in units
+                if doc_is_zh
+                or any(
+                    c.id in translated_cids
+                    or clause_meta.get(c.id, ("", False))[0].lower().startswith("zh")
+                    for c in u.rows
                 )
-                .select_from(ClauseTranslation)
-                .join(Clause, Clause.id == ClauseTranslation.clause_id)
-                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
-                .join(Document, Document.id == DocumentVersion.document_id)
-                .where(
-                    document_available(),
-                    _in_scope(),
-                    ClauseTranslation.is_current.is_(True),
-                    ClauseTranslation.review_status.notin_(
-                        ("superseded", "not_translated", "translation_failed", "rejected", "stale")
-                    ),
-                )
-                .group_by(Document.country_code)
             )
-        ).all()
-    }
+            u_appr = sum(
+                1
+                for u in units
+                if (
+                    (
+                        doc_is_zh
+                        or all(
+                            clause_meta.get(c.id, ("", False))[0].lower().startswith("zh")
+                            for c in u.rows
+                        )
+                    )
+                    and v.review_status == "approved"
+                    and not any(clause_meta.get(c.id, ("", True))[1] for c in u.rows)
+                )
+                or any(c.id in approved_cids for c in u.rows)
+            )
+            translations[cc] = (prev_t + u_trans, prev_a + u_appr)
     active_node_conds = (
         KgNode.review_status.notin_(("superseded", "stale", "rejected")),
         func.coalesce(KgNode.verify_state, "") != "retired",
@@ -2093,6 +2509,21 @@ async def _knowledge_overview(session: AsyncSession) -> list[dict]:
                 select(Document.id).where(
                     document_available(),
                     Document.relevance.in_(("relevant", "related")),
+                )
+            ),
+        ),
+        or_(
+            KgNode.evidence_clause_id.is_(None),
+            KgNode.evidence_clause_id.in_(
+                select(Clause.id)
+                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(
+                    document_available(),
+                    clause_layout_available(),
+                    Document.relevance.in_(("relevant", "related")),
+                    DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+                    DocumentVersion.review_status != "rejected",
                 )
             ),
         ),
@@ -2126,8 +2557,8 @@ async def _knowledge_overview(session: AsyncSession) -> list[dict]:
         dict(
             **country,
             documents_count=(
-                parsed_docs[country["country_code"]]
-                if country["country_code"] in parsed_docs
+                parsed_docs.get(country["country_code"], 0)
+                if country["country_code"] in has_parsed_cc
                 else discovered_docs.get(country["country_code"], 0)
             ),
             clauses_count=clauses.get(country["country_code"], 0),
@@ -2145,7 +2576,7 @@ async def _knowledge_overview(session: AsyncSession) -> list[dict]:
     ]
 
 
-@user_router.get("/clauses", response_model=list[ClauseTranslationOut])
+@user_router.get("/clauses", response_model=list[PublicClauseTranslationOut])
 async def search_knowledge_clauses(
     _: UserDep,
     session: SessionDep,
@@ -2154,11 +2585,43 @@ async def search_knowledge_clauses(
     only_approved: bool = False,
     include_repealed: bool = False,
     limit: int = Query(default=50, ge=1, le=200),
-) -> list[ClauseTranslationOut]:
+) -> list[PublicClauseTranslationOut]:
     """用户端检索法规条款与对照译文(未复核内容显式带机器翻译待核对标识)。
 
     默认不返回已废止、草案状态的版本（include_repealed=true 可看）。关键词按空白拆成多个词：
     先要求每个词都出现（原文、译文或标题中），一条都没有时放宽为任一词出现，并按命中词数排序。"""
+    from sqlalchemy.orm import aliased
+
+    from app.ingestion.layout_safety import clause_layout_available
+
+    ct_conflict = aliased(ClauseTranslation)
+    no_ambiguous_current = (
+        ~select(ct_conflict.id)
+        .where(
+            ct_conflict.clause_id == ClauseTranslation.clause_id,
+            ct_conflict.id != ClauseTranslation.id,
+            ct_conflict.is_current.is_(True),
+            ct_conflict.quality_check_passed.is_(True),
+            ct_conflict.review_status.in_(("machine_translated", "pending_review", "approved")),
+        )
+        .correlate(ClauseTranslation)
+        .exists()
+    )
+    latest_ver_sq = (
+        select(func.max(DocumentVersion.version_no))
+        .where(
+            DocumentVersion.document_id == Document.id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.review_status != "rejected",
+            *(
+                ()
+                if include_repealed
+                else (DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),)
+            ),
+        )
+        .correlate(Document)
+        .scalar_subquery()
+    )
     base = (
         select(ClauseTranslation, Clause, Document)
         .join(Clause, Clause.id == ClauseTranslation.clause_id)
@@ -2166,11 +2629,18 @@ async def search_knowledge_clauses(
         .join(Document, Document.id == DocumentVersion.document_id)
         .where(
             Document.country_code == country_code.upper(),
+            Document.relevance.notin_(("irrelevant", "out_of_scope")),
             document_available(),
+            clause_layout_available(),
+            DocumentVersion.state == "parsed",
+            DocumentVersion.review_status != "rejected",
+            DocumentVersion.version_no == latest_ver_sq,
             ClauseTranslation.is_current.is_(True),
+            ClauseTranslation.quality_check_passed.is_(True),
             ClauseTranslation.review_status.notin_(
                 ("superseded", "not_translated", "translation_failed", "rejected", "stale")
             ),
+            no_ambiguous_current,
         )
     )
     if not include_repealed:
@@ -2186,6 +2656,9 @@ async def search_knowledge_clauses(
             Document.title.ilike(kw),
         )
 
+    def _to_public(items: list[ClauseTranslationOut]) -> list[PublicClauseTranslationOut]:
+        return [PublicClauseTranslationOut(**it.model_dump(exclude={"engine", "model_name", "prompt_version", "tokens_in", "tokens_out", "duration_ms", "source_context_revision", "source_parse_revision"})) for it in items]
+
     tokens = list((keyword or "").split())[:6]
     if not tokens:
         rows = list(
@@ -2193,7 +2666,7 @@ async def search_knowledge_clauses(
                 await session.execute(base.order_by(Document.title, Clause.ordinal).limit(limit))
             ).all()
         )
-        return await _build_translation_outs(session, rows)
+        return _to_public(await _build_translation_outs(session, rows))
     ordered = base.order_by(Document.title, Clause.ordinal)
     rows = list(
         (await session.execute(ordered.where(*(hit(t) for t in tokens)).limit(limit))).all()
@@ -2210,7 +2683,7 @@ async def search_knowledge_clauses(
             return sum(1 for t in tokens if t.lower() in blob)
 
         rows = sorted(pool, key=lambda r: -matched(r))[:limit]
-    return await _build_translation_outs(session, rows)
+    return _to_public(await _build_translation_outs(session, rows))
 
 
 @user_router.get("/graph", response_model=GraphPayloadOut)
@@ -2275,6 +2748,58 @@ async def get_user_glossary(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def _version_unit_counts(
+    session: AsyncSession, version_id: uuid.UUID, *, is_native_zh: bool = False
+) -> tuple[int, int]:
+    from app.knowledge.library_view import light_rows
+    from app.knowledge.reading import reading_units
+
+    rows_map = await light_rows(session, [version_id])
+    rows = rows_map.get(version_id) or []
+    if not rows:
+        return 0, 0
+    units = reading_units(rows)
+    if is_native_zh:
+        return len(units), len(units)
+    translated_cids = set(
+        (
+            await session.scalars(
+                select(ClauseTranslation.clause_id)
+                .join(Clause, Clause.id == ClauseTranslation.clause_id)
+                .where(
+                    Clause.version_id == version_id,
+                    ClauseTranslation.is_current.is_(True),
+                    ClauseTranslation.quality_check_passed.is_(True),
+                    ClauseTranslation.review_status.notin_(
+                        (
+                            "superseded",
+                            "not_translated",
+                            "translation_failed",
+                            "rejected",
+                            "stale",
+                        )
+                    ),
+                )
+                .group_by(ClauseTranslation.clause_id)
+                .having(func.count(ClauseTranslation.id) == 1)
+            )
+        ).all()
+    )
+    zh_cids = set(
+        (
+            await session.scalars(
+                select(Clause.id).where(
+                    Clause.version_id == version_id, Clause.language.ilike("zh%")
+                )
+            )
+        ).all()
+    )
+    translated_units = sum(
+        1 for u in units if any(c.id in translated_cids or c.id in zh_cids for c in u.rows)
+    )
+    return len(units), translated_units
+
+
 async def _build_regulation_summary(
     session: AsyncSession, doc: Document
 ) -> tuple[RegulationSummaryOut, DocumentVersion | None]:
@@ -2284,7 +2809,10 @@ async def _build_regulation_summary(
         (
             await session.execute(
                 select(DocumentVersion)
-                .where(DocumentVersion.document_id == doc.id)
+                .where(
+                    DocumentVersion.document_id == doc.id,
+                    DocumentVersion.review_status != "rejected",
+                )
                 .order_by(DocumentVersion.version_no.desc())
             )
         )
@@ -2293,7 +2821,14 @@ async def _build_regulation_summary(
     )
     from app.analysis.workflow_engine import country_name_zh
 
-    latest = next((v for v in versions if v.state == "parsed"), versions[0] if versions else None)
+    latest = (
+        next(
+            (v for v in versions if v.state == "parsed" and v.legal_status != "draft"),
+            None,
+        )
+        or next((v for v in versions if v.state == "parsed"), None)
+        or (versions[0] if versions else None)
+    )
     site = await session.get(SourceSite, doc.site_id)
     publisher = site.publisher if site else f"{country_name_zh(doc.country_code)}官方发布机构"
 
@@ -2305,30 +2840,8 @@ async def _build_regulation_summary(
     obl_names: list[str] = []
 
     if latest is not None:
-        from app.knowledge.library_view import articles_in
-
-        clauses_count = await articles_in(session, latest.id)
-        translated_count = int(
-            (
-                await session.execute(
-                    select(func.count(ClauseTranslation.id))
-                    .join(Clause, Clause.id == ClauseTranslation.clause_id)
-                    .where(
-                        Clause.version_id == latest.id,
-                        ClauseTranslation.is_current.is_(True),
-                        ClauseTranslation.review_status.notin_(
-                            (
-                                "superseded",
-                                "not_translated",
-                                "translation_failed",
-                                "rejected",
-                                "stale",
-                            )
-                        ),
-                    )
-                )
-            ).scalar_one()
-            or 0
+        clauses_count, translated_count = await _version_unit_counts(
+            session, latest.id, is_native_zh=str(doc.language or "").lower().startswith("zh")
         )
 
     inst_node = (
@@ -2533,38 +3046,35 @@ async def get_user_regulation_detail(
     if focus_clause_id:
         focus = await session.get(Clause, focus_clause_id)
         focused_version = await session.get(DocumentVersion, focus.version_id) if focus else None
-        if not focused_version or focused_version.document_id != doc.id:
+        if (
+            not focused_version
+            or focused_version.document_id != doc.id
+            or focused_version.review_status == "rejected"
+        ):
             raise HTTPException(404, "条款不属于该法规")
         version_id = focused_version.id
     if version_id:
         selected = await session.get(DocumentVersion, version_id)
-        if not selected or selected.document_id != doc.id or selected.state != "parsed":
+        if (
+            not selected
+            or selected.document_id != doc.id
+            or selected.state != "parsed"
+            or selected.review_status == "rejected"
+        ):
             raise HTTPException(404, "归档版本不存在或尚未完成解析")
         latest = selected
         summary.version_no, summary.legal_status = selected.version_no, selected.legal_status
-        from app.knowledge.library_view import articles_in
-
-        summary.clauses_count = await articles_in(session, selected.id)
-        summary.translated_clauses_count = (
-            await session.scalar(
-                select(func.count(func.distinct(ClauseTranslation.clause_id)))
-                .join(Clause, Clause.id == ClauseTranslation.clause_id)
-                .where(
-                    Clause.version_id == selected.id,
-                    ClauseTranslation.is_current.is_(True),
-                    ClauseTranslation.quality_check_passed.is_(True),
-                    ClauseTranslation.review_status.in_(
-                        ("approved", "machine_translated", "pending_review")
-                    ),
-                )
-            )
-            or 0
+        summary.clauses_count, summary.translated_clauses_count = await _version_unit_counts(
+            session, selected.id
         )
     versions = list(
         (
             await session.scalars(
                 select(DocumentVersion)
-                .where(DocumentVersion.document_id == doc.id)
+                .where(
+                    DocumentVersion.document_id == doc.id,
+                    DocumentVersion.review_status != "rejected",
+                )
                 .order_by(DocumentVersion.version_no.desc())
             )
         ).all()
@@ -2586,6 +3096,23 @@ async def get_user_regulation_detail(
             first_numbered = units[0].head.ordinal + 1  # 全文都没有条号：只有第一段算“前言”
         position = {u.head.id: k + 1 for k, u in enumerate(units)}
         if keyword.strip():
+            from sqlalchemy.orm import aliased
+
+            ct_ambig = aliased(ClauseTranslation)
+            no_ambig_tr = (
+                ~select(ct_ambig.id)
+                .where(
+                    ct_ambig.clause_id == ClauseTranslation.clause_id,
+                    ct_ambig.id != ClauseTranslation.id,
+                    ct_ambig.is_current.is_(True),
+                    ct_ambig.quality_check_passed.is_(True),
+                    ct_ambig.review_status.in_(
+                        ("approved", "machine_translated", "pending_review")
+                    ),
+                )
+                .correlate(ClauseTranslation)
+                .exists()
+            )
             terms = [t for t in keyword.strip().split() if t][:6]
             term_conds = []
             for term in terms:
@@ -2596,6 +3123,7 @@ async def get_user_regulation_detail(
                     ClauseTranslation.review_status.in_(
                         ("approved", "machine_translated", "pending_review")
                     ),
+                    no_ambig_tr,
                     ClauseTranslation.translated_text.ilike(pattern),
                 )
                 term_conds.append(
@@ -2651,7 +3179,19 @@ async def get_user_regulation_detail(
             head = unit.head
             parts = [(c, usable(c)) for c in unit.rows]
             done = [tr for _, tr in parts if tr]
-            if not done:
+            has_ambiguous = any(len(by_clause.get(c.id, [])) > 1 for c in unit.rows)
+            is_zh_unit = str(head.language or doc.language or "").lower().startswith("zh")
+            if is_zh_unit and not done:
+                zh = None
+                state = (
+                    "approved"
+                    if latest.review_status == "approved"
+                    and not any(c.needs_review or c.id in held for c in unit.rows)
+                    else "native_zh"
+                )
+            elif not done and has_ambiguous:
+                zh, state = None, "ambiguous_current"
+            elif not done:
                 zh, state = None, "not_translated"
             else:
                 # 一条由几段组成：每段用自己的中文；某段还没有中文时在那里注明，不拿别段顶替
@@ -2683,10 +3223,17 @@ async def get_user_regulation_detail(
                     translation_status=state,
                     status_badge=_status_badge(state)[1],
                     usable_as_legal_basis=bool(
-                        done
-                        and len(done) == len(parts)
-                        and all(tr.review_status == "approved" for tr in done)
+                        (
+                            is_zh_unit
+                            or (
+                                done
+                                and len(done) == len(parts)
+                                and all(tr.review_status == "approved" for tr in done)
+                            )
+                        )
                         and latest.review_status == "approved"
+                        and latest.legal_status not in NOT_CITABLE_STATUSES
+                        and doc.relevance not in ("irrelevant", "out_of_scope")
                         and not any(c.needs_review or c.id in held for c in unit.rows)
                     ),
                     glossary_hits=[],

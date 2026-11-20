@@ -38,7 +38,7 @@ class RegulatoryDiscovery(Base):
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     document_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("documents.id"), index=True, nullable=True
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), index=True, nullable=True
     )
 
 
@@ -95,13 +95,13 @@ class UpdateImpact(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id"), index=True
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), index=True
     )
     task_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), index=True
+        UUID(as_uuid=True), ForeignKey("analysis_tasks.id", ondelete="CASCADE"), index=True
     )
     report_version_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("report_versions.id")
+        UUID(as_uuid=True), ForeignKey("report_versions.id", ondelete="CASCADE")
     )
     dimension_code: Mapped[str] = mapped_column(String(8))
     change_id: Mapped[uuid.UUID] = mapped_column(
@@ -111,7 +111,7 @@ class UpdateImpact(Base):
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(24), default="open")
     resolved_report_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("report_versions.id")
+        UUID(as_uuid=True), ForeignKey("report_versions.id", ondelete="SET NULL")
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -126,16 +126,16 @@ class UserNotification(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id"), index=True
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), index=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     impact_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("update_impacts.id"), index=True, nullable=True
+        UUID(as_uuid=True), ForeignKey("update_impacts.id", ondelete="CASCADE"), index=True, nullable=True
     )
     task_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("analysis_tasks.id"), index=True, nullable=True
+        UUID(as_uuid=True), ForeignKey("analysis_tasks.id", ondelete="CASCADE"), index=True, nullable=True
     )
     change_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("version_changes.id"), index=True, nullable=True
@@ -151,14 +151,17 @@ class UserNotification(Base):
 
 
 class UserSubscription(Base):
-    """需求 2.3：一个用户订阅哪些法规变化（国家、法规类型、业务领域；一栏不选 = 这一栏不限）。"""
+    """需求 2.3：一个企业订阅哪些法规变化（国家、法规类型、业务领域；一栏不选 = 这一栏不限）。"""
 
     __tablename__ = "user_subscriptions"
+    __table_args__ = (UniqueConstraint("org_id", name="uq_user_subscriptions_org"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
     )
     countries: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
     doc_types: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")

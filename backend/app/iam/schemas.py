@@ -23,7 +23,7 @@ class UserOut(BaseModel):
 
     id: uuid.UUID
     org_id: uuid.UUID | None
-    email: EmailStr
+    email: str
     display_name: str
     role: Role
     is_active: bool
@@ -102,7 +102,7 @@ class PortalExchangeRequest(BaseModel):
 
 class AccountProfileOut(BaseModel):
     id: uuid.UUID
-    email: EmailStr
+    email: str
     display_name: str
     role: Role
     role_zh: str

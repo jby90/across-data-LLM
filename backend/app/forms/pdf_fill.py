@@ -14,6 +14,7 @@ needed, so the form can carry Chinese company names as well as the form's own la
 from __future__ import annotations
 
 import ctypes
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,11 +24,34 @@ import pypdfium2.raw as raw
 from app.ingestion.parsing import _PDFIUM_LOCK
 
 _FONTS_DIR = Path(__file__).resolve().parents[1] / "analysis" / "fonts"
-FONT_PATH = (
-    _FONTS_DIR / "SourceHanSansCN-Medium.ttf"
-    if (_FONTS_DIR / "SourceHanSansCN-Medium.ttf").exists()
-    else _FONTS_DIR / "notosanssc" / "NotoSansSC[wght].ttf"
-)
+
+
+def _resolve_regular_font_path() -> Path:
+    for cand in (
+        Path("/usr/local/share/fonts/cyshuhe/NotoSansSC-Regular.ttf"),
+        _FONTS_DIR / "SourceHanSansCN-Medium.ttf",
+    ):
+        if cand.exists():
+            return cand
+    var_ttf = _FONTS_DIR / "notosanssc" / "NotoSansSC[wght].ttf"
+    cached = Path(tempfile.gettempdir()) / "cyshuhe-fonts-cache" / "NotoSansSC-Regular-400.ttf"
+    if cached.exists() and cached.stat().st_size > 1_000_000:
+        return cached
+    try:
+        from app.analysis.fonts.build_static_faces import build_static_faces
+
+        out_dir = cached.parent
+        build_static_faces(var_ttf.parent, out_dir)
+        reg = out_dir / "NotoSansSC-Regular.ttf"
+        if reg.exists():
+            reg.replace(cached)
+            return cached
+    except Exception:
+        pass
+    return var_ttf
+
+
+FONT_PATH = _resolve_regular_font_path()
 START_SIZE = 9.0
 MIN_SIZE = 5.5
 PAD = 2.0

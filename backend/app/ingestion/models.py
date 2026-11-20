@@ -74,9 +74,6 @@ class Document(Base):
     # 管理员把首次入库、没有公布/施行日期的法规“标记为新法规”：推送给订阅的企业一次（同一部只能标一次）
     news_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     news_marked_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    # 管理员把首次入库、没有公布/施行日期的法规“标记为新法规”：推送给订阅的企业一次（同一部只能标一次）
-    news_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    news_marked_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     # 相关性判定来源: rule(规则初判) / llm(大模型) / manual(人工覆盖,自动流程不得改写)
     relevance_source: Mapped[str] = mapped_column(String(16), default="rule", server_default="rule")
     # 长法规“按业务相关章节入库”：哪一版的哪些部分在范围内（见 app.ingestion.intake_scope）；空 = 整份

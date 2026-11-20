@@ -673,15 +673,30 @@ def replace_official_codes(text: str | None) -> str:
     return _OFFICIAL_CODE_RE.sub(_sub, text)
 
 
+def _scrub_audit_jargon(text: str) -> str:
+    from app.core.jargon import scrub_engineering_jargon
+
+    return scrub_engineering_jargon(
+        text,
+        ocr_zh="版面文字识别",
+        llm_zh="智能分析模型",
+        rag_zh="条文检索增强",
+        json_zh="结构化数据",
+        uuid_zh="唯一标识",
+        pydantic_zh="格式核验",
+        cjk_zh="中文汉字",
+    )
+
+
 def humanize_payload(payload: Any) -> Any:
-    """Recursively replace raw official form codes inside audit ``before``/``after`` JSON views on read."""
+    """Recursively replace raw official form codes and technical jargon inside audit ``before``/``after`` views on read."""
     if payload is None or isinstance(payload, (bool, int, float)):
         return payload
     if isinstance(payload, str):
         fmap = _official_form_names()
         if payload in fmap:
             return fmap[payload]
-        return replace_official_codes(payload)
+        return _scrub_audit_jargon(replace_official_codes(payload))
     if isinstance(payload, list):
         return [humanize_payload(x) for x in payload]
     if isinstance(payload, dict):
@@ -827,6 +842,7 @@ VALUE_ZH = {
     "SA": "沙特阿拉伯", "AE": "阿联酋", "TH": "泰国", "BR": "巴西", "US": "美国", "JP": "日本", "KR": "韩国", "GB": "英国",
     "ID": "印度尼西亚", "MY": "马来西亚", "VN": "越南", "IN": "印度", "AU": "澳大利亚", "CA": "加拿大", "MX": "墨西哥", "ZA": "南非",
     "platform_admin": "超级管理员", "ops_admin": "运维管理员", "org_admin": "企业用户", "member": "企业用户", "viewer": "普通查看者", "reviewer": "已停用账号",
+    "ocr": "版面文字识别", "text_layer": "原文件文字层", "llm": "智能分析模型", "rule": "规则判定", "manual": "人工设定",
     "True": "是", "False": "否", "true": "是", "false": "否",
 }
 
@@ -866,12 +882,12 @@ def fallback_summary(category: str, action: str, method: str, path: str, status:
 def _brief(value: Any, col_or_key: str = "") -> str:
     summarized = _summarize_structured(col_or_key, value)
     if summarized is not None:
-        summarized = replace_official_codes(summarized)
+        summarized = _scrub_audit_jargon(replace_official_codes(summarized))
         return summarized if len(summarized) <= 40 else summarized[:40] + "…"
     text = "" if value is None else str(value)
     fmap = _official_form_names()
     text = fmap.get(text, VALUE_ZH.get(text, text))
-    text = replace_official_codes(text)
+    text = _scrub_audit_jargon(replace_official_codes(text))
     return text if len(text) <= 40 else text[:40] + "…"
 
 
@@ -920,9 +936,10 @@ def humanize(summary: str | None) -> str | None:
     summary = _re.sub(r"(新增|删除|修改)([a-z][a-z_]+)", lambda m: f"{m.group(1)}{TABLE_ZH.get(m.group(2), m.group(2))}", summary)
     summary = replace_official_codes(summary)
     fmap = _official_form_names()
-    return _re.sub(
+    out_s = _re.sub(
         r"“([A-Za-z0-9_]+)”",
         lambda m: f"“{fmap.get(m.group(1), VALUE_ZH.get(m.group(1), m.group(1)))}”",
         summary,
     ).strip(" ：:；;")
+    return _scrub_audit_jargon(out_s)
 

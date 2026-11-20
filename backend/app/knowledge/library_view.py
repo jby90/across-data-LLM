@@ -75,8 +75,16 @@ async def latest_parsed(session: AsyncSession, document_ids: list) -> dict:
     versions = (
         await session.scalars(
             select(DocumentVersion)
-            .where(DocumentVersion.document_id.in_(document_ids), DocumentVersion.state == "parsed")
-            .order_by(DocumentVersion.document_id, DocumentVersion.version_no.desc())
+            .where(
+                DocumentVersion.document_id.in_(document_ids),
+                DocumentVersion.state == "parsed",
+                DocumentVersion.review_status != "rejected",
+            )
+            .order_by(
+                DocumentVersion.document_id,
+                (DocumentVersion.legal_status == "draft").asc(),
+                DocumentVersion.version_no.desc(),
+            )
         )
     ).all()
     out: dict = {}
@@ -85,9 +93,18 @@ async def latest_parsed(session: AsyncSession, document_ids: list) -> dict:
     return out
 
 
-async def library(session: AsyncSession, country_code: str | None = None, *, include_peripheral: bool = False) -> list[Entry]:
+async def library(
+    session: AsyncSession,
+    country_code: str | None = None,
+    *,
+    include_peripheral: bool = False,
+    in_force_only: bool = False,
+) -> list[Entry]:
     """The documents of a country (or of every country) in the user's library. ``include_peripheral``:
-    also the documents kept only for completeness (for a search by name)."""
+    also the documents kept only for completeness (for a search by name). ``in_force_only``: exclude
+    repealed/draft versions (used by country compliance briefings)."""
+    from app.ingestion.models import NOT_CITABLE_STATUSES
+
     stmt = select(Document).where(document_available(), in_scope()).order_by(Document.title)
     if not include_peripheral:
         stmt = stmt.where(or_(Document.business_weight.is_(None), Document.business_weight != "peripheral"))
@@ -100,6 +117,8 @@ async def library(session: AsyncSession, country_code: str | None = None, *, inc
     for d in docs:
         v = latest.get(d.id)
         if v is None or not rows.get(v.id):
+            continue
+        if in_force_only and (v.legal_status or "in_force") in NOT_CITABLE_STATUSES:
             continue
         out.append(Entry(d, v, len(reading_units(rows[v.id]))))
     return out
@@ -200,12 +219,18 @@ def main_law(entries: list[Entry], relations: dict) -> Entry | None:
     articles. The page opens it first and the briefing names it."""
     import re
 
+    from app.ingestion.models import NOT_CITABLE_STATUSES
     from app.knowledge.router import public_doc_type
 
     def side(e: Entry) -> bool:
         return bool(re.search(SIDE_TITLE, f"{e.document.title} {e.document.title_zh or ''}", re.I))
 
-    laws = [e for e in entries if public_doc_type(e.document.document_type, e.document.instrument_kind) == "LAW"]
+    laws = [
+        e
+        for e in entries
+        if public_doc_type(e.document.document_type, e.document.instrument_kind) == "LAW"
+        and (e.version.legal_status or "in_force") not in NOT_CITABLE_STATUSES
+    ]
     # 车辆数据跨境首先是个人数据保护与跨境传输：该类的核心法律优先，其次任一核心法律
     pd_core = [e for e in laws if e.document.business_topic == "personal_data" and e.document.business_weight == "core"]
     core = [e for e in laws if e.document.business_weight == "core"]

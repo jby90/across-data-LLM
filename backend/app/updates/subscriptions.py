@@ -27,7 +27,8 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ingestion.models import Clause, Document, DocumentVersion
+from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
+from app.ingestion.safety import document_available
 from app.knowledge.business_topic import TOPIC_ZH, TOPICS
 from app.updates.models import ChangeAdvice, UserNotification, UserSubscription, VersionChange
 
@@ -81,8 +82,42 @@ def describe(sub: UserSubscription | None) -> str:
     return " · ".join(parts)
 
 
+def _valid_parsed_doc_exists():
+    return (
+        select(DocumentVersion.id)
+        .where(
+            DocumentVersion.document_id == Document.id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            DocumentVersion.review_status != "rejected",
+        )
+        .correlate(Document)
+        .exists()
+    )
+
+
+async def _latest_eligible_version(
+    session: AsyncSession, doc_id: uuid.UUID
+) -> DocumentVersion | None:
+    return await session.scalar(
+        select(DocumentVersion)
+        .where(
+            DocumentVersion.document_id == doc_id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            DocumentVersion.review_status != "rejected",
+        )
+        .order_by(DocumentVersion.version_no.desc())
+        .limit(1)
+    )
+
+
 async def options(session: AsyncSession) -> dict[str, list[dict[str, str]]]:
-    shown = select(Document).where(Document.relevance.in_(SHOWN_RELEVANCE))
+    shown = select(Document).where(
+        Document.relevance.in_(SHOWN_RELEVANCE),
+        document_available(),
+        _valid_parsed_doc_exists(),
+    )
     codes = set((await session.scalars(shown.with_only_columns(Document.country_code).distinct())).all())
     kinds = {(k or "").upper() for k in (await session.scalars(shown.with_only_columns(Document.document_type).distinct())).all()}
     topics = set((await session.scalars(shown.with_only_columns(Document.business_topic).distinct())).all())
@@ -110,11 +145,19 @@ async def _translations(session: AsyncSession, ids: list[uuid.UUID]) -> dict[uui
     rows = (
         await session.execute(
             select(ClauseTranslation.clause_id, ClauseTranslation.translated_text).where(
-                ClauseTranslation.clause_id.in_(ids), ClauseTranslation.is_current.is_(True)
+                ClauseTranslation.clause_id.in_(ids),
+                ClauseTranslation.is_current.is_(True),
+                ClauseTranslation.quality_check_passed.is_(True),
+                ClauseTranslation.review_status.notin_(
+                    ("translation_failed", "not_translated", "rejected", "stale", "superseded")
+                ),
             )
         )
     ).all()
-    return {cid: txt for cid, txt in rows if txt}
+    buckets: dict[uuid.UUID, list[str]] = {}
+    for cid, txt in rows:
+        buckets.setdefault(cid, []).append(txt)
+    return {cid: v[0] for cid, v in buckets.items() if len(v) == 1 and v[0]}
 
 
 def _clip(text: str) -> str:
@@ -180,16 +223,32 @@ async def change_pairs(session: AsyncSession, change: VersionChange) -> list[dic
 
 
 async def _first_clauses(session: AsyncSession, doc: Document, limit: int = 12) -> str:
+    from app.ingestion.layout_safety import clause_layout_available
+    from app.ingestion.models import NOT_CITABLE_STATUSES
+    from app.ingestion.safety import document_is_held
+
+    if doc is None or doc.relevance in ("irrelevant", "out_of_scope") or await document_is_held(session, doc.id):
+        return ""
     version = await session.scalar(
         select(DocumentVersion)
-        .where(DocumentVersion.document_id == doc.id, DocumentVersion.state == "parsed")
+        .where(
+            DocumentVersion.document_id == doc.id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status != "draft",
+            DocumentVersion.review_status != "rejected",
+        )
         .order_by(DocumentVersion.version_no.desc())
         .limit(1)
     )
-    if version is None:
+    if version is None or version.legal_status in NOT_CITABLE_STATUSES:
         return ""
     clauses = (
-        await session.scalars(select(Clause).where(Clause.version_id == version.id).order_by(Clause.ordinal).limit(limit))
+        await session.scalars(
+            select(Clause)
+            .where(Clause.version_id == version.id, clause_layout_available())
+            .order_by(Clause.ordinal)
+            .limit(limit)
+        )
     ).all()
     zh = await _translations(session, [c.id for c in clauses])
     return "\n\n".join(_clip(zh.get(c.id) or c.original_text)[:600] for c in clauses)
@@ -197,28 +256,45 @@ async def _first_clauses(session: AsyncSession, doc: Document, limit: int = 12) 
 
 async def _events_since(session: AsyncSession, since: datetime) -> list[tuple[str, Document, datetime]]:
     """Changes collected since ``since``: (subject, law, when)."""
+    from app.ingestion.models import NOT_CITABLE_STATUSES
+    from app.ingestion.safety import document_available
+
     out: list[tuple[str, Document, datetime]] = []
     rows = (
         await session.execute(
             select(VersionChange, Document)
             .join(Document, Document.id == VersionChange.document_id)
-            .where(VersionChange.detected_at >= since, VersionChange.change_kind == CHANGED_KIND, Document.relevance.in_(SHOWN_RELEVANCE))
+            .where(
+                VersionChange.detected_at >= since,
+                VersionChange.change_kind == CHANGED_KIND,
+                Document.relevance.in_(SHOWN_RELEVANCE),
+                document_available(),
+            )
         )
     ).all()
     for ch, doc in rows:
         if await official_revision(session, ch):
             out.append((f"change:{ch.id}", doc, ch.detected_at))
-    parsed = select(DocumentVersion.id).where(
-        DocumentVersion.document_id == Document.id, DocumentVersion.state == "parsed"
-    ).exists()
-    dated = select(DocumentVersion.id).where(
-        DocumentVersion.document_id == Document.id,
-        (DocumentVersion.effective_date.is_not(None)) | (DocumentVersion.published_date.is_not(None)),
-    ).exists()  # 没有公布、施行日期的（存量法规首次入库）在库里就筛掉；管理员标记过的除外
+    parsed = _valid_parsed_doc_exists()
+    dated = (
+        select(DocumentVersion.id)
+        .where(
+            DocumentVersion.document_id == Document.id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            DocumentVersion.review_status != "rejected",
+            (DocumentVersion.effective_date.is_not(None))
+            | (DocumentVersion.published_date.is_not(None)),
+        )
+        .correlate(Document)
+        .exists()
+    )  # 没有公布、施行日期的（存量法规首次入库）在库里就筛掉；管理员标记过的除外
     docs = (
         await session.scalars(
             select(Document).where(
-                Document.relevance.in_(SHOWN_RELEVANCE), parsed,
+                Document.relevance.in_(SHOWN_RELEVANCE),
+                document_available(),
+                parsed,
                 or_(and_(Document.discovered_at >= since, dated), Document.news_marked_at >= since),
             )
         )
@@ -236,12 +312,12 @@ async def law_day(session: AsyncSession, doc: Document) -> datetime | None:
     either is taken for one already in force before (not news), so it is not pushed."""
     from datetime import UTC, time
 
+    ver = await _latest_eligible_version(session, doc.id)
+    if ver is None:
+        return None
     if doc.news_marked_at is not None:
         return doc.news_marked_at  # 管理员确认是新发布的：按标记的时间推送
-    ver = await session.scalar(
-        select(DocumentVersion).where(DocumentVersion.document_id == doc.id).order_by(DocumentVersion.version_no.desc()).limit(1)
-    )
-    day = ver and (ver.effective_date or ver.published_date)
+    day = ver.effective_date or ver.published_date
     return datetime.combine(day, time(), tzinfo=UTC) if day else None
 
 
@@ -269,7 +345,13 @@ async def amended_base(session: AsyncSession, doc: Document) -> Document | None:
         return None
     cands = (
         await session.scalars(
-            select(Document).where(Document.country_code == doc.country_code, Document.id != doc.id, Document.relevance.in_(SHOWN_RELEVANCE))
+            select(Document).where(
+                Document.country_code == doc.country_code,
+                Document.id != doc.id,
+                Document.relevance.in_(SHOWN_RELEVANCE),
+                document_available(),
+                _valid_parsed_doc_exists(),
+            )
         )
     ).all()
     hits = [c for c in cands if len(_stem(c.title_zh or "")) >= 3 and _stem(c.title_zh or "") in title and not AMENDS.search(c.title_zh or "")]
@@ -278,16 +360,19 @@ async def amended_base(session: AsyncSession, doc: Document) -> Document | None:
 
 async def _entries_of(session: AsyncSession, doc: Document) -> list[str]:
     from app.admission.models import AdmissionEntry
+    from app.admission.router import SHOWN, entry_listed
 
     rows = (
         await session.scalars(
-            select(AdmissionEntry.id).where(
-                AdmissionEntry.country_code == doc.country_code, AdmissionEntry.merged_into.is_(None),
-                AdmissionEntry.review_status != "out_of_scope", AdmissionEntry.profile["law_ids"].astext.contains(str(doc.id)),
+            select(AdmissionEntry).where(
+                AdmissionEntry.country_code == doc.country_code,
+                AdmissionEntry.merged_into.is_(None),
+                AdmissionEntry.review_status.in_(SHOWN),
+                AdmissionEntry.profile["law_ids"].astext.contains(str(doc.id)),
             )
         )
     ).all()
-    return sorted(str(r) for r in rows)
+    return sorted([str(r.id) for r in rows if await entry_listed(session, r)])
 
 
 def _local_day(value: datetime | None) -> str:
@@ -309,8 +394,13 @@ async def batch_of(session: AsyncSession, lead: Document) -> list[Document]:
     others = (
         await session.scalars(
             select(Document).where(
-                Document.country_code == lead.country_code, Document.id != lead.id, Document.relevance.in_(SHOWN_RELEVANCE),
-                Document.discovered_at >= start, Document.discovered_at < start + timedelta(days=1),  # 同一天收录的才算同一批
+                Document.country_code == lead.country_code,
+                Document.id != lead.id,
+                Document.relevance.in_(SHOWN_RELEVANCE),
+                document_available(),
+                _valid_parsed_doc_exists(),
+                Document.discovered_at >= start,
+                Document.discovered_at < start + timedelta(days=1),  # 同一天收录的才算同一批
             )
         )
     ).all()
@@ -328,7 +418,12 @@ async def official_revision(session: AsyncSession, change: VersionChange) -> dic
     """The amendment a revision notice names: the new official version's order number or label and its
     effective (or publication) date. A text change without them is not pushed as a revision."""
     new = await session.get(DocumentVersion, change.new_version_id)
-    if new is None:
+    if (
+        new is None
+        or new.state != "parsed"
+        or new.review_status == "rejected"
+        or new.legal_status in NOT_CITABLE_STATUSES
+    ):
         return None
     ref = (new.official_number or new.version_label or "").strip()
     day = new.effective_date or new.published_date
@@ -405,7 +500,7 @@ async def push(session: AsyncSession, org_id: uuid.UUID) -> bool:
                 title = f"{name}《{names.law_name(str(doc.id), _title(doc))}》新发布"
             parts = []
             for d in batch:
-                ver = await session.scalar(select(DocumentVersion).where(DocumentVersion.document_id == d.id).order_by(DocumentVersion.version_no.desc()).limit(1))
+                ver = await _latest_eligible_version(session, d.id)
                 if ver is not None and ver.effective_date:
                     when_ = f"，{_cn_date(ver.effective_date)}起施行"
                 elif ver is not None and ver.published_date:
@@ -486,12 +581,30 @@ def _flat(t: str) -> str:
 
 
 async def _clauses_with_zh(session: AsyncSession, doc: Document) -> list[tuple[Clause, str]]:
-    version = await session.scalar(
-        select(DocumentVersion).where(DocumentVersion.document_id == doc.id, DocumentVersion.state == "parsed").order_by(DocumentVersion.version_no.desc()).limit(1)
-    )
-    if version is None:
+    from app.ingestion.layout_safety import clause_layout_available
+    from app.ingestion.models import NOT_CITABLE_STATUSES
+    from app.ingestion.safety import document_is_held
+
+    if doc is None or doc.relevance in ("irrelevant", "out_of_scope") or await document_is_held(session, doc.id):
         return []
-    clauses = (await session.scalars(select(Clause).where(Clause.version_id == version.id).order_by(Clause.ordinal))).all()
+    version = await session.scalar(
+        select(DocumentVersion)
+        .where(
+            DocumentVersion.document_id == doc.id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status != "draft",
+            DocumentVersion.review_status != "rejected",
+        )
+        .order_by(DocumentVersion.version_no.desc())
+        .limit(1)
+    )
+    if version is None or version.legal_status in NOT_CITABLE_STATUSES:
+        return []
+    clauses = (
+        await session.scalars(
+            select(Clause).where(Clause.version_id == version.id, clause_layout_available()).order_by(Clause.ordinal)
+        )
+    ).all()
     zh = await _translations(session, [c.id for c in clauses])
     return [(c, zh.get(c.id, "")) for c in clauses]
 
@@ -548,8 +661,17 @@ async def law_context(session: AsyncSession, doc: Document, also: list | None = 
     m = _re.search(r"(\d{4})\s*年\s*第\s*(\d+)\s*号|No\.?\s*\(?(\d+)\)?\s*of\s*(\d{4})", f"{doc.title_zh or ''} {doc.title}")
     if m:
         year, num = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
-        rows = (await session.execute(select(Document.id, Document.title, Document.title_zh).where(
-            Document.country_code == doc.country_code, Document.id != doc.id, Document.relevance.in_(SHOWN_RELEVANCE)))).all()
+        rows = (
+            await session.execute(
+                select(Document.id, Document.title, Document.title_zh).where(
+                    Document.country_code == doc.country_code,
+                    Document.id != doc.id,
+                    Document.relevance.in_(SHOWN_RELEVANCE),
+                    document_available(),
+                    _valid_parsed_doc_exists(),
+                )
+            )
+        ).all()
         amend = [(i, names.law_name(str(i), z or t)) for i, t, z in rows
                  if _re.search(rf"(?<!\d){num}(?!\d)", f"{z or ''} {t}") and year in f"{z or ''} {t}" and _re.search(r"修改|修正|amend|تعديل", f"{z or ''} {t}", _re.I)]
         if amend:
@@ -566,12 +688,20 @@ async def law_context(session: AsyncSession, doc: Document, also: list | None = 
 
     from app.admission.material_kinds import plan_of
     from app.admission.models import AdmissionEntry, AdmissionStep
-    from app.admission.router import display_authority
+    from app.admission.router import SHOWN, display_authority, entry_listed
 
     ids = [str(doc.id), *[str(x) for x in also or []]]
-    entries = (await session.scalars(select(AdmissionEntry).where(
-        AdmissionEntry.country_code == doc.country_code, AdmissionEntry.merged_into.is_(None), AdmissionEntry.review_status != "out_of_scope",
-        or_(*[AdmissionEntry.profile["law_ids"].astext.contains(i) for i in ids])))).all()
+    cand_entries = (
+        await session.scalars(
+            select(AdmissionEntry).where(
+                AdmissionEntry.country_code == doc.country_code,
+                AdmissionEntry.merged_into.is_(None),
+                AdmissionEntry.review_status.in_(SHOWN),
+                or_(*[AdmissionEntry.profile["law_ids"].astext.contains(i) for i in ids]),
+            )
+        )
+    ).all()
+    entries = [e for e in cand_entries if await entry_listed(session, e)]
     if entries:
         out.append("本国依据这部法规的准入事项及受理机构（照这个写，不另起名称）：" + "；".join(f"{e.name_zh}：{display_authority(e.authority_zh or '', e.country_code) or '未写明'}" for e in entries))
         for e in entries:
@@ -600,12 +730,16 @@ async def write_pending(factory=None) -> int:
     _running = True
     from app.analysis.llm import LlmUnavailableError, call_llm_json
     from app.core.db import get_sessionmaker
+    from app.core.redaction import llm_scope
     from app.core.rls import system_scope
 
     factory = factory or get_sessionmaker()
     used = 0
     try:
-        with system_scope("订阅推送：写法规变化的影响说明和整改建议"):
+        with (
+            system_scope("订阅推送：写法规变化的影响说明和整改建议"),
+            llm_scope(session_factory=factory),
+        ):
             async with factory() as session:
                 rows = (await session.scalars(select(ChangeAdvice).where(ChangeAdvice.state == "pending"))).all()
                 for row in rows:
@@ -636,7 +770,7 @@ async def write_pending(factory=None) -> int:
                     )
                     dates = []
                     for m in members:
-                        ver = await session.scalar(select(DocumentVersion).where(DocumentVersion.document_id == m.id).order_by(DocumentVersion.version_no.desc()).limit(1))
+                        ver = await _latest_eligible_version(session, m.id)
                         d = "；".join(x for x in (f"公布日期 {ver.published_date}" if ver and ver.published_date else "", f"施行日期 {ver.effective_date}" if ver and ver.effective_date else "") if x)
                         if d:
                             dates.append(f"《{names.law_name(str(m.id), _title(m))}》{d}")

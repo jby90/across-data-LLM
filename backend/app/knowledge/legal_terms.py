@@ -397,7 +397,7 @@ async def rebuild_library(session, country_code=None, document_id=None):
         spans = definition_spans(clause.original_text, clause.heading or clause.section_path or "")
         if not spans:
             continue
-        translations = list(
+        raw_translations = list(
             (
                 await session.scalars(
                     select(ClauseTranslation)
@@ -413,6 +413,7 @@ async def rebuild_library(session, country_code=None, document_id=None):
                 )
             ).all()
         )
+        translations = raw_translations if len(raw_translations) == 1 else []
         for item in spans:
             code, target = identity(item["source_term"], clause.language, item["quote"])
             fingerprint = sha(
@@ -776,7 +777,7 @@ async def register_reference(
     if (
         version.text_source == "ocr" or clause.ocr_required
     ) and version.review_status != "approved":
-        raise ValueError("OCR 定义需要先核对原文")
+        raise ValueError("扫描识别的术语定义需要先核对原文")
     # Official status comes from an admitted official source site, not an arbitrary URL.
     from app.sources.models import SourceSite
 

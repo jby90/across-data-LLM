@@ -47,7 +47,7 @@ class AdmissionEntry(Base):
     summary_zh: Mapped[str] = mapped_column(Text, default="")
     edge_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     evidence_clause_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("clauses.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("clauses.id", ondelete="SET NULL"), nullable=True
     )
     evidence_quote: Mapped[str] = mapped_column(Text, default="")
     review_status: Mapped[str] = mapped_column(String(24), default="pending_review")
@@ -78,7 +78,7 @@ class AdmissionStep(Base):
     detail_zh: Mapped[str] = mapped_column(Text, default="")
     materials: Mapped[list[str]] = mapped_column(JSONB, default=list)
     evidence_clause_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("clauses.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("clauses.id", ondelete="SET NULL"), nullable=True
     )
     evidence_quote: Mapped[str] = mapped_column(Text, default="")
     edited: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # 管理员手改过：命令不覆盖
@@ -121,7 +121,7 @@ class AdmissionProgress(Base):
         UUID(as_uuid=True), ForeignKey("admission_projects.id", ondelete="CASCADE"), index=True
     )
     step_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("admission_steps.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("admission_steps.id", ondelete="SET NULL"), nullable=True
     )
     seq: Mapped[int] = mapped_column(Integer)
     title_zh: Mapped[str] = mapped_column(String(256))

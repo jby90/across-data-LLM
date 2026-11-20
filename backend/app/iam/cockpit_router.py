@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import and_, not_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.workflow_engine import country_name_zh
@@ -34,7 +34,7 @@ async def cockpit_overview(
     now = datetime.now(UTC)
     seven_days_ago = now - timedelta(days=7)
 
-    # 1. 各国有效法规数（取每部法规最新修订版，统计相关性在范围内且现行有效的法规）
+    # 1. 各国有效法规数（取每部法规最新非草案、未驳回修订版，统计相关性在范围内且现行有效的法规）
     doc_rows = (
         await session.execute(
             text(
@@ -43,6 +43,9 @@ async def cockpit_overview(
                     SELECT DISTINCT ON (document_id)
                            id, document_id, legal_status
                     FROM document_versions
+                    WHERE state = 'parsed'
+                      AND review_status <> 'rejected'
+                      AND coalesce(legal_status, 'in_force') <> 'draft'
                     ORDER BY document_id, version_no DESC, parse_revision DESC
                 )
                 SELECT d.country_code, count(DISTINCT d.id) AS doc_cnt
@@ -50,20 +53,20 @@ async def cockpit_overview(
                 JOIN latest_dv dv ON dv.document_id = d.id
                 WHERE d.relevance IN ('relevant', 'related')
                   AND coalesce(dv.legal_status, 'in_force') NOT IN ('repealed', 'draft')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM knowledge_change_proposals p
+                      WHERE p.target_type = 'documents'
+                        AND p.target_id = d.id
+                        AND p.status IN ('pending_review', 'approved')
+                        AND coalesce((p.payload->>'safety_hold')::boolean, false) = true
+                  )
                 GROUP BY d.country_code
                 """
             )
         )
     ).all()
     docs_by_cc = {r[0]: int(r[1]) for r in doc_rows if r[0]}
-    laws_total = int(
-        (
-            await session.execute(
-                text("SELECT count(*) FROM documents WHERE relevance IN ('relevant', 'related')")
-            )
-        ).scalar_one()
-        or 0
-    )
+    laws_total = sum(docs_by_cc.values())
     laws_archived_total = int(
         (await session.execute(text("SELECT count(*) FROM documents"))).scalar_one() or 0
     )
@@ -77,25 +80,60 @@ async def cockpit_overview(
                     SELECT DISTINCT ON (document_id)
                            id, document_id, legal_status
                     FROM document_versions
+                    WHERE state = 'parsed'
+                      AND review_status <> 'rejected'
+                      AND coalesce(legal_status, 'in_force') <> 'draft'
                     ORDER BY document_id, version_no DESC, parse_revision DESC
+                ),
+                valid_tr AS (
+                    SELECT clause_id,
+                           max(review_status) AS review_status
+                    FROM clause_translations
+                    WHERE is_current = true
+                      AND quality_check_passed = true
+                      AND review_status IN ('approved', 'machine_translated', 'pending_review')
+                    GROUP BY clause_id
+                    HAVING count(*) = 1
                 )
                 SELECT d.country_code,
                        d.language,
-                       count(c.id) AS total_clauses,
-                       count(ct.id) FILTER (
-                           WHERE ct.review_status IN (
-                               'approved', 'machine_translated', 'pending_review'
-                           )
+                       count(DISTINCT c.id) AS total_clauses,
+                       count(DISTINCT c.id) FILTER (
+                           WHERE ct.review_status IS NOT NULL
                        ) AS translated_clauses,
-                       count(ct.id) FILTER (
+                       count(DISTINCT c.id) FILTER (
                            WHERE ct.review_status = 'approved'
                        ) AS approved_clauses
                 FROM clauses c
                 JOIN latest_dv dv ON dv.id = c.version_id
                 JOIN documents d ON d.id = dv.document_id
-                LEFT JOIN clause_translations ct ON ct.clause_id = c.id AND ct.is_current = true
+                LEFT JOIN valid_tr ct ON ct.clause_id = c.id
                 WHERE d.relevance IN ('relevant', 'related')
                   AND coalesce(dv.legal_status, 'in_force') NOT IN ('repealed', 'draft')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM knowledge_change_proposals p
+                      WHERE p.target_type = 'documents'
+                        AND p.target_id = d.id
+                        AND p.status IN ('pending_review', 'approved')
+                        AND coalesce((p.payload->>'safety_hold')::boolean, false) = true
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM knowledge_change_proposals p
+                      WHERE p.target_type = 'clauses'
+                        AND p.status IN ('pending_review', 'approved')
+                        AND p.payload->'source_parse_revision'->>'scope' = 'whole_source_page'
+                        AND (
+                          p.target_id = c.id
+                          OR (
+                            p.payload->'source_parse_revision'->>'version_id'
+                              = c.version_id::text
+                            AND (p.payload->'source_parse_revision'->>'page_number')::int
+                              >= c.page_start
+                            AND (p.payload->'source_parse_revision'->>'page_number')::int
+                              <= c.page_end
+                          )
+                        )
+                  )
                 GROUP BY d.country_code, d.language
                 """
             )
@@ -117,7 +155,8 @@ async def cockpit_overview(
     # 3. 知识图谱六要素节点与语义关系（与 _build_graph_payload 完全同源过滤）
     from sqlalchemy import func, or_
 
-    from app.ingestion.models import Document
+    from app.ingestion.layout_safety import clause_layout_available
+    from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
     from app.ingestion.safety import document_available
     from app.knowledge.graph_evidence import active_edge_filters
     from app.knowledge.models import KgEdge, KgNode
@@ -131,6 +170,21 @@ async def cockpit_overview(
                 select(Document.id).where(
                     document_available(),
                     Document.relevance.in_(("relevant", "related")),
+                )
+            ),
+        ),
+        or_(
+            KgNode.evidence_clause_id.is_(None),
+            KgNode.evidence_clause_id.in_(
+                select(Clause.id)
+                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(
+                    document_available(),
+                    clause_layout_available(),
+                    Document.relevance.in_(("relevant", "related")),
+                    DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+                    DocumentVersion.review_status != "rejected",
                 )
             ),
         ),
@@ -206,12 +260,12 @@ async def cockpit_overview(
     }
     whitepapers_outdated = 0
     if wp_by_cc:
-        from app.knowledge.whitepaper_router import known_hash
+        from app.knowledge.whitepaper_router import _hash_cache
 
         for wp_cc, wp_meta in wp_by_cc.items():
             if wp_cc in ("CN", "ZZ", "INTL") or not wp_meta["ready"]:
                 continue
-            cur_hash = await known_hash(session, wp_cc)
+            cur_hash = _hash_cache.get(wp_cc)
             if cur_hash is not None and cur_hash != wp_meta["source_hash"]:
                 whitepapers_outdated += 1
 
@@ -261,11 +315,9 @@ async def cockpit_overview(
         if cc:
             forms_by_cc[cc] = forms_by_cc.get(cc, 0) + 1
 
-    # 7. 官方采集站点与待处理状态（与管理端首页 /sites 同源口径）
-    single_file = and_(SourceSite.strategy == "DIRECT", SourceSite.enabled.is_(False))
-    monitor_sites = list(
-        (await session.execute(select(SourceSite).where(not_(single_file)))).scalars().all()
-    )
+    # 7. 官方采集站点与待处理状态（仅统计已启用的在用监测站点，确保分子分母同源）
+    site_rows = await session.execute(select(SourceSite).where(SourceSite.enabled.is_(True)))
+    monitor_sites = list(site_rows.scalars().all())
     sites_total_by_cc: dict[str, int] = {}
     sites_attention_by_cc: dict[str, int] = {}
     attention_sites_total = 0
@@ -307,19 +359,38 @@ async def cockpit_overview(
                 LEFT JOIN organizations o ON o.id = u.org_id
                 WHERE u.is_active = true
                   AND u.role IN ('platform_admin', 'ops_admin', 'member', 'viewer')
-                  AND (u.org_id IS NULL OR o.is_active = true)
+                  AND (u.org_id IS NULL OR (o.is_active = true AND o.name NOT LIKE :trial_pat))
                 GROUP BY u.role, u.signup_source
                 """
-            )
+            ),
+            {"trial_pat": trial_pat},
         )
     ).all()
+    trial_visitors = int(
+        (
+            await session.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM users u
+                    JOIN organizations o ON o.id = u.org_id
+                    WHERE u.is_active = true
+                      AND o.is_active = true
+                      AND o.name LIKE :trial_pat
+                    """
+                ),
+                {"trial_pat": trial_pat},
+            )
+        ).scalar_one()
+        or 0
+    )
     role_counts = {"platform_admin": 0, "ops_admin": 0, "member": 0, "viewer": 0}
     portal_users = 0
     for r_name, src, cnt in user_role_rows:
         c = int(cnt or 0)
         if r_name in role_counts:
             role_counts[r_name] += c
-        if src == "portal":
+        if src == "portal" and r_name in ("member", "viewer"):
             portal_users += c
 
     doc_task_rows = (
@@ -428,6 +499,8 @@ async def cockpit_overview(
                     "WHERE t.kind IN ('advice', 'chat') "
                     "AND t.archived_at IS NULL "
                     "AND coalesce((t.facts_json->>'_project_side')::boolean, false) = false "
+                    "AND coalesce(t.facts_json->>'_viewer_private', '') = '' "
+                    "AND coalesce(t.facts_json->>'_doc_project', '') = '' "
                     "AND o.is_active = true "
                     "AND o.name NOT LIKE :trial_pat"
                 ),
@@ -440,7 +513,22 @@ async def cockpit_overview(
     pending_updates = int(
         (
             await session.execute(
-                text("SELECT count(*) FROM update_impacts WHERE state = 'open'")
+                text(
+                    """
+                    SELECT count(*) FROM (
+                        SELECT ui.task_id, ui.change_id
+                        FROM update_impacts ui
+                        LEFT JOIN organizations o ON o.id = ui.org_id
+                        WHERE ui.state = 'open'
+                          AND (
+                            ui.org_id IS NULL
+                            OR (o.is_active = true AND o.name NOT LIKE :trial_pat)
+                          )
+                        GROUP BY ui.task_id, ui.change_id
+                    ) g
+                    """
+                ),
+                {"trial_pat": trial_pat},
             )
         ).scalar_one()
         or 0
@@ -597,6 +685,7 @@ async def cockpit_overview(
             "ordinary_viewers": role_counts["viewer"],
             "portal_onboarded": portal_users,
             "portal_viewers": portal_users,
+            "trial_visitors": trial_visitors,
         },
         "operations": {
             "monitor_sites_total": len(monitor_sites),

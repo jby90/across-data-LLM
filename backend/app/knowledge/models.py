@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -206,6 +207,11 @@ class ClauseTranslation(Base):
             "'pending_review','approved','rejected','stale','superseded'"
             ")",
             name="ck_translations_review_status",
+        ),
+        Index(
+            "ix_clause_translations_current",
+            "clause_id",
+            postgresql_where=text("is_current = true"),
         ),
     )
 

@@ -143,7 +143,12 @@ async def country_page(country_code: str, user: UserDep, session: SessionDep) ->
     stamps = [t for t in stamps if t is not None]
     last = max(stamps) if stamps else None
     tz_cn = timezone(timedelta(hours=8))
-    return {**out, "updated": last.astimezone(tz_cn).date().isoformat() if last else ""}
+    has_wp = (await wp.latest(session, code)) is not None
+    return {
+        **out,
+        "updated": last.astimezone(tz_cn).date().isoformat() if last else "",
+        "has_whitepaper": has_wp,
+    }
 
 
 async def _export(country_code: str, session: AsyncSession, kind: str) -> Response:
@@ -177,8 +182,10 @@ async def export_docx(country_code: str, user: UserDep, session: SessionDep) -> 
 
 
 async def _generate(factory: async_sessionmaker, code: str) -> None:
+    from app.core.redaction import llm_scope
+
     try:
-        with system_scope("whitepaper"):
+        with system_scope("whitepaper"), llm_scope(session_factory=factory):
             async with factory() as session:
                 blocks, meta = await wp.write_whitepaper(session, code)
                 await wp.save(session, code, blocks, meta)
@@ -208,8 +215,10 @@ class SyncDimensionsIn(BaseModel):
 
 
 async def _sync_dims_job(factory: async_sessionmaker, code: str, dims: list[str]) -> None:
+    from app.core.redaction import llm_scope
+
     try:
-        with system_scope("whitepaper-sync"):
+        with system_scope("whitepaper-sync"), llm_scope(session_factory=factory):
             async with factory() as session:
                 blocks, meta = await wp.sync_dimensions(session, code, dims)
                 await wp.save(session, code, blocks, meta)

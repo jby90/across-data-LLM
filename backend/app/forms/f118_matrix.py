@@ -255,7 +255,10 @@ def clean(matrix: dict, raw: Any) -> dict[str, Any]:
             return [o for o in options if o in given] if isinstance(given, list) else []
 
         def text(name: str, limit: int, value=value) -> str:
-            return " ".join(str(value.get(name) or "").split())[:limit]
+            import re as _re
+
+            cleaned = _re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]", "", str(value.get(name) or ""))
+            return " ".join(cleaned.split())[:limit]
 
         out[rid] = {
             "on": True,
@@ -295,7 +298,12 @@ def apply(matrix: dict, answers: dict[str, Any]) -> tuple[dict[str, str], set[st
                 # “其他来源”“其他接收方”印了两行：第一行写不下的接着写到续行
                 first, rest = split_line(v[name], LINE_CHARS) if row.get(key + "2") else (v[name], "")
                 texts[row[key]] = first
-                described[row[key]] = {"id": f"matrix/{row['id']}", "label_zh": f"{row['label_zh']}：{_FIELD_ZH[name]}", "max_chars": None}
+                described[row[key]] = {
+                    "id": f"matrix/{row['id']}",
+                    "label_zh": f"{row['label_zh']}：{_FIELD_ZH[name]}",
+                    "label_fr": f"{row['label_fr']} — {_FIELD_FR[name]}",
+                    "max_chars": None,
+                }
                 if rest:
                     texts[row[key + "2"]] = rest
                     described[row[key + "2"]] = described[row[key]]
@@ -336,6 +344,15 @@ def split_line(text: str, n: int) -> tuple[str, str]:
 _FIELD_ZH = {
     "persons_other": "其他人群", "origin_other": "其他来源", "recipients_other": "其他接收方", "access_other": "其他部门",
     "purpose": "处理目的", "duration": "保存期限", "label_other": "其他类别名称",
+}
+_FIELD_FR = {
+    "persons_other": "Personnes concernées (autre)",
+    "origin_other": "Origine des données (autre)",
+    "recipients_other": "Destinataires (autre)",
+    "access_other": "Services habilités (autre)",
+    "purpose": "Finalité du traitement",
+    "duration": "Durée de conservation",
+    "label_other": "Autre catégorie",
 }
 
 

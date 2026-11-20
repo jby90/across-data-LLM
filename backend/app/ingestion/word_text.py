@@ -35,11 +35,36 @@ def is_doc(content: bytes) -> bool:
     return content.startswith(OLE_MAGIC)
 
 
+_MAX_DOCX_XML_BYTES = 32 * 1024 * 1024
+_MAX_DOCX_TOTAL_UNCOMPRESSED = 64 * 1024 * 1024
+
+
 def docx_paragraphs(content: bytes) -> list[str]:
+    import zlib
+
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as z:
-            root = ElementTree.fromstring(z.read("word/document.xml"))
-    except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as exc:
+            infos = z.infolist()
+            if len(infos) > 2000 or sum(i.file_size for i in infos) > _MAX_DOCX_TOTAL_UNCOMPRESSED:
+                raise WordError("Word 文件解压后体积超出安全上限")
+            doc_info = z.getinfo("word/document.xml")
+            if doc_info.file_size > _MAX_DOCX_XML_BYTES:
+                raise WordError("Word 文件正文体积超出安全上限")
+            with z.open(doc_info) as fh:
+                raw_xml = fh.read(_MAX_DOCX_XML_BYTES + 1)
+            if len(raw_xml) > _MAX_DOCX_XML_BYTES:
+                raise WordError("Word 文件正文体积超出安全上限")
+            root = ElementTree.fromstring(raw_xml)
+    except (
+        zipfile.BadZipFile,
+        KeyError,
+        ElementTree.ParseError,
+        zlib.error,
+        RuntimeError,
+        EOFError,
+        UnicodeDecodeError,
+        ValueError,
+    ) as exc:
         raise WordError("无法读取 Word 文件") from exc
     out: list[str] = []
     for p in root.iter(f"{_W}p"):
@@ -64,36 +89,40 @@ def _doc_text(content: bytes) -> str:
         raise WordError("缺少读取 .doc 的组件") from exc
     try:
         ole = olefile.OleFileIO(io.BytesIO(content))
-    except OSError as exc:
+        with ole:
+            word = ole.openstream("WordDocument").read()
+            flags = struct.unpack_from("<H", word, 0x0A)[0]
+            table_name = "1Table" if flags & 0x0200 else "0Table"
+            table = ole.openstream(table_name).read()
+            fc_clx = struct.unpack_from("<I", word, 0x01A2)[0]
+            lcb_clx = struct.unpack_from("<I", word, 0x01A6)[0]
+        clx = table[fc_clx : fc_clx + lcb_clx]
+        pos = 0
+        while pos < len(clx) and clx[pos] == 1:  # skip property modifiers
+            pos += 3 + struct.unpack_from("<H", clx, pos + 1)[0]
+        if pos >= len(clx) or clx[pos] != 2:
+            raise WordError("Word 文件的文字结构无法识别")
+        size = struct.unpack_from("<I", clx, pos + 1)[0]
+        plc = clx[pos + 5 : pos + 5 + size]
+        pieces = (size - 4) // 12
+        if pieces < 0:
+            raise WordError("Word 文件的文字结构无法识别")
+        cps = struct.unpack_from(f"<{pieces + 1}I", plc, 0)
+        chunks: list[str] = []
+        for i in range(pieces):
+            fc_raw = struct.unpack_from("<I", plc, 4 * (pieces + 1) + 8 * i + 2)[0]
+            count = cps[i + 1] - cps[i]
+            if fc_raw & 0x40000000:  # compressed: one byte per character (Windows-1252)
+                start = (fc_raw & 0x3FFFFFFF) // 2
+                chunks.append(word[start : start + count].decode("cp1252", "replace"))
+            else:
+                start = fc_raw & 0x3FFFFFFF
+                chunks.append(word[start : start + 2 * count].decode("utf-16-le", "replace"))
+        return "".join(chunks)
+    except WordError:
+        raise
+    except (OSError, struct.error, IndexError, ValueError, ZeroDivisionError) as exc:
         raise WordError("无法读取 Word 文件") from exc
-    with ole:
-        word = ole.openstream("WordDocument").read()
-        flags = struct.unpack_from("<H", word, 0x0A)[0]
-        table_name = "1Table" if flags & 0x0200 else "0Table"
-        table = ole.openstream(table_name).read()
-        fc_clx = struct.unpack_from("<I", word, 0x01A2)[0]
-        lcb_clx = struct.unpack_from("<I", word, 0x01A6)[0]
-    clx = table[fc_clx : fc_clx + lcb_clx]
-    pos = 0
-    while pos < len(clx) and clx[pos] == 1:  # skip property modifiers
-        pos += 3 + struct.unpack_from("<H", clx, pos + 1)[0]
-    if pos >= len(clx) or clx[pos] != 2:
-        raise WordError("Word 文件的文字结构无法识别")
-    size = struct.unpack_from("<I", clx, pos + 1)[0]
-    plc = clx[pos + 5 : pos + 5 + size]
-    pieces = (size - 4) // 12
-    cps = struct.unpack_from(f"<{pieces + 1}I", plc, 0)
-    chunks: list[str] = []
-    for i in range(pieces):
-        fc_raw = struct.unpack_from("<I", plc, 4 * (pieces + 1) + 8 * i + 2)[0]
-        count = cps[i + 1] - cps[i]
-        if fc_raw & 0x40000000:  # compressed: one byte per character (Windows-1252)
-            start = (fc_raw & 0x3FFFFFFF) // 2
-            chunks.append(word[start : start + count].decode("cp1252", "replace"))
-        else:
-            start = fc_raw & 0x3FFFFFFF
-            chunks.append(word[start : start + 2 * count].decode("utf-16-le", "replace"))
-    return "".join(chunks)
 
 
 def doc_paragraphs(content: bytes) -> list[str]:

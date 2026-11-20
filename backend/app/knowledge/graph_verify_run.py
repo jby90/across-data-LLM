@@ -92,11 +92,12 @@ async def _write(sf, kind: str, item_id, result: dict) -> None:
         obj = await s.get(model, item_id)
         if obj is None or obj.review_status != "pending_review" or obj.verify_state is not None:
             return  # 这期间被人处理过或已核验：不覆盖
+        if state == "retired":
+            snapshot(s, obj, "before_auto_verification_retire")
         obj.verify_state = state
         obj.verify_note = (result["note"] or "")[:600] or None
         obj.verified_at = datetime.now(UTC)
         if state == "retired":
-            snapshot(s, obj, "before_auto_verification_retire")
             obj.review_status = "stale"
             if kind == "node":
                 obj.attributes = {

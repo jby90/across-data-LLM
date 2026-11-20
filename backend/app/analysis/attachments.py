@@ -117,15 +117,40 @@ def _pdf_text(data: bytes) -> tuple[str, int]:
             pdf.close()
 
 
+_MAX_DOCX_XML_BYTES = 32 * 1024 * 1024
+_MAX_DOCX_TOTAL_UNCOMPRESSED = 64 * 1024 * 1024
+
+
 def _docx_text(data: bytes) -> tuple[str, int]:
+    import zlib
+
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            xml = zf.read("word/document.xml")
-    except (zipfile.BadZipFile, KeyError) as exc:
-        raise UploadError("这个 Word 文件打不开（请确认是 .docx，不是旧版 .doc）") from exc
+            infos = zf.infolist()
+            if len(infos) > 2000 or sum(i.file_size for i in infos) > _MAX_DOCX_TOTAL_UNCOMPRESSED:
+                raise UploadError("Word 文件解压后体积超出安全上限，请拆分精简后再上传")
+            doc_info = zf.getinfo("word/document.xml")
+            if doc_info.file_size > _MAX_DOCX_XML_BYTES:
+                raise UploadError("Word 文件正文体积超出安全上限，请拆分精简后再上传")
+            with zf.open(doc_info) as fh:
+                xml = fh.read(_MAX_DOCX_XML_BYTES + 1)
+            if len(xml) > _MAX_DOCX_XML_BYTES:
+                raise UploadError("Word 文件正文体积超出安全上限，请拆分精简后再上传")
+        root = ElementTree.fromstring(xml)
+    except (
+        zipfile.BadZipFile,
+        KeyError,
+        ElementTree.ParseError,
+        zlib.error,
+        RuntimeError,
+        EOFError,
+        UnicodeDecodeError,
+        ValueError,
+    ) as exc:
+        raise UploadError("这个 Word 文件内容已损坏或格式不支持（请上传完好的 .docx 文件）") from exc
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     paragraphs = []
-    for p in ElementTree.fromstring(xml).iter(ns + "p"):
+    for p in root.iter(ns + "p"):
         paragraphs.append("".join(t.text or "" for t in p.iter(ns + "t")))
     return "\n".join(paragraphs), 0
 
@@ -146,7 +171,8 @@ def extract(filename: str, data: bytes) -> tuple[str, int, bool, str]:
                 continue
         else:
             raise UploadError("文本文件的编码无法识别，请另存为 UTF-8 后再上传")
-    text = re.sub(r"[ \t ]+", " ", text.replace("\r\n", "\n")).strip()
+    text = re.sub(r"[\x00\ud800-\udfff]", "", text)
+    text = re.sub(r"[ \t\xa0]+", " ", text.replace("\r\n", "\n")).strip()
     note = ""
     if ext == ".pdf" and pages > MAX_PAGES:
         note = f"文件共 {pages} 页，只读取了前 {MAX_PAGES} 页。"

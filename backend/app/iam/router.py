@@ -105,6 +105,8 @@ async def portal_exchange(
         user, token = await service.exchange_portal_ticket(session, ticket=body.ticket)
     except service.AuthError as e:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(e) or "门户登录凭证无效") from None
+    except service.ConflictError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from None
     except service.RuleError as e:
         raise HTTPException(422, str(e)) from None
     request.state.audit_email = user.email
@@ -199,6 +201,8 @@ async def create_org(
 ):
     try:
         return await service.create_org(session, body.name)
+    except service.RuleError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from None
     except service.ConflictError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from None
 
@@ -235,6 +239,8 @@ async def update_org(
         clean = service.full_name(body.name)
         if len(clean) < 2:
             raise HTTPException(422, "请填写公司全称")
+        if service.is_trial_org_name(clean):
+            raise HTTPException(422, "企业名称不可包含系统体验空间保留标识")
         dup = (
             await session.execute(
                 select(Organization.id).where(Organization.name == clean, Organization.id != org.id)
@@ -247,7 +253,13 @@ async def update_org(
         org.is_active = body.is_active
     after = {"name": org.name, "is_active": org.is_active}
     set_detail(request, summary=f"修改企业“{org.name}”信息或启用状态", before=before, after=after)
-    await session.commit()
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "企业名称已存在") from None
     return org
 
 
@@ -255,7 +267,7 @@ async def _save_redaction_terms(session, org_id, terms, actor_id):
     from app.knowledge.models import KnowledgeAuditRecord
 
     org = await session.get(Organization, org_id)
-    if org is None:
+    if org is None or service.is_trial_org_name(org.name):
         raise HTTPException(404, "企业不存在")
     payload = {"before": org.llm_redaction_terms or [], "after": terms}
     session.add(
@@ -310,6 +322,9 @@ async def update_user(
     user = await session.get(User, user_id)
     if user is None or user.role not in {r.value for r in Role}:
         raise HTTPException(404, "账号不存在")
+    target_org = await session.get(Organization, user.org_id) if user.org_id else None
+    if target_org is not None and service.is_trial_org_name(target_org.name):
+        raise HTTPException(403, "个人体验空间账号受隔离保护，不支持后台变更角色或权限")
     if body.role is not None:
         same_side = ADMIN_ROLES if Role(user.role) in ADMIN_ROLES else USER_ROLES
         if body.role not in same_side:

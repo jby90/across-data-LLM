@@ -20,7 +20,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _U = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-_SKIP = {"audit_logs", "knowledge_audit_records", "llm_call_audit"}
+_SKIP = {
+    "audit_logs",
+    "knowledge_audit_records",
+    "llm_call_audit",
+    "agent_workflow_configs",
+    "source_fetch_observations",
+    "version_changes",
+}
 _KEYS = ("clause_id", "evidence_clause_id")
 _CACHE: dict[str, tuple[float, int]] = {}
 

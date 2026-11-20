@@ -75,7 +75,7 @@ _PLACEHOLDER_BY_LANG: dict[str, str] = {
 }
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-_CJK_BRACKET_RE = re.compile(r"[【】《》]")
+_CJK_BRACKET_RE = re.compile(r"[【】《》（）\u3001\u3002\uff0c\uff1b\uff1a\uff01\uff1f]")
 _JA_CHINESE_LEAK_RE = re.compile(r"待补充|待企业填写|中文工作稿|受理机构要求以|本申请书及随附材料|愿意承担相应法律责任")
 _WORKING_NOTICE_RE = re.compile(r"^受理机构要求以.+提交：本稿供企业核对内容")
 _WORKING_SUFFIX_RE = re.compile(r"[（(]中文工作稿[^）)]*[）)]")
@@ -86,29 +86,41 @@ _CODE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9./_+-]*\d[A-Za-z0-9./_+-]*")
 
 
 def _match_lang_text(raw: str) -> tuple[str, str, str] | None:
-    cleaned = (raw or "").removeprefix("按官方表格：").strip()
+    cleaned = re.sub(r"[（(]按官方表格[）)]", "", (raw or "").removeprefix("按官方表格：")).strip()
     if not cleaned or cleaned in ("待核实", "条文未写明", "不适用"):
         return None
     has_foreign = any(pat.search(cleaned) for pat, _ in _LANG_PATTERNS)
     if re.search(r"中文|汉语", cleaned) and not has_foreign:
         return None
-    primary = re.split(r"[；;，,/、]|或|和|及", cleaned)[0].strip()
-    for target in (primary, cleaned):
+    no_paren = re.sub(r"[（(][^）)]*[）)]", "", cleaned).strip()
+    primary = re.split(r"[；;，,/、]|或|和|及", no_paren or cleaned)[0].strip()
+    for target in (primary, no_paren, cleaned):
+        if not target:
+            continue
+        best: tuple[int, str] | None = None
         for pat, code in _LANG_PATTERNS:
-            if pat.search(target):
-                return _LANG_BY_CODE[code]
+            m = pat.search(target)
+            if m and (best is None or m.start() < best[0]):
+                best = (m.start(), code)
+        if best is not None:
+            return _LANG_BY_CODE[best[1]]
     return None
 
 
 async def resolve_submission_language(
     session: AsyncSession, entry: AdmissionEntry | None, profile_lang: str = ""
 ) -> tuple[str, str, str] | None:
-    """Resolve ``(lang_code, lang_zh, lang_en)`` dynamically from item profile, basis clause,
-    or target country's statutory corpus language. Returns ``None`` if Chinese is accepted."""
+    """Resolve ``(lang_code, lang_zh, lang_en)`` dynamically from item profile, official form
+    language, basis clause, or target country's statutory corpus language. Returns ``None`` if
+    Chinese is accepted."""
     if entry is None:
         return None
     raw = profile_lang or str((entry.profile or {}).get("language") or "")
-    cleaned = raw.removeprefix("按官方表格：").strip()
+    if not raw or raw in ("待核实", "条文未写明", "不适用"):
+        from app.admission.router import entry_forms, entry_profile
+
+        raw = str(entry_profile(entry, entry_forms(entry)).get("language") or raw)
+    cleaned = re.sub(r"[（(]按官方表格[）)]", "", raw.removeprefix("按官方表格：")).strip()
     if re.search(r"中文|汉语", cleaned) and not any(pat.search(cleaned) for pat, _ in _LANG_PATTERNS):
         return None
     direct = _match_lang_text(raw)
@@ -354,7 +366,9 @@ def _build_messages(
         f"table `head` column count and `rows` dimensions as the input.\n"
         f"2. Zero Chinese characters (`\\u4e00-\\u9fff`) and zero Chinese brackets (`【】《》`) may remain "
         f"anywhere in the output (including titles, headings, law names, attached document names, declaration, "
-        f"and signature block).\n"
+        f"and signature block). Translate or transliterate EVERY Chinese company name (e.g. '...有限公司'), "
+        f"person name, address, and parenthetical Chinese note into formal {lang_en} — NEVER retain Chinese "
+        f"characters in parentheses after a Latin/Arabic name, and use ASCII parentheses `()`.\n"
         f"3. Convert unfilled Chinese placeholders such as `【待补充：…】` or `【待企业填写】` into clean "
         f"square-bracketed {lang_en} placeholders like `{placeholder_example}`, and convert blank date "
         f"`年 月 日` into `____ / ____ / ________`.\n"
@@ -391,12 +405,15 @@ async def _translate_block_slice(
     last_issues: list[str] = []
     replaced_org = False
 
-    for _attempt in range(2):
+    for _attempt in range(3):
         messages = _build_messages(slice_blocks, lang_code, lang_en, authority_hint, prior_issues)
         try:
             res = await call_llm_json(messages, temperature=0.1, max_tokens=8192)
         except LlmUnavailableError as exc:
-            if "output_truncated" in str(exc) and len(slice_blocks) > 1:
+            is_trunc = "truncated" in str(exc) or "截断" in str(exc) or any(
+                f.get("reason") == "output_truncated" for f in getattr(exc, "failures", [])
+            )
+            if is_trunc and len(slice_blocks) > 1:
                 mid = len(slice_blocks) // 2
                 left_b, left_r = await _translate_block_slice(
                     slice_blocks[:mid], lang_code, lang_en, authority_hint, ctx_aliases, placeholder_org
@@ -405,7 +422,7 @@ async def _translate_block_slice(
                     slice_blocks[mid:], lang_code, lang_en, authority_hint, ctx_aliases, placeholder_org
                 )
                 return left_b + right_b, (left_r or right_r)
-            raise HTTPException(503, f"外文正式稿生成暂时不可用：{exc}") from None
+            raise HTTPException(503, "外文正式稿智能生成服务暂时不可用，请稍后重试") from None
 
         raw_blocks = res.data.get("blocks")
         if not isinstance(raw_blocks, list):
@@ -414,8 +431,28 @@ async def _translate_block_slice(
             continue
 
         candidate = copy.deepcopy(raw_blocks)
+        if lang_code != "ja":
+            for blk in candidate:
+                if isinstance(blk, dict):
+                    for fw, asc in (
+                        ("（", " ("),
+                        ("）", ")"),
+                        ("，", ", "),
+                        ("；", "; "),
+                        ("：", ": "),
+                        ("、", ", "),
+                        ("。", ". "),
+                        ("！", "! "),
+                        ("？", "? "),
+                        ("“", '"'),
+                        ("”", '"'),
+                        ("‘", "'"),
+                        ("’", "'"),
+                    ):
+                        _replace_in_block(blk, fw, asc)
         slice_replaced = False
-        for alias in ctx_aliases:
+        ordered_aliases = sorted((a for a in ctx_aliases if a), key=len, reverse=True)
+        for alias in ordered_aliases:
             for blk in candidate:
                 if isinstance(blk, dict) and _replace_in_block(blk, alias, placeholder_org):
                     slice_replaced = True

@@ -49,21 +49,34 @@ def is_overseas_country(code: str | None) -> bool:
 
 
 async def active_overseas_countries(session: AsyncSession) -> list[dict[str, str]]:
-    """Pilot overseas countries plus any additional overseas countries ingested into the library."""
-    from sqlalchemy import select
+    """Pilot overseas countries plus any additional overseas countries with available, parsed,
+    citable regulations or non-empty published briefings in the library."""
+    from sqlalchemy import func, select
 
-    from app.ingestion.models import Document
+    from app.ingestion.models import NOT_CITABLE_STATUSES, Document, DocumentVersion
+    from app.ingestion.safety import document_available
     from app.knowledge.whitepaper import CountryWhitepaper
 
     rows = (
         await session.scalars(
             select(Document.country_code)
-            .where(Document.relevance.notin_(("out_of_scope", "irrelevant")))
+            .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+            .where(
+                document_available(),
+                Document.relevance.notin_(("out_of_scope", "irrelevant")),
+                DocumentVersion.state == "parsed",
+                DocumentVersion.review_status != "rejected",
+                DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            )
             .distinct()
         )
     ).all()
     wp_rows = (
-        await session.scalars(select(CountryWhitepaper.country_code).distinct())
+        await session.scalars(
+            select(CountryWhitepaper.country_code)
+            .where(func.jsonb_array_length(CountryWhitepaper.blocks) > 0)
+            .distinct()
+        )
     ).all()
     extra = sorted(
         {

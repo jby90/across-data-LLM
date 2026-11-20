@@ -991,7 +991,11 @@ async def write_section(
         except LlmUnavailableError as exc:
             if best is not None:
                 break
-            if not retried_trunc and "truncated" in str(exc):
+            if not retried_trunc and (
+                "truncated" in str(exc)
+                or "截断" in str(exc)
+                or any(f.get("reason") == "output_truncated" for f in getattr(exc, "failures", []))
+            ):
                 retried_trunc = True
                 messages = [
                     *messages[:2],

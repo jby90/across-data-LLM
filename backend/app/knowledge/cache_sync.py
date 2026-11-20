@@ -44,6 +44,7 @@ def clear_user_caches() -> None:
     from app.analysis import (
         benchmarks,
         clause_gate,
+        doc_applicability,
         doc_projects,
         doc_rules,
         doc_sections,
@@ -53,15 +54,20 @@ def clear_user_caches() -> None:
         question_basis,
     )
     from app.ingestion.quality_card import clear_cards_cache
-    from app.knowledge import library_view, router, whitepaper, whitepaper_router
+    from app.knowledge import library_view, router, whitepaper, whitepaper_graph, whitepaper_router
 
     clear_cards_cache()
     benchmarks._BENCH_CACHE.clear()
     evaluation._LATEST_EVAL_CACHE.clear()
     clause_gate.clear_title_names()
+    doc_applicability._SOURCE_GROUNDS_CACHE.clear()
     whitepaper_router._page_cache.clear()
     whitepaper_router._hash_cache.clear()
     whitepaper._PINNED_TOPICS_CACHE.clear()
+    whitepaper_graph._MENTIONS.clear()
+    whitepaper_graph._CLAUSES.clear()
+    whitepaper_graph._PRIMARY_CLAUSE.clear()
+    whitepaper_graph._KEYS.clear()
     router._TOPICS_CACHE.clear()
     router._OVERVIEW_CACHE.clear()
     router._GRAPH_JSON_CACHE.clear()
@@ -95,7 +101,8 @@ async def mark(session) -> str:
                 " (select count(*)::text || coalesce(max(updated_at)::text, '') from clause_translations where is_current),"
                 " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(verify_state, '') || name_zh, ',' order by id), '')) from kg_nodes),"
                 " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(verify_state, ''), ',' order by id), '')) from kg_edges),"
-                " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(merged_into::text, ''), ',' order by id), '')) from admission_entries)"
+                " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(merged_into::text, ''), ',' order by id), '')) from admission_entries),"
+                " (select count(*)::text || md5(coalesce(string_agg(status || coalesce(target_type, ''), ',' order by id), '')) from knowledge_change_proposals)"
             )
         )
     ).one()
@@ -195,10 +202,16 @@ def changes_admin_data(method: str, path: str, status: int) -> bool:
 
 def after_admin_change() -> None:
     from app.admission import router as adm_router
+    from app.analysis import doc_applicability
     from app.ingestion.quality_card import clear_cards_cache
-    from app.knowledge import router
+    from app.knowledge import router, whitepaper_graph
 
     clear_cards_cache()
+    doc_applicability._SOURCE_GROUNDS_CACHE.clear()
+    whitepaper_graph._MENTIONS.clear()
+    whitepaper_graph._CLAUSES.clear()
+    whitepaper_graph._PRIMARY_CLAUSE.clear()
+    whitepaper_graph._KEYS.clear()
     router._GRAPH_JSON_CACHE.clear()
     adm_router._BASIS_MEMO.clear()
     adm_router._LISTED_MEMO.clear()

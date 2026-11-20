@@ -25,7 +25,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-SKIP_JSON = {"audit_logs", "knowledge_audit_records", "llm_call_audit"}
+SKIP_JSON = {
+    "audit_logs",
+    "knowledge_audit_records",
+    "llm_call_audit",
+    "agent_workflow_configs",
+    "source_fetch_observations",
+    "version_changes",
+}
 LIVE_FK = [
     ("kg_nodes", "evidence_clause_id"),
     ("kg_edges", "evidence_clause_id"),
@@ -160,33 +167,79 @@ async def fold_into(
         )
         if not same:
             continue
-        human = (await q("select id from clause_translations where clause_id=:o and (engine='human_revision' or review_status='approved') order by updated_at desc nulls last limit 1", {"o": o})).scalar()
-        keep_ok = (await q("select count(*) from clause_translations where clause_id=:n and is_current and quality_check_passed", {"n": n})).scalar()
+        await q("select id from clauses where id in (:o, :n) for update", {"o": o, "n": n})
+        human = (
+            await q(
+                "select id from clause_translations where clause_id=:o "
+                "and quality_check_passed "
+                "and review_status not in ('translation_failed','not_translated','rejected','stale','superseded') "
+                "and (engine='human_revision' or review_status='approved') "
+                "order by updated_at desc nulls last limit 1",
+                {"o": o},
+            )
+        ).scalar()
+        keep_ok = (
+            await q(
+                "select count(*) from clause_translations where clause_id=:n and is_current "
+                "and quality_check_passed "
+                "and review_status not in ('translation_failed','not_translated','rejected','stale','superseded')",
+                {"n": n},
+            )
+        ).scalar()
         if human:
             await q("update clause_translations set is_current=false where clause_id=:n", {"n": n})
             await q("update clause_translations set clause_id=:n, is_current=(id=:h) where clause_id=:o", {"n": n, "o": o, "h": human})
         elif not keep_ok:
-            good = (await q("select id from clause_translations where clause_id=:o and is_current and quality_check_passed", {"o": o})).scalar()
+            good = (
+                await q(
+                    "select id from clause_translations where clause_id=:o and is_current "
+                    "and quality_check_passed "
+                    "and review_status not in ('translation_failed','not_translated','rejected','stale','superseded') "
+                    "order by updated_at desc nulls last limit 1",
+                    {"o": o},
+                )
+            ).scalar()
             if good:
                 await q("update clause_translations set is_current=false where clause_id=:n", {"n": n})
-                await q("update clause_translations set clause_id=:n where id=:g", {"n": n, "g": good})
+                await q("update clause_translations set clause_id=:n, is_current=true where id=:g", {"n": n, "g": good})
     if any(d["review_status"] == "approved" for d in drops) and keep["review_status"] != "approved":
         await q("update document_versions set review_status='approved' where id=:k", {"k": keep_id})
     ids = {str(k): str(v) for k, v in cmap.items()} | {str(v): str(keep_id) for v in drop_ids}
     for o, n in ids.items():
+        if o == n:
+            continue
+        await q(
+            "delete from knowledge_change_proposals p_old "
+            "using knowledge_change_proposals p_new "
+            "where p_old.target_id = :o "
+            "  and p_new.target_id = :n "
+            "  and p_old.target_type = p_new.target_type "
+            "  and p_old.content_hash = p_new.content_hash",
+            {"n": n, "o": o},
+        )
         await q("update knowledge_change_proposals set target_id=:n where target_id=:o", {"n": n, "o": o})
     await q("update pipeline_events set version_id=:k where version_id = any(:v)", {"k": keep_id, "v": drop_ids})
-    await q("update source_fetch_observations set version_id=:k where version_id = any(:v)", {"k": keep_id, "v": drop_ids})
-    await q("update source_fetch_observations set previous_version_id=:k where previous_version_id = any(:v)", {"k": keep_id, "v": drop_ids})
-    for cid, ov, nv in (await q("select id, old_version_id, new_version_id from version_changes where old_version_id = any(:a) or new_version_id = any(:a)", {"a": drop_ids + [keep_id]})).all():
-        o2 = ids.get(str(ov), str(ov)) if ov else None
-        n2 = ids.get(str(nv), str(nv)) if nv else None
-        if o2 == n2:  # 同一份原文之间的“变化”不是变化：连同影响与提醒删掉
-            await q("delete from user_notifications where change_id=:c", {"c": cid})
-            await q("delete from update_impacts where change_id=:c", {"c": cid})
-            await q("delete from version_changes where id=:c", {"c": cid})
-        else:
-            await q("update version_changes set old_version_id=:o, new_version_id=:n where id=:c", {"o": o2, "n": n2, "c": cid})
+    # source_fetch_observations 与 version_changes 为不可变存证表（append-only 触发器且运行时无 UPDATE/DELETE 权限）：
+    # 严禁篡改或删除这两张表中的历史存证记录；已被存证记录引用的旧版本保留空壳历史锚点，未被引用的物理清理。
+    pinned_obs = {
+        r[0]
+        for r in (
+            await q(
+                "select distinct v from ("
+                "  select version_id as v from source_fetch_observations where version_id = any(:v)"
+                "  union"
+                "  select previous_version_id as v from source_fetch_observations where previous_version_id = any(:v)"
+                "  union"
+                "  select old_version_id as v from version_changes where old_version_id = any(:v)"
+                "  union"
+                "  select new_version_id as v from version_changes where new_version_id = any(:v)"
+                ") s where v is not null",
+                {"v": drop_ids},
+            )
+        ).all()
+    }
+    deletable_ids = [vid for vid in drop_ids if vid not in pinned_obs]
+    pinned_list = [vid for vid in drop_ids if vid in pinned_obs]
     json_rows = 0
     for t, c in (await q("select table_name, column_name from information_schema.columns where table_schema='public' and data_type='jsonb'")).all():
         if t in SKIP_JSON or not (await q("select count(*) from information_schema.columns where table_name=:t and column_name='id'", {"t": t})).scalar():
@@ -198,7 +251,15 @@ async def fold_into(
     await q("delete from clause_readings where clause_id in (select id from clauses where version_id = any(:v))", {"v": drop_ids})
     await q("delete from clause_translations where clause_id in (select id from clauses where version_id = any(:v))", {"v": drop_ids})
     await q("delete from clauses where version_id = any(:v)", {"v": drop_ids})
-    await q("delete from document_versions where id = any(:v)", {"v": drop_ids})
+    if deletable_ids:
+        await q("delete from document_versions where id = any(:v)", {"v": deletable_ids})
+    if pinned_list:
+        await q(
+            "update document_versions set state='downloaded', review_status='rejected', "
+            "ocr_required=false, check_items=null, check_note='已折叠并入新解析版本' "
+            "where id = any(:v)",
+            {"v": pinned_list},
+        )
     # 并完以后扫一遍全库：旧条文被其他地方引用、又没对上的，按摘录再找一次
     from app.ingestion.ref_check import repair
 

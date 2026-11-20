@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, date, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -167,6 +168,26 @@ async def sources(_: AdminDep, session: SessionDep) -> list[dict]:
     return out
 
 
+_SIMPLE_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _validate_recipient_list(raw: list[str] | None) -> list[str] | None:
+    if raw is None:
+        return None
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError("收件人邮箱格式不正确")
+        addr = item.strip()
+        if not addr:
+            continue
+        if len(addr) > 254 or any(ord(c) < 33 for c in addr) or not _SIMPLE_EMAIL_RE.fullmatch(addr):
+            raise ValueError("收件人邮箱地址格式无效，请填写规范的电子邮箱")
+        if addr not in out:
+            out.append(addr)
+    return out
+
+
 class DigestConfigIn(BaseModel):
     enabled: bool = True
     weekday: int = Field(default=1, ge=1, le=7)
@@ -179,9 +200,27 @@ class DigestConfigIn(BaseModel):
     smtp_user: str = Field(default="", max_length=255)
     smtp_from: str = Field(default="", max_length=255)
 
+    @field_validator("recipients")
+    @classmethod
+    def _check_rcpts(cls, v: list[str]) -> list[str]:
+        return _validate_recipient_list(v) or []
+
+    @field_validator("smtp_host", "smtp_user", "smtp_from")
+    @classmethod
+    def _check_no_crlf(cls, v: str) -> str:
+        s = v.strip()
+        if any(ord(c) < 32 for c in s):
+            raise ValueError("发件配置不能包含换行或控制字符")
+        return s
+
 
 class DigestSendIn(BaseModel):
     recipients: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("recipients")
+    @classmethod
+    def _check_send_rcpts(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_recipient_list(v)
 
 
 def _cfg_out(cfg) -> dict:

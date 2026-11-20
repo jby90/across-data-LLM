@@ -145,6 +145,52 @@ class ItemState:
     source: str  # "answer" | "assessment" | "missing"
 
 
+def latin_part_if_bilingual(val: str, country: str | None) -> str:
+    """When a foreign form carries a bilingual '中文名称（Latin Legal Name）' or '中文 / Latin' string,
+    keep only the Latin/foreign legal name (supporting accented European letters and nested parens)."""
+    import re as _re
+
+    if not val or not country or str(country).upper() == "CN":
+        return val
+    s = str(val).strip()
+    if not _re.search(r"[\u4e00-\u9fff]", s):
+        return val
+    if s.endswith(("）", ")")):
+        depth = 0
+        start_idx = -1
+        for idx in range(len(s) - 1, -1, -1):
+            ch = s[idx]
+            if ch in ("）", ")"):
+                depth += 1
+            elif ch in ("（", "("):
+                depth -= 1
+                if depth == 0:
+                    start_idx = idx
+                    break
+        if start_idx >= 0:
+            inner = s[start_idx + 1 : -1].strip()
+            if (
+                len(inner) >= 4
+                and not _re.search(r"[\u4e00-\u9fff]", inner)
+                and _re.match(r"^[A-Za-z\u00C0-\u024F0-9]", inner)
+                and _re.search(r"[A-Za-z\u00C0-\u024F]{2,}", inner)
+            ):
+                return inner
+    for sep in (" / ", " /", "/ "):
+        if sep in s:
+            parts = [p.strip() for p in s.split("/") if p.strip()]
+            latin_parts = [
+                p
+                for p in parts
+                if len(p) >= 4
+                and not _re.search(r"[\u4e00-\u9fff]", p)
+                and _re.search(r"[A-Za-z\u00C0-\u024F]{2,}", p)
+            ]
+            if len(latin_parts) == 1:
+                return latin_parts[0]
+    return val
+
+
 def _from_assessment(item: dict[str, Any], facts: dict[str, str]) -> str:
     key = item.get("fact")
     return str(facts.get(key, "") or "").strip() if key else ""
@@ -152,6 +198,10 @@ def _from_assessment(item: dict[str, Any], facts: dict[str, str]) -> str:
 
 def resolve(form: dict[str, Any], answers: dict[str, Any], facts: dict[str, str]) -> list[tuple[dict, list[ItemState]]]:
     """Per section, the state of every item."""
+    import re as _re
+
+    is_foreign = str(form.get("language") or "fr").lower() != "zh"
+    f_country = str(form.get("country") or "")
     out = []
     for section in form["sections"]:
         states = []
@@ -167,10 +217,22 @@ def resolve(form: dict[str, Any], answers: dict[str, Any], facts: dict[str, str]
                 states.append(ItemState(item, rows_on, "answer" if rows_on else "missing"))
                 continue
             if given not in (None, "", []):
-                states.append(ItemState(item, given, "answer"))
+                val_given = (
+                    latin_part_if_bilingual(given, f_country)
+                    if is_foreign and isinstance(given, str)
+                    else given
+                )
+                states.append(ItemState(item, val_given, "answer"))
                 continue
             known = _from_assessment(item, facts)
             if known and item["kind"] == "text":
+                if is_foreign:
+                    known = latin_part_if_bilingual(known, f_country)
+                if is_foreign and _re.search(r"[\u4e00-\u9fff]", known):
+                    derived_foreign = derive.value(item, facts, form)
+                    if derived_foreign not in (None, "", []):
+                        states.append(ItemState(item, derived_foreign, "assessment"))
+                        continue
                 states.append(ItemState(item, known, "assessment"))
             elif (derived := derive.value(item, facts, form)) not in (None, "", []):
                 states.append(ItemState(item, derived, "assessment"))  # 平台推得出的（国家名、法人、例外情形）
@@ -221,15 +283,19 @@ def clean_answers(form: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
             out[key] = f118_matrix.clean(item["matrix"], value)  # 空也保留：把所有类别取消勾选就是清空
             continue
         if item["kind"] == "text":
-            text = " ".join(str(value or "").split())
+            import re as _re
+
+            cleaned = _re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]", "", str(value or ""))
+            text = " ".join(cleaned.split())
             limit = item.get("store_chars") or 4000
             if text:
                 out[key] = text[:limit]
         elif item["kind"] == "radio":
-            if value in (item["options"] or {}):
+            if isinstance(value, str) and value in (item["options"] or {}):
                 out[key] = value
         elif item["kind"] == "check":
-            picked = [v for v in (value if isinstance(value, list) else [value]) if v in (item["options"] or {})]
+            raw_list = value if isinstance(value, list) else [value]
+            picked = [v for v in raw_list if isinstance(v, str) and v in (item["options"] or {})]
             if picked:
                 out[key] = picked
     return out
@@ -252,34 +318,141 @@ def _render_docx(form: dict[str, Any], answers: dict[str, Any], facts: dict[str,
     return res.data, FillReport(placed=res.filled, unknown=res.missing_labels), []
 
 
-def _build_overflow_annex_pdf(form: dict[str, Any], annex_rows: list[list[str]]) -> bytes:
+def _foreign_clean_version(raw_ver: str, use_fr: bool) -> str:
+    import re as _re
+
+    if not raw_ver:
+        return "Édition officielle" if use_fr else "Official Edition"
+    if not _re.search(r"[\u4e00-\u9fff]", raw_ver):
+        return raw_ver
+    ascii_keep = _re.sub(r"[\u4e00-\u9fff（）()]+", " ", raw_ver)
+    ascii_keep = " ".join(ascii_keep.split()).strip(" -·/—")
+    if len(ascii_keep) >= 4:
+        return ascii_keep
+    return "Édition officielle" if use_fr else "Official Edition"
+
+
+def _foreign_fallback_field_label(meta: dict[str, Any], idx: int, use_fr: bool) -> str:
+    import re as _re
+
+    raw_id = str(meta.get("id") or "").strip()
+    if (
+        raw_id
+        and "/" not in raw_id
+        and not _re.fullmatch(r"t\d+", raw_id)
+        and not _re.search(r"_\d+$", raw_id)
+    ):
+        pretty = raw_id.replace("_", " ").strip().capitalize()
+        if pretty:
+            return pretty
+    return f"Rubrique déclarée n° {idx}" if use_fr else f"Declared Field #{idx}"
+
+
+def _build_overflow_annex_pdf(
+    form: dict[str, Any], annex_rows: list[list[str]], *, cjk_filled: bool = False
+) -> bytes:
     """Render a clean A4 continuation sheet PDF for text fields whose full content exceeded the
     fixed official form box capacity."""
     from app.analysis.document_templates import Rendered, _render_pdf
 
-    lang = form.get("language", "fr")
-    title = (
-        f"Annexe complémentaire — {form['name_zh']}"
-        if lang == "fr"
-        else f"Continuation Annex — {form['name_zh']}"
-    )
-    subtitle = (
-        f"主管机关：{form.get('authority_zh', '')}　｜　原表版本：{form.get('version', '')}　｜　"
-        "说明：本附页系官方申报原表固定栏位容量受限时的正式续表，原表对应栏位已填写摘要及附页索引号，本附页载明完整申报内容，与原表一并签章递交。"
-    )
-    blocks: list[dict[str, Any]] = [
-        {"type": "title", "text": f"官方申报表附页续表（{'Annexe complémentaire' if lang == 'fr' else 'Continuation Sheet'}）"},
-        {"type": "paragraph", "text": f"对应官方原表：{form['name_zh']}"},
-        {"type": "paragraph", "text": subtitle},
-        {"type": "heading", "text": "超长栏目完整申报内容对照表"},
+    lang = str(form.get("language") or "fr").lower()
+    country = str(form.get("country") or "").upper()
+    use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB"))
+    use_zh_annex = lang == "zh" or cjk_filled
+    if use_zh_annex:
+        code_ver = f"{form.get('code', '')} ({form.get('version', '')})".strip()
+    else:
+        clean_v = _foreign_clean_version(str(form.get("version") or ""), use_fr)
+        code_ver = f"{form.get('code', '')} ({clean_v})".strip()
+    if use_zh_annex:
+        if lang == "zh":
+            title = f"官方申报表附页续表 — {form['name_zh']}"
+            blocks: list[dict[str, Any]] = [
+                {"type": "title", "text": "官方申报表附页续表"},
+                {"type": "paragraph", "text": f"对应官方原表：{form['name_zh']}"},
+                {
+                    "type": "paragraph",
+                    "text": (
+                        f"主管机关：{form.get('authority_zh', '')}　｜　原表版本：{form.get('version', '')}　｜　"
+                        "说明：本附页系官方申报原表固定栏位容量受限时的正式续表，与原表一并签章递交。"
+                    ),
+                },
+                {"type": "heading", "text": "超长栏目完整申报内容对照表"},
+                {"type": "table", "head": ["附页索引", "原表栏目名称", "完整申报内容"], "widths": [12, 28, 60], "rows": annex_rows},
+            ]
+        elif use_fr:
+            title = f"Annexe complémentaire / 官方申报表附页续表 — {code_ver}"
+            blocks = [
+                {"type": "title", "text": "Annexe complémentaire au formulaire officiel / 官方申报表附页续表"},
+                {"type": "paragraph", "text": f"Référence : {code_ver} — {form['name_zh']}"},
+                {
+                    "type": "paragraph",
+                    "text": (
+                        "Note : La présente annexe fait partie intégrante du formulaire officiel signé (Voir Annexe) / "
+                        "本附页系官方申报原表固定栏位容量受限时的正式续表，与原表一并签章递交。"
+                    ),
+                },
+                {"type": "heading", "text": "Contenu intégral des rubriques reportées / 超长栏目完整申报内容"},
+                {"type": "table", "head": ["Réf. / 附页索引", "Rubrique / 原表栏目", "Contenu intégral / 完整申报内容"], "widths": [14, 28, 58], "rows": annex_rows},
+            ]
+        else:
+            title = f"Continuation Sheet / 官方申报表附页续表 — {code_ver}"
+            blocks = [
+                {"type": "title", "text": "Official Form Continuation Sheet / 官方申报表附页续表"},
+                {"type": "paragraph", "text": f"Official Form Reference: {code_ver} — {form['name_zh']}"},
+                {
+                    "type": "paragraph",
+                    "text": (
+                        "Note: This continuation sheet forms an integral part of the signed official form (See Annex) / "
+                        "本附页系官方申报原表固定栏位容量受限时的正式续表，与原表一并签章递交。"
+                    ),
+                },
+                {"type": "heading", "text": "Full Declared Content of Continued Fields / 超长栏目完整申报内容"},
+                {"type": "table", "head": ["Ref. / 附页索引", "Field / 原表栏目", "Full Declared Content / 完整申报内容"], "widths": [14, 28, 58], "rows": annex_rows},
+            ]
+        return _render_pdf(Rendered(blocks=blocks), title, foreign=False)
+    use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB"))
+    if use_fr:
+        title = f"Annexe complémentaire — {code_ver}"
+        blocks = [
+            {"type": "title", "text": "Annexe complémentaire au formulaire officiel"},
+            {"type": "paragraph", "text": f"Référence du formulaire officiel : {code_ver}"},
+            {
+                "type": "paragraph",
+                "text": (
+                    "Note : La présente annexe fait partie intégrante du formulaire officiel signé et "
+                    "reprend le texte complet des rubriques dont la longueur dépasse la capacité de la case imprimée."
+                ),
+            },
+            {"type": "heading", "text": "Contenu intégral des rubriques reportées"},
+            {
+                "type": "table",
+                "head": ["Réf.", "Rubrique du formulaire", "Contenu intégral déclaré"],
+                "widths": [12, 28, 60],
+                "rows": annex_rows,
+            },
+        ]
+        return _render_pdf(Rendered(blocks=blocks), title, foreign=True)
+    title = f"Continuation Sheet — {code_ver}"
+    blocks = [
+        {"type": "title", "text": "Official Form Continuation Sheet"},
+        {"type": "paragraph", "text": f"Official Form Reference: {code_ver}"},
+        {
+            "type": "paragraph",
+            "text": (
+                "Note: This continuation sheet forms an integral part of the signed official application form "
+                "and sets forth the complete declared text for fields exceeding the printed box capacity."
+            ),
+        },
+        {"type": "heading", "text": "Full Declared Content of Continued Fields"},
         {
             "type": "table",
-            "head": ["附页索引", "原表栏目名称", "完整申报内容"],
+            "head": ["Ref.", "Official Form Field", "Full Declared Content"],
             "widths": [12, 28, 60],
             "rows": annex_rows,
         },
     ]
-    return _render_pdf(Rendered(blocks=blocks), title)
+    return _render_pdf(Rendered(blocks=blocks), title, foreign=True)
 
 
 def render(
@@ -326,13 +499,34 @@ def render(
     # 汉字名称等放在法语表格里：填值本身不翻译，企业按官方语言填写；这里只负责放进格子
     data = (OFFICIAL / form["file"]).read_bytes()
     fixed = fixed_fields(form)
+    if fixed:
+        import re as _re
+
+        country_dial = {"TN": "216", "MA": "212", "EG": "20", "SG": "65", "LB": "961"}.get(
+            str(form.get("country") or "").upper(), ""
+        )
+        for f_box in fixed:
+            if f_box.cells and f_box.key in texts and len(texts[f_box.key]) > f_box.cells:
+                raw_t = texts[f_box.key].strip()
+                if _re.fullmatch(r"[\d\s+\-()]+", raw_t):
+                    digits = _re.sub(r"[\s\-()]+", "", raw_t)
+                    if country_dial:
+                        for pfx in (f"+{country_dial}", f"00{country_dial}"):
+                            if digits.startswith(pfx) and len(digits) - len(pfx) <= f_box.cells:
+                                digits = digits[len(pfx) :]
+                                break
+                    if 0 < len(digits) <= f_box.cells:
+                        texts[f_box.key] = digits
     filled, report = fill_pdf(data, texts, checked, fields=fixed)
     if allow_annex and report.overflow:
+        import re as _re
+
         from app.forms.pdf_fill import append_pdf_pages, fit_summary_for_box
 
         field_map = {f.key: f for f in (fixed or list_fields(data))}
         annex_rows: list[list[str]] = []
         lang = form.get("language", "fr")
+        cjk_filled = any(_re.search(r"[\u4e00-\u9fff]", str(v or "")) for v in texts.values())
         patched_texts = dict(texts)
         for k in list(report.overflow):
             f_obj = field_map.get(k)
@@ -343,15 +537,25 @@ def render(
             if not full_text:
                 continue
             idx = len(annex_rows) + 1
-            ref_tag = f"(Voir Annexe #{idx})" if lang == "fr" else f"(See Annex #{idx})"
+            use_fr_col = str(lang).lower() == "fr" or (
+                str(lang).lower() == "ar" and str(form.get("country") or "").upper() in ("TN", "MA", "LB")
+            )
+            ref_tag = (
+                f"（详见附页 #{idx}）"
+                if str(lang).lower() == "zh"
+                else (f"(Voir Annexe #{idx})" if use_fr_col else f"(See Annex #{idx})")
+            )
             patched_texts[k] = fit_summary_for_box(data, f_obj, full_text, ref_tag)
             lbl_zh = meta.get("label_zh") or k
             lbl_orig = str(meta.get("label_original") or meta.get("label_fr") or "").strip()
-            col_label = f"{lbl_zh} / {lbl_orig}" if lbl_orig and lbl_orig not in lbl_zh else lbl_zh
+            if str(lang).lower() == "zh" or cjk_filled:
+                col_label = f"{lbl_zh} / {lbl_orig}" if lbl_orig and lbl_orig not in lbl_zh else lbl_zh
+            else:
+                col_label = lbl_orig or _foreign_fallback_field_label(meta, idx, use_fr_col)
             annex_rows.append([f"#{idx}", col_label, full_text])
         if annex_rows:
             filled, report = fill_pdf(data, patched_texts, checked, fields=fixed)
-            annex_pdf = _build_overflow_annex_pdf(form, annex_rows)
+            annex_pdf = _build_overflow_annex_pdf(form, annex_rows, cjk_filled=cjk_filled)
             filled = append_pdf_pages(filled, annex_pdf)
     field_map_all = {f.key: f for f in (fixed or list_fields(data))}
     too_long = []

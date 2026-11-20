@@ -63,23 +63,28 @@ _SOURCE_GROUNDS_CACHE: dict[tuple, dict[str, Ground | None]] = {}
 async def source_grounds(session: AsyncSession, cc: str) -> dict[str, Ground | None]:
     """The sending country's requirements that decide the documents, each the best-ranked verified
     one with a citable article (the same pools and ranking as the country briefing)."""
-    from sqlalchemy import func
+    from sqlalchemy import text as sa_text
 
     from app.knowledge import whitepaper_graph as W
-    from app.knowledge.models import KgNode
+    from app.knowledge.cache_sync import rebuilding
 
-    stamp = tuple(
-        (
-            await session.execute(
-                select(KgNode.review_status, func.count(), func.max(KgNode.created_at))
-                .where(KgNode.country_code == cc)
-                .group_by(KgNode.review_status)
-                .order_by(KgNode.review_status)
-            )
-        ).all()
-    )
-    cache_key = (cc, stamp)
-    if cache_key in _SOURCE_GROUNDS_CACHE:
+    stamp_row = (
+        await session.execute(
+            sa_text(
+                "select "
+                "(select md5(coalesce(string_agg(id::text || review_status || coalesce(verify_state, '') || name_zh, ',' order by id), '')) "
+                " from kg_nodes where country_code = :cc), "
+                "(select md5(coalesce(string_agg(d.id::text || d.relevance || coalesce(d.business_weight, '') || coalesce(d.title_zh, '') "
+                " || coalesce(v.legal_status, '') || coalesce(v.review_status, ''), ',' order by d.id, v.id), '')) "
+                " from documents d left join document_versions v on v.document_id = d.id where d.country_code = :cc), "
+                "(select md5(coalesce(string_agg(p.id::text || p.status, ',' order by p.id), '')) "
+                " from knowledge_change_proposals p where p.status in ('pending_review', 'approved'))"
+            ),
+            {"cc": cc},
+        )
+    ).one()
+    cache_key = (cc, tuple(str(x) for x in stamp_row))
+    if not rebuilding.get() and cache_key in _SOURCE_GROUNDS_CACHE:
         return _SOURCE_GROUNDS_CACHE[cache_key]
 
     pools, _, _ = await W.requirement_pools(session, cc)
@@ -243,12 +248,22 @@ def judge(
     """Per document code: {state, label, why, basis, missing_keys, missing}. ``grounds`` is
     ``source_grounds`` of the sending country (None when it is not in the graph); ``cn`` the result
     of the sending country's own route module (``cn_route``), if it has one."""
+    from app.analysis.cn_route import _yes as _cn_yes
+    from app.analysis.cn_route import has_no_personal_data
+
     src, rcp = source or "数据发出国", recipient or "数据接收国"
     g = grounds or {}
     volume = values.get("data_volume", "")
     sensitive = values.get("sensitive_pi", "").strip()
-    no_personal = bool(_NO_PERSONAL.search(volume)) and not sensitive.startswith("是")
-    no_personal_why = f"你填了{_quote(labels.get('data_volume', '涉及自然人数量'), volume)}，不向境外提供个人信息"
+    dtypes = values.get("data_types", "").strip()
+    sensitive_is_yes = _cn_yes(sensitive, "sensitive_pi") is True
+    no_personal = has_no_personal_data(volume, sensitive, dtypes)
+    no_personal_src = (
+        _quote(labels.get("data_volume", "涉及自然人数量"), volume)
+        if volume.strip()
+        else _quote(labels.get("data_types", "传输的数据类型"), dtypes)
+    )
+    no_personal_why = f"你填了{no_personal_src}，不向境外提供个人信息"
     general = f"{src}的法规还没有收录，按各国通行的要求判断，需要"
 
     def from_cn(code: str) -> dict | None:
@@ -264,7 +279,7 @@ def judge(
     def facts_said() -> str:
         """The answers that make personal data part of the transfer, quoted."""
         said = []
-        if sensitive.startswith("是"):
+        if sensitive_is_yes:
             said.append(_quote(labels.get("sensitive_pi", "是否含敏感个人信息"), sensitive, 16))
         if volume and not no_personal:
             said.append(_quote(labels.get("data_volume", "涉及自然人数量"), volume))
@@ -353,17 +368,50 @@ def judge(
     else:
         out["dpia"] = _out(NEED, personal_need("处理车辆数据中的个人信息，按各国通行的要求须评估对个人的影响"))
 
-    # 7 LIA：只在以合法利益为处理依据时需要
+    # 7 LIA：只在以合法利益为处理依据时需要（按分句逐一核验，支持“正当利益/合法利益”双向否定与多场景分句）
     basis = values.get("lawful_basis", "").strip()
     basis_label = labels.get("lawful_basis", "处理的合法性基础")
+    legit_term_pat = r"(?:正当)?(?:合法|正当)利益|合法权益（?追求|\blegitimate\s+interests?\b|intérêt\s+légitime"
+    neg_legit_re = re.compile(
+        rf"(?:不以|非以|不适用|不采用|不援引|并非|不含|不涉及|排除|无需|不用)[^，。；;\n]{{0,12}}(?:{legit_term_pat})|"
+        rf"(?:{legit_term_pat})[^，。；;\n]{{0,8}}(?:不适用|不采用|不援引|除外|排除|不涉及|无|否)|"
+        r"\bnot\s+(?:based\s+on\s+|relying\s+on\s+|rely\s+on\s+)?legitimate\s+interests?\b|"
+        r"\bno\s+legitimate\s+interests?\b",
+        re.I,
+    )
+    pos_legit_re = re.compile(rf"{legit_term_pat}|\blegitimate\b", re.I)
+    has_neg_legit = False
+    has_pos_legit = False
+    if basis:
+        def _strip_neg_paren(m: re.Match) -> str:
+            nonlocal has_neg_legit
+            if neg_legit_re.search(m.group(1)):
+                has_neg_legit = True
+                return " "
+            return m.group(0)
+
+        cleaned_basis = re.sub(r"[（(]([^）)]*)[）)]", _strip_neg_paren, basis)
+        clauses_b = [
+            c.strip()
+            for c in re.split(
+                r"[；;\n。]+|[，,]\s*(?=(?:不以|非以|不适用|不采用|不援引|并非|不含|不涉及|排除|但|不过|然而|而|同时|另外|车|远程|自动驾驶))",
+                cleaned_basis,
+            )
+            if c.strip()
+        ]
+        for cl_b in clauses_b:
+            if neg_legit_re.search(cl_b):
+                has_neg_legit = True
+            elif pos_legit_re.search(cl_b):
+                has_pos_legit = True
     if no_personal:
         out["lia"] = _out(NA, no_personal_why)
     elif not basis:
         out["lia"] = _out(UNKNOWN, f"填写“{basis_label}”后判断：以合法利益为依据时才需要", "", ["lawful_basis"], labels)
-    elif _LEGIT.search(basis) or re.search(r"legitimate", basis, re.I):
+    elif has_pos_legit:
         cite = g["legit"].cite if g.get("legit") else ""
         out["lia"] = _out(NEED, f"你填了{_quote(basis_label, basis)}，以合法利益为依据须评估利益是否超过对个人的影响", cite)
-    elif _OTHER_BASES.search(basis):
+    elif has_neg_legit or _OTHER_BASES.search(basis):
         out["lia"] = _out(NA, f"你填了{_quote(basis_label, basis)}，不以合法利益为依据")
     else:
         out["lia"] = _out(NEED, f"没能从你填的{_quote(basis_label, basis)}认出合法性基础，先按需要准备；写明是否以合法利益为依据后再判断")

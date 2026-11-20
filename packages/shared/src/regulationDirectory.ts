@@ -21,6 +21,16 @@ export const COUNTRY_NAMES: Record<string, string> = {
   US: '美国', CA: '加拿大', MX: '墨西哥', BR: '巴西', AR: '阿根廷', CL: '智利', PE: '秘鲁', CO: '哥伦比亚',
   AU: '澳大利亚', NZ: '新西兰', HK: '中国香港', MO: '中国澳门',
 }
+const TYPE_ALIASES: Record<string, string> = {
+  ACT: 'LAW',
+  SUBSIDIARY: 'REGULATION',
+  DECREE: 'REGULATION',
+  RULE: 'REGULATION',
+  ORDER: 'REGULATION',
+  GUIDELINE: 'GUIDANCE',
+  NOTICE: 'GUIDANCE',
+  CIRCULAR: 'GUIDANCE',
+}
 const LEVELS: Record<string, { name: string; rank: number }> = {
   LAW: { name: '法律', rank: 0 },
   REGULATION: { name: '法规与实施规则', rank: 1 },
@@ -35,7 +45,9 @@ export function directoryLevels<T extends DirectoryDocument>(documents: T[], cou
   const groups = new Map<string, { key: string; name: string; rank: number; items: T[] }>()
   for (const item of documents) {
     if (item.country_code !== country) continue
-    const key = item.document_type || '__unclassified__'
+    const raw = (item.document_type || '').trim()
+    const upper = raw ? raw.toUpperCase() : '__unclassified__'
+    const key = TYPE_ALIASES[upper] || upper
     const meta = LEVELS[key] || { name: key === '__unclassified__' ? '未分类' : `其他类型（${key}）`, rank: 6 }
     if (!groups.has(key)) groups.set(key, { key, ...meta, items: [] })
     groups.get(key)!.items.push(item)

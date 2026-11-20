@@ -3,7 +3,7 @@
 from sqlalchemy import func, or_, select
 
 from app.ingestion.layout_safety import clause_layout_available
-from app.ingestion.models import Clause, Document, DocumentVersion
+from app.ingestion.models import NOT_CITABLE_STATUSES, Clause, Document, DocumentVersion
 from app.ingestion.safety import document_available
 from app.knowledge.models import KgEdge
 from app.updates.source_state import observed_version
@@ -26,11 +26,13 @@ def active_edge_filters():
         .where(
             DocumentVersion.document_id == Document.id,
             DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status != "draft",
+            DocumentVersion.review_status != "rejected",
         )
         .correlate(Document)
         .scalar_subquery()
     )
-    current_source = (
+    valid_source_version = (
         select(Clause.id)
         .join(DocumentVersion, Clause.version_id == DocumentVersion.id)
         .join(Document, Document.id == DocumentVersion.document_id)
@@ -41,7 +43,21 @@ def active_edge_filters():
                 observed_version(Document).is_(None) & (DocumentVersion.version_no == latest),
             ),
             DocumentVersion.state == "parsed",
-            Document.relevance.in_(("relevant", "related")),
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            DocumentVersion.review_status != "rejected",
+            Document.relevance != "irrelevant",
+            or_(
+                KgEdge.is_structural.is_(True),
+                Document.relevance.in_(("relevant", "related")),
+            ),
+        )
+        .correlate(KgEdge)
+        .exists()
+    )
+    semantic_quote_ok = (
+        select(Clause.id)
+        .where(
+            Clause.id == KgEdge.evidence_clause_id,
             KgEdge.evidence_quote != "",
             func.strpos(Clause.original_text, KgEdge.evidence_quote) > 0,
         )
@@ -50,10 +66,12 @@ def active_edge_filters():
     )
     return (
         KgEdge.review_status.in_(("approved", "pending_review")),
+        func.coalesce(KgEdge.verify_state, "") != "retired",
         KgEdge.extractor_model != "kg-rule-extractor-v1",
         ~held_source,
+        or_(KgEdge.evidence_clause_id.is_(None), valid_source_version),
         or_(KgEdge.is_structural.is_(True), KgEdge.judge_verdict == "yes"),
-        or_(KgEdge.is_structural.is_(True), current_source),
+        or_(KgEdge.is_structural.is_(True), semantic_quote_ok),
     )
 
 

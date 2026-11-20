@@ -140,9 +140,34 @@ async def _basis(session: AsyncSession, clause_id) -> dict | None:
     row = (
         await session.execute(
             text(
-                """select k.id::text, k.clause_number, coalesce(d.title_zh, d.title), d.id::text, d.title, d.document_type, d.instrument_kind from clauses k
-                join document_versions v on v.id=k.version_id join documents d on d.id=v.document_id
-                where k.id=:i"""
+                """select k.id::text, k.clause_number, coalesce(d.title_zh, d.title), d.id::text, d.title, d.document_type, d.instrument_kind
+                from clauses k
+                join document_versions v on v.id=k.version_id
+                join documents d on d.id=v.document_id
+                where k.id=:i
+                  and d.relevance not in ('irrelevant', 'out_of_scope')
+                  and v.legal_status not in ('repealed', 'draft')
+                  and v.review_status <> 'rejected'
+                  and not exists (
+                    select 1 from knowledge_change_proposals p
+                    where p.target_type = 'documents' and p.target_id = d.id
+                      and p.status in ('pending_review', 'approved')
+                      and coalesce((p.payload->>'safety_hold')::boolean, false)
+                  )
+                  and not exists (
+                    select 1 from knowledge_change_proposals p
+                    where p.target_type = 'clauses'
+                      and p.status in ('pending_review', 'approved')
+                      and p.payload->'source_parse_revision'->>'scope' = 'whole_source_page'
+                      and (
+                        p.target_id = k.id
+                        or (
+                          p.payload->'source_parse_revision'->>'version_id' = k.version_id::text
+                          and (p.payload->'source_parse_revision'->>'page_number')::int >= k.page_start
+                          and (p.payload->'source_parse_revision'->>'page_number')::int <= k.page_end
+                        )
+                      )
+                  )"""
             ),
             {"i": clause_id},
         )
@@ -159,9 +184,20 @@ async def _basis(session: AsyncSession, clause_id) -> dict | None:
     from app.admission import names
 
     name = names.law_name(row[3], row[2])
-    zh = await session.scalar(
-        text("select translated_text from clause_translations where clause_id=:i and is_current order by updated_at desc limit 1"), {"i": clause_id}
+    zh_rows = list(
+        (
+            await session.scalars(
+                text(
+                    "select translated_text from clause_translations "
+                    "where clause_id=:i and is_current and quality_check_passed "
+                    "and review_status not in ('translation_failed','not_translated','rejected','stale','superseded') "
+                    "order by updated_at desc limit 2"
+                ),
+                {"i": clause_id},
+            )
+        ).all()
     )
+    zh = zh_rows[0] if len(zh_rows) == 1 else ""
     res = {
         "clause_id": row[0], "clause_number": label or row[1], "document": name, "document_id": row[3],
         "original_title": row[4], "source": f"《{name}》{label}",
@@ -182,12 +218,28 @@ _CITED = re.compile(r"(\d{4})\s*年\s*第\s*(\d+)\s*号|No\.?\s*\(?(\d+)\)?\s*(?
 async def _cited_laws(session: AsyncSession, cc: str, cited: list[str]) -> list[dict]:
     """The laws a guide says the item rests on (“1982 年第 121 号法律”), linked to the library when the
     law is collected there, else named as written."""
-    from app.ingestion.models import Document
+    from app.ingestion.models import NOT_CITABLE_STATUSES, Document, DocumentVersion
+    from app.ingestion.safety import document_available
 
+    valid_ver = (
+        select(DocumentVersion.id)
+        .where(
+            DocumentVersion.document_id == Document.id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            DocumentVersion.review_status != "rejected",
+        )
+        .correlate(Document)
+        .exists()
+    )
     docs = (
         await session.execute(
             select(Document.id, Document.title, Document.title_zh).where(
-                Document.country_code == cc, Document.document_type.in_(LAW_TYPES), Document.relevance.in_(("relevant", "related"))
+                Document.country_code == cc,
+                Document.document_type.in_(LAW_TYPES),
+                Document.relevance.in_(("relevant", "related")),
+                document_available(),
+                valid_ver,
             )
         )
     ).all()
@@ -226,11 +278,33 @@ async def legal_basis(session: AsyncSession, entry: AdmissionEntry, basis: dict 
     if "profile:cited_laws" in (entry.edited or []):  # 管理员列的为准
         laws = await _cited_laws(session, cc, prof.get("cited_laws") or [])
     else:
+        from app.ingestion.models import NOT_CITABLE_STATUSES, DocumentVersion
+        from app.ingestion.safety import document_is_held
+
         laws = []
         for did in prof.get("law_ids") or []:
             d = await session.get(Document, uuid.UUID(did))
-            if d is not None and d.country_code == cc:  # 只列本国法规
-                laws.append({"source": f"《{names.law_name(did, d.title_zh or d.title)}》", "link": f"/knowledge?country={cc}&doc={did}"})
+            if (
+                d is None
+                or d.country_code != cc
+                or d.relevance in ("irrelevant", "out_of_scope")
+                or await document_is_held(session, d.id)
+            ):
+                continue
+            lver = await session.scalar(
+                select(DocumentVersion)
+                .where(
+                    DocumentVersion.document_id == d.id,
+                    DocumentVersion.state == "parsed",
+                    DocumentVersion.legal_status != "draft",
+                    DocumentVersion.review_status != "rejected",
+                )
+                .order_by(DocumentVersion.version_no.desc())
+                .limit(1)
+            )
+            if lver is None or lver.legal_status in NOT_CITABLE_STATUSES:
+                continue
+            laws.append({"source": f"《{names.law_name(did, d.title_zh or d.title)}》", "link": f"/knowledge?country={cc}&doc={did}"})
     if basis and basis.get("is_law"):
         own = card["link"].split("&clause")[0]
         return [card] + [x for x in laws if x["link"] != own], None
@@ -601,26 +675,59 @@ async def list_functions(user: UserDep) -> list[dict]:
     return [{"key": k, "label": v} for k, v in plan.FUNCTIONS.items()]
 
 
-async def _admission_countries(session: AsyncSession) -> list[dict[str, str]]:
-    """海外属地国家列表：已入库法规或已抽取准入事项的国家（排除中国与国际），按试点顺序排前。"""
-    from app.ingestion.models import Document
+async def _admission_countries(session: AsyncSession, *, admin_view: bool = False) -> list[dict[str, str]]:
+    """海外属地国家列表：已入库有效法规或已收录有效准入事项的国家（排除中国与国际），按试点顺序排前。"""
+    from app.ingestion.models import NOT_CITABLE_STATUSES, Document, DocumentVersion
+    from app.ingestion.safety import document_available
 
+    valid_ver = (
+        select(DocumentVersion.id)
+        .where(
+            DocumentVersion.document_id == Document.id,
+            DocumentVersion.state == "parsed",
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            DocumentVersion.review_status != "rejected",
+        )
+        .correlate(Document)
+        .exists()
+    )
+    doc_stmt = select(Document.country_code).where(
+        Document.relevance.notin_(("out_of_scope", "irrelevant")),
+        document_available(),
+    )
+    if not admin_view:
+        doc_stmt = doc_stmt.where(valid_ver)
     doc_codes = {
         c.upper()
-        for c in (
+        for c in (await session.scalars(doc_stmt.distinct())).all()
+        if c
+    }
+    if admin_view:
+        entry_codes = {
+            c.upper()
+            for c in (
+                await session.scalars(
+                    select(AdmissionEntry.country_code)
+                    .where(AdmissionEntry.review_status != "out_of_scope", AdmissionEntry.merged_into.is_(None))
+                    .distinct()
+                )
+            ).all()
+            if c
+        }
+    else:
+        cand_entries = (
             await session.scalars(
-                select(Document.country_code)
-                .where(Document.relevance.notin_(("out_of_scope", "irrelevant")))
-                .distinct()
+                select(AdmissionEntry).where(
+                    AdmissionEntry.review_status.in_(SHOWN),
+                    AdmissionEntry.merged_into.is_(None),
+                )
             )
         ).all()
-        if c
-    }
-    entry_codes = {
-        c.upper()
-        for c in (await session.scalars(select(AdmissionEntry.country_code).distinct())).all()
-        if c
-    }
+        entry_codes = {
+            e.country_code.upper()
+            for e in cand_entries
+            if e.country_code and await entry_listed(session, e)
+        }
     pilot = ("SG", "EG", "TN", "MA", "LB")
     extra = sorted((doc_codes | entry_codes) - set(pilot) - {"CN", "ZZ", "--"})
     return [{"code": c, "name": COUNTRY_ZH.get(c, c)} for c in (*pilot, *extra)]
@@ -628,12 +735,12 @@ async def _admission_countries(session: AsyncSession) -> list[dict[str, str]]:
 
 @user_router.get("/countries")
 async def list_admission_countries(user: UserDep, session: SessionDep) -> list[dict[str, str]]:
-    return await _admission_countries(session)
+    return await _admission_countries(session, admin_view=False)
 
 
 @admin_router.get("/countries")
 async def list_admin_admission_countries(admin: AdminDep, session: SessionDep) -> list[dict[str, str]]:
-    return await _admission_countries(session)
+    return await _admission_countries(session, admin_view=True)
 
 
 @user_router.get("/entries")
@@ -730,7 +837,21 @@ async def amount_conflicts(session: AsyncSession, entry: AdmissionEntry, steps: 
     if not ids:
         return []
     texts = list((await session.scalars(select(Clause.original_text).where(Clause.id.in_(ids)))).all())
-    texts += list((await session.scalars(select(ClauseTranslation.translated_text).where(ClauseTranslation.clause_id.in_(ids), ClauseTranslation.is_current.is_(True)))).all())
+    tr_buckets: dict = {}
+    for tr_cid, tr_txt in (
+        await session.execute(
+            select(ClauseTranslation.clause_id, ClauseTranslation.translated_text).where(
+                ClauseTranslation.clause_id.in_(ids),
+                ClauseTranslation.is_current.is_(True),
+                ClauseTranslation.quality_check_passed.is_(True),
+                ClauseTranslation.review_status.notin_(
+                    ("translation_failed", "not_translated", "rejected", "stale", "superseded")
+                ),
+            )
+        )
+    ).all():
+        tr_buckets.setdefault(tr_cid, []).append(tr_txt)
+    texts += [v[0] for v in tr_buckets.values() if len(v) == 1 and v[0]]
     known = set().union(*(_law_numbers(t) for t in texts)) if texts else set()
     return [f"{label}写“{raw}”，依据条文里没有这个金额" for v, (label, raw) in wanted.items() if v not in known]
 
@@ -775,9 +896,29 @@ async def for_assessment(task_id: uuid.UUID, user: UserDep, session: SessionDep)
             .order_by(AdmissionProject.created_at.desc())
         )
     ).all()
+    outs = await _named(session, [_entry_out(e, counts.get(e.id, 0)) for e in entries])
+    started_entry_ids = {p.entry_id for p in started}
+    steps_by_entry: dict[uuid.UUID, list[AdmissionStep]] = {}
+    if entries:
+        for st in (
+            await session.scalars(
+                select(AdmissionStep).where(AdmissionStep.entry_id.in_([e.id for e in entries]))
+            )
+        ).all():
+            steps_by_entry.setdefault(st.entry_id, []).append(st)
+    visible_outs: list[dict] = []
+    for e, o in zip(entries, outs, strict=True):
+        b = await _basis(session, e.evidence_clause_id)
+        o["basis"] = _basis_card(b, e.country_code)
+        o["laws"], o["guide"] = await legal_basis(session, e, b)
+        o["amount_conflicts"] = await amount_conflicts(session, e, steps_by_entry.get(e.id, []))
+        o["user_shown"] = user_shown(o)
+        o["authority_zh"] = display_authority(o["authority_zh"], e.country_code)
+        if o["user_shown"] or e.id in started_entry_ids:
+            visible_outs.append(o)
     return {
         "country_code": next(iter(sorted(countries))) if len(countries) == 1 else task.country_code,
-        "entries": await _named(session, [_entry_out(e, counts.get(e.id, 0)) for e in entries]),
+        "entries": visible_outs,
         "projects": [{"id": str(p.id), "title": p.title, "entry_id": str(p.entry_id)} for p in started],
     }
 
@@ -837,10 +978,13 @@ async def _known_company(session: AsyncSession, org_id, country: str | None = No
     ).all()
     names += list(dict.fromkeys(prev))
     from app.iam.models import Organization  # 都没填过：用企业注册时填的公司全称
+    from app.iam.service import strip_trial_org_suffix
 
     org = await session.get(Organization, org_id)
     if org and org.name:
-        names.append(org.name)
+        clean_org_name = strip_trial_org_suffix(org.name)
+        if clean_org_name:
+            names.append(clean_org_name)
     if country:
         return next((n for n in names if entity_for(n, country) == n), "")
     return names[0] if names else ""
@@ -873,26 +1017,48 @@ async def _form_states(session: AsyncSession, project: AdmissionProject, detail:
     task = await session.get(AnalysisTask, project.task_id) if project.task_id else None
     from app.forms.router import org_profile
 
-    profile = await org_profile(session, project.org_id, detail.get("country_code") or None)
+    cc_code = detail.get("country_code") or None
+    profile = await org_profile(session, project.org_id, cc_code)
     out = []
     for f in detail.get("forms") or []:
         form = fs.get_form(f["code"])
         if form is None:
             continue
+        form_cc = str(form.get("country") or cc_code or "")
         q = select(FormInstance).where(FormInstance.org_id == project.org_id, FormInstance.form_code == f["code"])
         q = q.where(FormInstance.task_id == task.id) if task else q.where(FormInstance.task_id.is_(None))
         inst = await session.scalar(q.order_by(FormInstance.updated_at.desc()).limit(1))
         own_facts = {
-            ("company_name" if (k := rk.removeprefix(DOC_FACT_PREFIX)) == "applicant" else k): str(rv).strip()
+            ("company_name" if (k := rk.removeprefix(DOC_FACT_PREFIX)) == "applicant" else k): fs.latin_part_if_bilingual(
+                str(rv).strip(), form_cc
+            )
             for rk, rv in (project.facts or {}).items()
             if str(rv or "").strip()
         }
-        base = {
+        raw_base = {
             **profile,
             **own_facts,
-            **{k: v for k, v in {"company_name": project.applicant or own_facts.get("company_name", ""), "vehicle_model": project.vehicle_model or own_facts.get("vehicle_model", "")}.items() if v},
+            **{
+                k: fs.latin_part_if_bilingual(v, form_cc)
+                for k, v in {
+                    "company_name": project.applicant or own_facts.get("company_name", ""),
+                    "vehicle_model": project.vehicle_model or own_facts.get("vehicle_model", ""),
+                }.items()
+                if v
+            },
         }
-        facts = {**base, **{k: v for k, v in facts_for_task(task, f["code"]).items() if str(v).strip()}} if task else base
+        facts = (
+            {
+                **raw_base,
+                **{
+                    k: fs.latin_part_if_bilingual(str(v).strip(), form_cc)
+                    for k, v in facts_for_task(task, f["code"]).items()
+                    if str(v).strip()
+                },
+            }
+            if task
+            else raw_base
+        )
         answers = (inst.answers if inst else {}) or {}
         missing = fs.missing_questions(form, answers, facts) if inst else []
         values = {}
@@ -931,6 +1097,9 @@ async def _check(session: AsyncSession, project: AdmissionProject, record: bool)
     if record:
         from datetime import UTC, datetime
 
+        await session.scalar(
+            select(AdmissionProject.id).where(AdmissionProject.id == project.id).with_for_update()
+        )
         old = {x.target + ":" + plan.finding_key("", x.question).split(":", 1)[1]: x for x in (await session.scalars(
             select(AdmissionIssue).where(AdmissionIssue.project_id == project.id, AdmissionIssue.kind == "check"))).all()}
         now = datetime.now(UTC)
@@ -1110,11 +1279,17 @@ async def check_project(project_id: uuid.UUID, user: UserDep, session: SessionDe
 
 @user_router.post("/projects", status_code=201)
 async def create_project(body: ProjectIn, user: UserDep, session: SessionDep) -> dict:
+    from sqlalchemy import text as sa_text
+
     entry = await session.get(AdmissionEntry, body.entry_id)
     if entry is None or entry.review_status not in SHOWN:
         raise HTTPException(404, "准入事项不存在")
     task = await _own_task(session, body.task_id, user) if body.task_id else None
     function = body.function or (task.scenario_type if task and task.scenario_type in plan.FUNCTIONS else "")
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"adm_proj:{user.org_id}:{entry.id}:{task.id if task else ''}:{function}"},
+    )
     same = select(AdmissionProject).where(AdmissionProject.org_id == user.org_id, AdmissionProject.entry_id == entry.id)
     same = same.where(AdmissionProject.task_id == task.id) if task else same.where(AdmissionProject.task_id.is_(None), AdmissionProject.function_key == function)
     if (existing := await session.scalar(same.limit(1))) is not None:  # 准备过的：直接打开，不重复建
@@ -1226,8 +1401,18 @@ async def list_projects(user: UserDep, session: SessionDep) -> list[dict]:
 async def delete_project(project_id: uuid.UUID, request: Request, user: UserDep, session: SessionDep) -> dict:
     """Delete one of the enterprise's handling projects with its ledger and drafts (the admission
     item itself, from the law, stays). The deletion is in the audit log."""
+    from sqlalchemy import delete as sa_delete
+
+    from app.updates.models import UserNotification
+
     project = await _project(session, project_id, user)
     set_detail(request, summary=f"删除准入办理项目“{project.title}”")
+    await session.execute(
+        sa_delete(UserNotification).where(
+            UserNotification.org_id == project.org_id,
+            UserNotification.link == f"/admission?project={project.id}",
+        )
+    )
     await session.delete(project)
     await session.commit()
     return {"deleted": str(project_id)}
@@ -1481,7 +1666,10 @@ async def get_project(project_id: uuid.UUID, user: UserDep, session: SessionDep)
                 "created_at": d.created_at.isoformat(),
                 "missing": d.missing or [],
                 "forms": [{"code": f["code"], "name": f["name"]} for f in d.forms or []],
-                "has_foreign": bool((d.foreign_draft or {}).get("blocks")),
+                "has_foreign": bool((d.foreign_draft or {}).get("blocks"))
+                and (not lang_info or (d.foreign_draft or {}).get("lang_code") == lang_info[0]),
+                "foreign_lang_code": str((d.foreign_draft or {}).get("lang_code") or ""),
+                "foreign_lang_zh": str((d.foreign_draft or {}).get("lang_zh") or ""),
                 "foreign_name_zh": str((d.foreign_draft or {}).get("name_zh") or ""),
                 "foreign_generated_at": (d.foreign_draft or {}).get("generated_at"),
             }
@@ -1776,6 +1964,9 @@ async def make_foreign_draft(
     entry = await session.get(AdmissionEntry, project.entry_id)
     if entry is None:
         raise HTTPException(404, "准入事项不存在")
+    from app.core.redaction import bind_egress, llm_scope
+    from app.iam.models import Organization
+
     detail = await _entry_detail(session, entry)
     lang_info = await foreign_letter.resolve_submission_language(
         session, entry, str((detail.get("profile") or {}).get("language") or "")
@@ -1783,9 +1974,12 @@ async def make_foreign_draft(
     if lang_info is None:
         raise HTTPException(422, "该事项支持以中文递交，无需另行生成外文正式稿")
     authority_hint = str(detail.get("authority_original") or detail.get("authority_zh") or "")
-    fd = await foreign_letter.generate_foreign_letter(
-        session, entry, d, lang_info, authority_hint=authority_hint
-    )
+    org = await session.get(Organization, project.org_id) if project.org_id else None
+    with llm_scope():
+        bind_egress(session, org)
+        fd = await foreign_letter.generate_foreign_letter(
+            session, entry, d, lang_info, authority_hint=authority_hint
+        )
     d.foreign_draft = fd
     set_detail(
         request,
@@ -1796,12 +1990,26 @@ async def make_foreign_draft(
     return {"id": str(d.id), **fd, "missing": d.missing or []}
 
 
-@user_router.get("/drafts/{draft_id}/foreign")
-async def get_foreign_draft(draft_id: uuid.UUID, user: UserDep, session: SessionDep) -> dict:
-    d = await _draft(session, draft_id, user)
+async def _ensure_foreign_draft_matches_entry(
+    session: AsyncSession, d: AdmissionDraft
+) -> dict:
     fd = d.foreign_draft or {}
     if not fd.get("blocks"):
         raise HTTPException(404, "尚未生成外文正式稿")
+    project = await session.get(AdmissionProject, d.project_id)
+    if project is not None:
+        entry = await session.get(AdmissionEntry, project.entry_id)
+        if entry is not None:
+            lang_info = await foreign_letter.resolve_submission_language(session, entry)
+            if lang_info and fd.get("lang_code") and fd.get("lang_code") != lang_info[0]:
+                raise HTTPException(409, f"外文正式稿语种须为{lang_info[1]}，请重新生成")
+    return fd
+
+
+@user_router.get("/drafts/{draft_id}/foreign")
+async def get_foreign_draft(draft_id: uuid.UUID, user: UserDep, session: SessionDep) -> dict:
+    d = await _draft(session, draft_id, user)
+    fd = await _ensure_foreign_draft_matches_entry(session, d)
     return {"id": str(d.id), **fd, "missing": d.missing or []}
 
 
@@ -1810,9 +2018,7 @@ async def export_foreign_draft(
     draft_id: uuid.UUID, fmt: str, user: UserDep, session: SessionDep
 ) -> Response:
     d = await _draft(session, draft_id, user)
-    fd = d.foreign_draft or {}
-    if not fd.get("blocks"):
-        raise HTTPException(404, "尚未生成外文正式稿")
+    fd = await _ensure_foreign_draft_matches_entry(session, d)
     if fmt not in ("docx", "pdf"):
         raise HTTPException(404, "不支持的导出格式")
     project = await session.get(AdmissionProject, d.project_id)
@@ -2125,7 +2331,7 @@ async def edit_entry(
     profile = dict(entry.profile or {})
     for k, v in (body.profile or {}).items():
         if k not in PROFILE_FIELDS:
-            raise HTTPException(422, f"不能改这一栏：{k}")
+            raise HTTPException(422, "提交了系统不支持修改的事项栏目，请刷新页面后重试")
         v = " ".join(str(v or "").split())[:300] or ("" if k == "authority_roles" else "待核实")
         if v != (profile.get(k) or ("" if k == "authority_roles" else "待核实")):
             before[PROFILE_ZH[k]], after[PROFILE_ZH[k]] = profile.get(k, ""), v
@@ -2168,7 +2374,7 @@ async def edit_entry(
 
             unknown = [c for c in codes or [] if c not in catalog()]
             if unknown:
-                raise HTTPException(422, f"没有这张官方表格：{'、'.join(unknown)}")
+                raise HTTPException(422, "所选的官方表格编号不存在，请从平台表单目录中重新选择")
             before["官方表格"], after["官方表格"] = profile.get("form_codes") or "自动匹配", codes if codes is not None else "自动匹配"
             profile["form_codes"] = codes
             edited.add("profile:form_codes")
@@ -2291,10 +2497,24 @@ async def _own_issue(session: AsyncSession, issue_id: uuid.UUID, user: Principal
 
 @user_router.post("/projects/{project_id}/issues", status_code=201)
 async def add_issue(project_id: uuid.UUID, body: IssueIn, request: Request, user: UserDep, session: SessionDep) -> dict:
+    from app.admission.models import AdmissionProgress
+
     project = await _project(session, project_id, user)
+    if body.progress_id is not None:
+        prog = await session.scalar(
+            select(AdmissionProgress.id).where(
+                AdmissionProgress.id == body.progress_id,
+                AdmissionProgress.project_id == project.id,
+            )
+        )
+        if prog is None:
+            raise HTTPException(422, "关联的办理环节不存在或不属于当前项目")
+    q_text = body.question.strip()
+    if not q_text:
+        raise HTTPException(422, "问题描述不能为空")
     row = AdmissionIssue(
         org_id=user.org_id, project_id=project.id, progress_id=body.progress_id, kind=body.kind,
-        question=body.question.strip(), created_by=user.user_id, updated_by=user.user_id,
+        question=q_text, created_by=user.user_id, updated_by=user.user_id,
     )
     session.add(row)
     set_detail(request, summary=f"准入办理“{project.title}”记录审核问题")

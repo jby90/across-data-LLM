@@ -626,12 +626,44 @@ def build_report_docx(task: AnalysisTask, rv: ReportVersion, dimension: str | No
         parts.append(
             _w_p("该版本未保存判定矩阵快照；请查阅下列章节及其引用，未使用任务最新结果替代。")
         )
+    _RISK_ZH = {
+        "critical": "极高风险",
+        "high": "高风险",
+        "medium": "中风险",
+        "low": "低风险",
+        "info": "提示",
+        "unknown": "待核实",
+        "pending_verification": "待核实",
+        "pending": "待核实",
+        "none": "无显著风险",
+    }
+    _STATUS_ZH = {
+        "complete": "已完成",
+        "completed": "已完成",
+        "partial_gap": "部分缺口待核实",
+        "missing_evidence": "待补充依据",
+        "pending": "待评估",
+        "pending_verification": "待核实",
+        "running": "评估中",
+        "analysis_error": "需复核",
+        "analysis_failed": "需复核",
+        "failed": "需复核",
+    }
+    _inline_risk_re = re.compile(
+        r"(风险\s*[:：]\s*)(CRITICAL|HIGH|MEDIUM|LOW|INFO|PENDING_VERIFICATION|UNKNOWN)\b",
+        re.IGNORECASE,
+    )
+
+    def _clean_dim_line(ln: str) -> str:
+        return _inline_risk_re.sub(
+            lambda m: f"风险：{_RISK_ZH.get(m.group(2).lower(), m.group(2))}", ln
+        )
     matrix_rows = [
         [
             str(f.get("business_fact", "")),
             _clause_ref(f),
             str(f.get("compliance_obligation", "")),
-            str(f.get("risk_level", "")),
+            _RISK_ZH.get(str(f.get("risk_level", "") or "").strip().lower(), str(f.get("risk_level", ""))),
             f"{f.get('basis_quote', '')}\n【参考译文】{f.get('basis_zh', '')}",
         ]
         for f in (task.findings_json or [])
@@ -640,16 +672,20 @@ def build_report_docx(task: AnalysisTask, rv: ReportVersion, dimension: str | No
 
     parts.append(_w_p("三、评估章节", bold=True, size=26, color="000000"))
     for dim in rv.dimensions_json or []:
+        rl_raw = str(dim.get("risk_level", "") or "").strip()
+        st_raw = str(dim.get("status", "") or "").strip()
+        rl_disp = _RISK_ZH.get(rl_raw.lower(), rl_raw)
+        st_disp = _STATUS_ZH.get(st_raw.lower(), st_raw)
         title = (
             f"【{dim.get('dimension_code', '')}】{dim.get('dimension_title', '')} "
-            f"(风险:{dim.get('risk_level', '')} | 状态:{dim.get('status', '')})"
+            f"（风险：{rl_disp}｜状态：{st_disp}）"
         )
         parts.append(_w_p(title, bold=True, size=24, color="0F172A"))
         if dim.get("missing_gap_note"):
             parts.append(_w_p(f"核查缺口:{dim['missing_gap_note']}", True, 20, "B45309"))
         for line in str(dim.get("content_markdown", "")).splitlines():
             if line.strip():
-                parts.append(_w_p(line.strip().lstrip("#").strip()))
+                parts.append(_w_p(_clean_dim_line(line.strip().lstrip("#").strip())))
         for cite in dim.get("citations", []) or []:
             parts.append(
                 _w_p(

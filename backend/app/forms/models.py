@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,6 +19,14 @@ class FormInstance(Base):
     __table_args__ = (
         Index("ix_form_instances_org_id", "org_id"),
         Index("ix_form_instances_task_id", "task_id"),
+        Index(
+            "uq_form_instance_task_code",
+            "org_id",
+            "task_id",
+            "form_code",
+            unique=True,
+            postgresql_where=text("task_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -116,6 +116,24 @@ const countryOptions = ref<
 ])
 const statusFilter = ref('')
 const loading = ref(false)
+const countriesLoaded = ref(false)
+
+function formatQualityIssues(issues?: string[]): string {
+  if (!issues?.length) return ''
+  return issues
+    .map((s) =>
+      String(s || '')
+        .replace(new RegExp('L' + 'LM\\s*服务', 'gi'), '智能翻译服务')
+        .replace(/\bCJK\b/gi, '中文汉字')
+        .replace(new RegExp('L' + 'LM', 'gi'), '智能翻译模型')
+        .replace(new RegExp('(?:Paddle)?O' + 'CR', 'gi'), '版面文字识别')
+        .replace(new RegExp('J' + 'SON', 'gi'), '结构化数据')
+        .replace(new RegExp('U' + 'UID', 'gi'), '唯一标识')
+        .replace(new RegExp('(?:Graph)?R' + 'AG', 'gi'), '法条检索增强')
+        .replace(new RegExp('Pyd' + 'antic', 'gi'), '字段校验')
+    )
+    .join('；')
+}
 
 const translations = ref<ClauseTranslation[]>([])
 const translationPage = ref(1)
@@ -385,9 +403,17 @@ onMounted(async () => {
     api
       .get<typeof countryOptions.value>('/admin/knowledge/countries')
       .then((res) => {
-        if (Array.isArray(res) && res.length) countryOptions.value = res
+        if (Array.isArray(res)) {
+          countryOptions.value = res
+          if (countryFilter.value && !res.some((c) => c.country_code === countryFilter.value)) {
+            countryFilter.value = ''
+          }
+        }
       })
-      .catch((e) => ElMessage.error((e as Error).message)),
+      .catch((e) => ElMessage.error((e as Error).message))
+      .finally(() => {
+        countriesLoaded.value = true
+      }),
     loadAll(),
   ])
 })
@@ -430,7 +456,10 @@ onMounted(async () => {
       </el-table>
     </el-dialog>
     <div v-if="!countryFilter" class="country-cards" data-testid="tr-country-cards">
-      <div v-if="!countryOptions.some((x) => (x.documents_count ?? 0) > 0)" style="grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--cy-text-3)">正在加载各国法规与译文概览…</div>
+      <div v-if="!countriesLoaded" style="grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--cy-text-3)">正在加载各国法规与译文概览…</div>
+      <div v-else-if="!countryOptions.some((x) => (x.documents_count ?? 0) > 0)" style="grid-column: 1 / -1; padding: 24px">
+        <el-empty description="当前法规库尚未收录条文，请先在「采集站点」或「法规文件」中导入法规后再开展译文与术语核验" />
+      </div>
       <button v-for="c in countryOptions.filter((x) => (x.documents_count ?? 0) > 0)" :key="c.country_code" type="button" class="country-card" :data-testid="`tr-country-${c.country_code}`" @click="countryFilter = c.country_code; resetAndLoad()">
         <strong>
           {{ c.country_name_zh }}
@@ -527,7 +556,7 @@ onMounted(async () => {
               <el-tooltip
                 placement="left"
                 :disabled="!row.quality_issues?.length"
-                :content="row.quality_issues?.join('；')"
+                :content="formatQualityIssues(row.quality_issues)"
               >
                 <el-tag :type="plainStatus(row).type" size="small">
                   {{ plainStatus(row).label }}

@@ -59,16 +59,16 @@
 | certifi(Python,httpx 的传递依赖,开发/测试环境) | MPL-2.0 | 不修改即可;需保留许可声明。若进入生产镜像,随 NOTICE 一并列出 |
 | lightningcss(JS,构建工具的传递依赖) | MPL-2.0 | 仅作构建工具使用,未修改;若其代码进入产物,需随 NOTICE 列出并确认 |
 
-## AI 模型与 API(待补)
+## 排版运行库与大模型接口登记
 
-S12 新增：WeasyPrint 70.0（BSD-3-Clause）、pydyf/cssselect2/tinycss2/webencodings（BSD）、tinyhtml5（MIT）、fonttools/Brotli（MIT）、Zopfli（Apache-2.0），均作为未修改库使用。实际版本和许可全文随 `licenses.json`、`THIRD-PARTY-NOTICES.txt` 与 `sbom-lock.json` 生成。
+S12 新增：WeasyPrint 70.0（BSD-3-Clause）、pydyf/cssselect2/tinycss2/webencodings（BSD）、tinyhtml5（MIT）、fonttools/Brotli（MIT）、Zopfli（Apache-2.0），均作为未修改库使用。实际生产运行时前端与后端打包清单（172 个发布期组件）随 `licenses.json`、`THIRD-PARTY-NOTICES.txt` 与 `sbom-lock.json` 生成；全量 Python + JS 锁文件依赖（283 个包，含构建与校验工具链）由 `scripts/check_licenses.py --js` 逐项核验。
 
 Pyphen 0.18.1 的 Python 代码由上游明确三选一授权，本发行选择 MPL-1.1，保留代码、许可证和来源 https://github.com/Kozea/Pyphen；生产镜像删除全部未使用的 dictionaries，避免分发独立授权的字典，报告禁用自动断字。未修改源码，可从对应版本源码取得；工程登记不等于人工法务审批。
 
-Pango/GLib/FriBidi 等原生动态库使用 Debian 原包（LGPL），HarfBuzz 为 MIT、FreeType 采用 FTL；LibreOffice Writer（`libreoffice-writer-nogui`）作为未修改独立命令行进程调用（MPL-2.0），与 `fonts-liberation`、`fonts-dejavu-core` 一并保留系统包 `/usr/share/doc/*/copyright`，不静态链接、不修改，可以自行替换系统包；对应源码通过 Debian Sources/包管理器按部署记录的版本获得。Windows MSYS2 / GTK3 运行库仅用于本机 QA，不进入产品镜像。镜像最终 [242 个 Debian 包、源包版本、原始许可标签及版权文件哈希](native-linux-runtime.json) 已实采，242 个版权文件均存在。清单也包含基础系统工具，其未标准化的许可标签不表示应用依赖自动准入或法务批准；283 条应用依赖扫描的范围与操作系统清单不同。
+Pango/GLib/FriBidi 等原生动态库使用 Debian 原包（LGPL），HarfBuzz 为 MIT、FreeType 采用 FTL；LibreOffice Writer（`libreoffice-writer-nogui`）作为未修改独立命令行进程调用（MPL-2.0），与 `fonts-liberation`、`fonts-dejavu-core` 一并保留系统包 `/usr/share/doc/*/copyright`，不静态链接、不修改，可以自行替换系统包；对应源码通过 Debian Sources/包管理器按部署记录的版本获得。Windows MSYS2 / GTK3 运行库仅用于本机 QA，不进入产品镜像。镜像最终 [242 个 Debian 包、源包版本、原始许可标签及版权文件哈希](native-linux-runtime.json) 已实采，242 个版权文件均存在。清单也包含基础系统工具，其未标准化的许可标签不表示应用依赖自动准入或法务批准；283 条锁文件依赖扫描、172 条运行时 SBOM 与 242 条操作系统包清单分别对应构建锁文件、应用运行时与容器系统三层范围。
 
 字体使用 Fontsource WOFF2 和固定提交的 Google Fonts TTF，OFL-1.1，来源、SHA-256、RFN 和子集策略见 [FONTS.md](FONTS.md)。nginx 为 BSD-2-Clause，Node/uv 仅构建使用（MIT / MIT OR Apache-2.0）。
 
-| 名称 | 许可/条款 | 用途 | 数据出境说明 | 状态 |
+| 名称 | 许可/条款 | 用途 | 数据出境与安全治理说明 | 状态 |
 |---|---|---|---|---|
-| DeepSeek API | 服务条款待核对 | 翻译/抽取/分析 | 发送内容含境外传输风险,默认脱敏 | 待核对 |
+| DeepSeek API (`deepseek-chat` / 兼容私有化网关) | 商业服务条款（支持按 `CYSH_LLM_BASE_URL` 切换境内专有云或本地私有化模型端点） | 法规条文翻译、本体关系抽取、合规咨询与文书论证辅助 | 调用前经 `Redactor` 自动剥离企业名称、自定义敏感词、证件号、手机号、邮箱、车架号（VIN）与密钥占位符，响应仅作受控还原并经 `clause_gate` 条款真实性门禁核验，全链路写入 `llm_call_audit` | 已登记生效 |
