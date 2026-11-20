@@ -3363,4 +3363,116 @@ def test_round20_clause_truncation_and_gate6_guards() -> None:
     assert "CNDP-F112" not in clean_text("XI. DROITS DES PERSONNES CONCERNÉES\nCNDP-F112\n10/12\nService compétent :")
 
 
+def test_round21_cover_page_isolation_and_sentence_excerpt_guard():
+    """Round 21 regression:
+    1) CAC official narrative templates (cn_pia Annex 5 & cn_self_assessment Annex 4) isolate the
+       Cover Page cleanly on Page 1; ``说明：`` always starts on Page 2 with ``pageBreakBefore`` +
+       ``keepNext`` + ``keepLines`` (never ``w:val='0'``), survive online edits, and render cleanly
+       under builtin/office PDF engines without bleeding ``说明：`` onto Page 1.
+    2) Citation excerpt cutters (``_quote``, ``clause_gate.cut``, ``admission.engine._cut``) never
+       cut right after a numbered list prefix (``5. ……`` / ``6. ……``) or a dangling conjunction
+       (``；以及 ……``).
+    """
+    import io
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    from app.admission.engine import _cut as adm_cut
+    from app.analysis import official_docx as od
+    from app.analysis.clause_gate import cut as gate_cut
+    from app.analysis.document_templates import Rendered, _quote, _render_pdf
+
+    sample_vals = {
+        "company_name": "启衡智行汽车科技（上海）有限公司",
+        "self_assessed_on": "2026-11-20",
+        "purpose": "智能网联汽车远程故障预诊断与安全预警",
+        "lawful_basis": "取得个人单独同意",
+        "data_subjects": "境内车主约 3.2 万人",
+        "data_volume": "累计约 3.2 万人",
+        "recipient": "Qiheng Mobility Asia-Pacific Pte. Ltd.",
+        "recipient_country": "新加坡",
+    }
+
+    for fn in (od.cn_pia, od.cn_self_assessment):
+        res = fn(sample_vals, blank="【待补充】")
+        patched = od.apply_edits_to_official_docx(
+            res.data,
+            [("智能网联汽车远程故障预诊断与安全预警。", "智能网联汽车远程故障诊断、OTA回执校验与安全预警。")],
+        )
+        for docx_bytes in (res.data, patched):
+            with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zf:
+                root = ET.fromstring(zf.read("word/document.xml"))
+            body = root.find(od.W + "body")
+            assert body is not None
+            paras = [el for el in body if el.tag == od.W + "p"]
+            instr_idx = next(i for i, p in enumerate(paras) if od._text(p).strip().startswith("说明："))
+            instr_p = paras[instr_idx]
+            # No trailing empty cover paragraphs right before ``说明：``
+            assert od._text(paras[instr_idx - 1]).strip() == "2026 年 11 月 20 日"
+            ppr = instr_p.find(od.W + "pPr")
+            assert ppr is not None
+            for tag in ("pageBreakBefore", "keepNext", "keepLines"):
+                el_tag = ppr.find(od.W + tag)
+                assert el_tag is not None
+                assert (el_tag.get(od.W + "val") or "true").lower() not in ("0", "false", "off")
+            assert not any(
+                (br.get(od.W + "type") or "").lower() == "page" for br in instr_p.iter(od.W + "br")
+            )
+            # Heading/prompt paragraphs after ``一、`` never retain ``w:keepNext w:val="0"``
+            seen_major = False
+            for p in paras:
+                txt = od._text(p).strip()
+                if txt.startswith("一、"):
+                    seen_major = True
+                if seen_major and (txt.startswith(("一、", "二、", "（一）", "1.")) or txt.endswith("：")):
+                    hppr = p.find(od.W + "pPr")
+                    kn = hppr.find(od.W + "keepNext") if hppr is not None else None
+                    assert kn is not None and (kn.get(od.W + "val") or "true").lower() not in ("0", "false", "off")
+
+        # Online preview blocks keep default contract (no pagebreak blocks), while PDF fallback blocks carry pagebreak
+        web_blocks = od.docx_preview_blocks(res.data)
+        assert not any(b.get("type") == "pagebreak" for b in web_blocks)
+        pdf_blocks = od.docx_preview_blocks(res.data, include_pagebreaks=True)
+        assert any(b.get("type") == "pagebreak" for b in pdf_blocks)
+
+        builtin_pdf = _render_pdf(Rendered(blocks=pdf_blocks), "报告测试")
+        doc_pdf = pdfium.PdfDocument(builtin_pdf)
+        assert len(doc_pdf) >= 2
+        p1_txt = doc_pdf[0].get_textpage().get_text_bounded() or ""
+        p2_txt = doc_pdf[1].get_textpage().get_text_bounded() or ""
+        assert "启衡智行汽车科技（上海）有限公司（盖章）" in p1_txt
+        assert "2026 年 11 月 20 日" in p1_txt
+        assert "说明：" not in p1_txt and "（一）" not in p1_txt
+        assert "说明：" in p2_txt and "（一）" in p2_txt
+
+    # Excerpt cutter never leaves dangling list numbers ('6. ……') or conjunctions ('；以及 ……')
+    numbered_clause = (
+        "在下列情形下，无须为处理具有个人性质的数据提交任何申报或申请任何许可：\n"
+        "1. 在公共法主体各自在其权限范围内进行的处理中。\n"
+        "2. 在非营利协会在其正常、合法履行其任务范围内保存其成员及与其打交道者的记录时。\n"
+        "3. 在处理的标的为依照法律或法规规定保存专用于告知公众的记录时。\n"
+        "4. 在处理的标的为由教育机构为特定教育或行政目的而涉及学生的处理时。\n"
+        "5. 在处理的标的为商业公司中的员工或成员且限于其合法开展活动的范围和需要时。\n"
+        "6. 在处理的标的完全属于自然人纯粹个人或家庭活动范畴的数据处理时。"
+    )
+    q_num = _quote({"quote_zh": numbered_clause}, limit=245)
+    assert not q_num.endswith(("6. ……", "6.……", "5. ……"))
+    assert q_num.endswith("。 ……")
+    assert not gate_cut(numbered_clause, limit=245).endswith(("6.……", "5.……"))
+    assert not adm_cut(numbered_clause, limit=245).endswith(("6.……", "5.……"))
+
+    conj_clause = (
+        "每名指明人士必须对下列事项保守秘密，并协助保守该等秘密——\n"
+        "（a）任何个人数据，若其载于根据第 21 条请求的个人数据中，组织会被要求或获授权拒绝披露该等数据；\n"
+        "（b）信息是否存在，如果组织在根据第 21 条拒绝提供访问时未说明该信息是否存在；\n"
+        "（c）根据第 3 款被认定为机密的所有事项；以及\n"
+        "（d）委员会在履行法定调查职能过程中获知的任何商业秘密或技术架构参数。"
+    )
+    q_conj = _quote({"quote_zh": conj_clause}, limit=172)
+    assert "以及 ……" not in q_conj and "以及……" not in q_conj
+    assert q_conj.endswith("； ……")
+    assert _quote({"clause_number": "第 22 条", "quote_zh": "第 22 条。方案 0（见附录 E）。"}).startswith("方案 0")
+
+
+
 

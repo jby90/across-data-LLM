@@ -136,16 +136,19 @@ def _blocks_html(blocks):
             out.append(f"<h2{_dir_attr(blk['text'])}>{_text(blk['text'])}</h2>")
         elif kind == "h3":
             out.append(f"<h3{_dir_attr(blk['text'])}>{_text(blk['text'])}</h3>")
+        elif kind == "pagebreak":
+            out.append('<div class="pagebreak"></div>')
         elif kind == "p":
             s_plain = strip_bold(str(blk["text"] or "")).strip()
+            is_lead_keep = not blk.get("center") and len(s_plain) <= 45 and s_plain.endswith(("：", ":"))
             is_prose = (
                 not blk.get("center")
                 and len(re.findall(r"[\u4e00-\u9fff]", s_plain)) >= 6
                 and not s_plain.startswith(("•", "·", "[", "【部分样稿】", "任务:", "任务："))
-                and not (len(s_plain) <= 45 and s_plain.endswith(("：", ":")))
+                and not is_lead_keep
                 and not (" → " in s_plain and not s_plain.endswith("。"))
             )
-            p_cls = "center" if blk.get("center") else ("prose" if is_prose else "")
+            p_cls = "center" if blk.get("center") else ("lead-keep" if is_lead_keep else ("prose" if is_prose else ""))
             out.append(_rp(blk["text"], p_cls))
         elif kind == "item":
             out.append(
@@ -276,6 +279,8 @@ def report_html(
         .finding .ftitle{{font-size:11pt;margin:0 0 2pt}} .finding .kv{{margin:1.5pt 0}}
         .ref{{break-inside:avoid;margin:5pt 0}}
         p.center{{text-align:center}}
+        p.lead-keep{{break-after:avoid;page-break-after:avoid}}
+        .pagebreak{{break-before:page;page-break-before:always;height:0;margin:0;padding:0}}
         p.prose.ltr{{text-indent:2em;text-align:justify}}
         table.grid td{{font-size:9.5pt}} table.grid td.blank{{border:0}}
         .ref .refhead{{font-weight:700;font-size:9.5pt}}

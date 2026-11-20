@@ -866,8 +866,15 @@ def _style_official_para(para, *, east_asia: str, sz: str = "28", bold: bool = F
     if ppr is None:
         ppr = ET.Element(W + "pPr")
         para.insert(0, ppr)
-    if keep_next and ppr.find(W + "keepNext") is None:
-        ppr.insert(1 if ppr.find(W + "pStyle") is not None else 0, ET.Element(W + "keepNext"))
+    for old_kn in ppr.findall(W + "keepNext") + ppr.findall(W + "keepLines"):
+        ppr.remove(old_kn)
+    for old_wc in ppr.findall(W + "widowControl"):
+        if (old_wc.get(W + "val") or "").strip().lower() in ("0", "false", "off"):
+            ppr.remove(old_wc)
+    if keep_next:
+        ins_at = 1 if ppr.find(W + "pStyle") is not None else 0
+        ppr.insert(ins_at, ET.Element(W + "keepLines"))
+        ppr.insert(ins_at, ET.Element(W + "keepNext"))
     if center:
         for old in ppr.findall(W + "ind") + ppr.findall(W + "jc"):
             ppr.remove(old)
@@ -1096,6 +1103,67 @@ def _paras_like(guide, text: str) -> list:
     return [_para_like(guide, ln) for ln in lines]
 
 
+def _enforce_cover_page_break(body) -> None:
+    """Ensure the CAC official cover page always ends cleanly after the filing date and ``说明：``
+    starts at the top of Page 2 across Microsoft Word, LibreOffice Writer, and builtin PDF engines."""
+    if body is None:
+        return
+    elems = list(body)
+    instr_idx: int | None = None
+    for idx, el in enumerate(elems):
+        if el.tag != W + "p":
+            continue
+        txt = _text(el).strip()
+        if not txt:
+            continue
+        if re.match(r"^[一二三四五六七八九十]+、", txt):
+            break
+        if txt.startswith(("说明：", "说明:")):
+            instr_idx = idx
+            break
+    if instr_idx is None:
+        return
+
+    # Remove trailing blank cover paragraphs right before ``说明：`` so cover spacers never overflow Page 1.
+    scan = instr_idx - 1
+    while scan >= 0:
+        prev = elems[scan]
+        if prev.tag != W + "p" or _text(prev).strip():
+            break
+        prev_ppr = prev.find(W + "pPr")
+        if prev_ppr is not None and prev_ppr.find(W + "sectPr") is not None:
+            break
+        body.remove(prev)
+        scan -= 1
+
+    instr_para = elems[instr_idx]
+    for run in list(instr_para.findall(W + "r")):
+        for br in list(run.findall(W + "br")):
+            if (br.get(W + "type") or "").strip().lower() == "page":
+                run.remove(br)
+        has_content = any(
+            c.tag in (W + "t", W + "sym", W + "tab", W + "br", W + "drawing", W + "pict")
+            for c in run
+        )
+        if not has_content:
+            instr_para.remove(run)
+
+    ppr = instr_para.find(W + "pPr")
+    if ppr is None:
+        ppr = ET.Element(W + "pPr")
+        instr_para.insert(0, ppr)
+    for tag in ("keepNext", "keepLines", "pageBreakBefore"):
+        for old_el in ppr.findall(W + tag):
+            ppr.remove(old_el)
+    for old_wc in ppr.findall(W + "widowControl"):
+        if (old_wc.get(W + "val") or "").strip().lower() in ("0", "false", "off"):
+            ppr.remove(old_wc)
+    ins_at = 1 if ppr.find(W + "pStyle") is not None else 0
+    ppr.insert(ins_at, ET.Element(W + "pageBreakBefore"))
+    ppr.insert(ins_at, ET.Element(W + "keepLines"))
+    ppr.insert(ins_at, ET.Element(W + "keepNext"))
+
+
 def fill_narrative_form(template: bytes, start_title: str, end_title: str, answers: list[tuple[str, str]],
                         cover: dict[str, str] | None = None,
                         cover_date: str = "",
@@ -1112,6 +1180,7 @@ def fill_narrative_form(template: bytes, start_title: str, end_title: str, answe
     _cut_annex(body, start_title, end_title)
     _strip_template_word(body)
     _normalize_doc_fonts(body)
+    _enforce_cover_page_break(body)
     result = FillResult(b"")
     children = list(body)
     list_table = body.find(W + "tbl")  # 模板自带的清单表（在插入别的表之前定位）
@@ -1133,7 +1202,7 @@ def fill_narrative_form(template: bytes, start_title: str, end_title: str, answe
                 _strip_trailing_semicolon(el)
                 _style_official_para(el, east_asia="仿宋", sz="28", bold=True, keep_next=True)
             else:
-                _style_official_para(el, east_asia="仿宋", sz="28", bold=False, keep_next=False)
+                _style_official_para(el, east_asia="仿宋", sz="28", bold=False, keep_next=txt.endswith(("：", ":")))
 
     for prompt, text in answers:
         if not text:
@@ -1802,7 +1871,25 @@ def cn_standard_contract(values: dict[str, str], blank: str = "") -> FillResult:
     )
 
 
-def docx_preview_blocks(data: bytes) -> list[dict]:
+def _para_has_pagebreak_before(el) -> bool:
+    ppr = el.find(W + "pPr")
+    if ppr is not None:
+        pb = ppr.find(W + "pageBreakBefore")
+        if pb is not None and (pb.get(W + "val") or "true").strip().lower() not in ("0", "false", "off"):
+            return True
+    for br in el.iter(W + "br"):
+        if (br.get(W + "type") or "").strip().lower() == "page":
+            return True
+    return False
+
+
+def _para_is_centered(el) -> bool:
+    ppr = el.find(W + "pPr")
+    jc = ppr.find(W + "jc") if ppr is not None else None
+    return bool(jc is not None and (jc.get(W + "val") or "").strip().lower() == "center")
+
+
+def docx_preview_blocks(data: bytes, *, include_pagebreaks: bool = False) -> list[dict]:
     """Convert a filled official .docx into BlocksView blocks (title, heading, paragraph, table) for online preview."""
     zin = zipfile.ZipFile(io.BytesIO(data))
     root = ET.fromstring(zin.read("word/document.xml"))
@@ -1824,11 +1911,18 @@ def docx_preview_blocks(data: bytes) -> list[dict]:
                 parts.append("☑" if ch in ("F0FE", "00FE", "F052", "0052") else "☐")
         return "".join(parts)
 
+    pending_break = False
     for el in body:
         if el.tag == W + "p":
+            has_pb = include_pagebreaks and seen_title and _para_has_pagebreak_before(el)
             txt = _preview_text(el).strip()
             if not txt:
+                if has_pb:
+                    pending_break = True
                 continue
+            if (has_pb or pending_break) and blocks and blocks[-1].get("type") != "pagebreak":
+                blocks.append({"type": "pagebreak"})
+                pending_break = False
             if not seen_title:
                 blocks.append({"type": "title", "text": txt})
                 seen_title = True
@@ -1838,7 +1932,10 @@ def docx_preview_blocks(data: bytes) -> list[dict]:
             elif seen_major and sub_re.match(txt) and len(txt) <= 60:
                 blocks.append({"type": "subheading", "text": txt})
             else:
-                blocks.append({"type": "paragraph", "text": txt})
+                p_blk: dict = {"type": "paragraph", "text": txt}
+                if include_pagebreaks and not seen_major and _para_is_centered(el):
+                    p_blk["center"] = True
+                blocks.append(p_blk)
         elif el.tag == W + "tbl":
             rows_xml = el.findall(W + "tr")
             raw_rows: list[list[tuple[str, int, str]]] = []

@@ -414,6 +414,7 @@ def _quote(citation: dict, limit: int = 300) -> str:
     from app.analysis.clause_gate import (
         _close_delims_before_ellipsis,
         clean_margin_numbers,
+        find_clean_sentence_cut,
         strip_own_label,
     )
 
@@ -421,9 +422,9 @@ def _quote(citation: dict, limit: int = 300) -> str:
     text = zh if zh not in _NO_TRANSLATION else clean_margin_numbers(str(citation.get("quote_original") or "")).strip()
     if len(text) <= limit:
         return text
-    cut = max(text.rfind(mark, 0, limit) for mark in ("。", "；", ";", "！", "？", "\n", ". "))
-    if cut >= limit // 3:
-        return _close_delims_before_ellipsis(text[: cut + 1].rstrip()) + " ……"
+    cut_end = find_clean_sentence_cut(text, limit)
+    if cut_end > 0:
+        return _close_delims_before_ellipsis(text[:cut_end].rstrip(" /\n\t")) + " ……"
     end = limit
     if end < len(text) and text[end - 1].isascii() and text[end].isascii():
         while end > limit - 24 and text[end - 1].isalnum():
@@ -770,9 +771,11 @@ def _render_pdf(
         elif kind == "heading":
             blocks.append({"t": "h2", "text": block["text"]})
         elif kind == "subheading":
-            blocks.append({"t": "p", "text": f"**{block['text']}**"})
+            blocks.append({"t": "h3", "text": block["text"]})
+        elif kind == "pagebreak":
+            blocks.append({"t": "pagebreak"})
         elif kind == "paragraph":
-            blocks.append({"t": "p", "text": block["text"]})
+            blocks.append({"t": "p", "text": block["text"], "center": bool(block.get("center"))})
         elif kind == "list":
             for item in block["items"]:
                 number += 1

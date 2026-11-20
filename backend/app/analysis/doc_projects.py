@@ -1630,7 +1630,7 @@ async def _docx_form_to_pdf(
             return await asyncio.to_thread(docx_to_pdf, docx_bytes)
         except PdfEngineUnavailable:
             pass
-    blocks = await asyncio.to_thread(od.docx_preview_blocks, docx_bytes)
+    blocks = await asyncio.to_thread(od.docx_preview_blocks, docx_bytes, include_pagebreaks=True)
     return await asyncio.to_thread(
         _render_pdf, Rendered(blocks=blocks), title_part, table_style=table_style, foreign=foreign
     )

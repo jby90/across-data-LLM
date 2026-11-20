@@ -192,9 +192,9 @@ def clean_margin_numbers(text: str) -> str:
 def strip_own_label(label: str, text: str) -> str:
     """“第36条：第36条 ……” → the excerpt without repeating the article number it is shown under."""
     t = clean_margin_numbers(text or "").lstrip()
-    m = re.match(r"^(【)?(第\s*[0-9一二三四五六七八九十百]+[A-Za-z]?\s*(条|项|段|节))(】)?\s*(?:[（(][^）)\n]{0,40}[）)])?\s*[:：/／\-—–]*\s*", t)
+    m = re.match(r"^(【)?(第\s*[0-9一二三四五六七八九十百]+[A-Za-z]?\s*(条|项|段|节))(】)?\s*(?:[（(][^）)\n]{0,40}[）)])?\s*[:：/／\-—–。.]*\s*", t)
     if m and re.sub(r"\s", "", m.group(2)) == re.sub(r"\s", "", label or ""):
-        return t[m.end():].lstrip(" /／\n")
+        return t[m.end():].lstrip(" /／\n。.")
     return t
 
 
@@ -207,14 +207,50 @@ def _close_delims_before_ellipsis(prefix: str) -> str:
     return s
 
 
+_ABBREV_BEFORE_DOT_RE = re.compile(
+    r"(?:^|[\s(\[])(?:Art|Arts|Sec|Secs|No|Nos|Ch|Fig|Figs|al|etc|vs|cf|para|paras|sub|pt|vol|rev|ed|e\.g|i\.e|\d+|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})$"
+)
+_DANGLING_LINE_TAIL_RE = re.compile(
+    r"(?:[:：—–\-]|(?:以及|及|和|或|且|并|与|and|or|ou|et|أو|و)|(?:^|[\s（(])(?:\d+\.|[a-zA-Z]\.|[一二三四五六七八九十]+、))\s*$",
+    re.IGNORECASE,
+)
+
+
+def find_clean_sentence_cut(text: str, limit: int) -> int:
+    """Return the index (end-exclusive) of the cleanest sentence/clause boundary ``<= limit``,
+    or ``-1`` when none exists past ``limit // 3``. Never cuts right after a list item prefix
+    (``5. ``, ``6. ``) or right after a dangling conjunction (``；以及\\n``)."""
+    prefix = text[:limit]
+    best = -1
+    for ch in ("。", "；", ";", "！", "？"):
+        pos = prefix.rfind(ch)
+        if pos >= 0 and pos + 1 > best:
+            best = pos + 1
+    for m in re.finditer(r'[A-Za-z0-9)\]"”\u2019]\.(?=\s|$)', prefix):
+        dot_end = m.end()
+        before_dot = prefix[: dot_end - 1]
+        if not _ABBREV_BEFORE_DOT_RE.search(before_dot) and dot_end > best:
+            best = dot_end
+    for sep in ("\n", " / "):
+        pos = prefix.rfind(sep)
+        while pos >= limit // 3:
+            before_sep = prefix[:pos].rstrip()
+            if before_sep and not _DANGLING_LINE_TAIL_RE.search(before_sep):
+                if pos > best:
+                    best = pos
+                break
+            pos = prefix.rfind(sep, 0, pos)
+    return best if best >= limit // 3 else -1
+
+
 def cut(text: str, limit: int = 220) -> str:
     """An excerpt that ends at the end of a sentence or an item, marked when cut."""
     text = clean_margin_numbers(text or "")
     if len(text) <= limit:
         return text
-    cut_at = max(text.rfind(m, 0, limit) for m in ("。", "；", ";", "！", "？", "\n", " / "))
-    if cut_at >= limit // 3:
-        return _close_delims_before_ellipsis(text[: cut_at + 1].rstrip(" /")) + "……"
+    cut_end = find_clean_sentence_cut(text, limit)
+    if cut_end > 0:
+        return _close_delims_before_ellipsis(text[:cut_end].rstrip(" /\n\t")) + "……"
     end = limit
     if end < len(text) and text[end - 1].isascii() and text[end].isascii():
         while end > limit - 24 and text[end - 1].isalnum():

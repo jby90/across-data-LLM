@@ -38,6 +38,10 @@ _DANGLING_GAZETTE_INTRO = re.compile(
 _INLINE_ZH_TOC = re.compile(
     r"^(.{20,300}?)\s+目\s*录\s+(?=(?:序言|前言|引言|1[\s.、]|一[、\s]|第[一1][章编部分]|\d+\s+\S))"
 )
+_CLAUSE_HEAD = re.compile(
+    r"(?m)^\s*(?:第\s*[(（\d一二三四五六七八九十百]|المادة|الفصل|article\b|section\b)",
+    re.IGNORECASE,
+)
 
 
 def _running_header(line: str, prev_line: str = "") -> bool:
@@ -60,13 +64,13 @@ def cut_at_contents(text: str) -> str:
             while kept and (len(kept[-1].strip()) <= 3 or _PAGE_HEADER.match(kept[-1].strip())):
                 kept.pop()
             candidate = "\n".join(kept).rstrip()
-            if len(candidate) >= 120:
+            if len(candidate) >= 120 or (len(candidate) >= 12 and _CLAUSE_HEAD.search(candidate)):
                 return candidate
         m_in = _INLINE_ZH_TOC.match(line)
         if m_in and (i > 0 or len(text) >= 800):
             kept = [*lines[:i], m_in.group(1).rstrip()]
             candidate = "\n".join(kept).rstrip()
-            if len(candidate) >= 120:
+            if len(candidate) >= 120 or (len(candidate) >= 12 and _CLAUSE_HEAD.search(candidate)):
                 return candidate
     return text
 

@@ -537,12 +537,12 @@ async def _export_instance_file(
             try:
                 data = await asyncio.to_thread(docx_to_pdf, data)
             except PdfEngineUnavailable:
-                blocks = await asyncio.to_thread(od.docx_preview_blocks, data)
+                blocks = await asyncio.to_thread(od.docx_preview_blocks, data, include_pagebreaks=True)
                 data = await asyncio.to_thread(
                     _render_pdf, Rendered(blocks=blocks), pdf_header, foreign=is_foreign_form
                 )
         else:
-            blocks = await asyncio.to_thread(od.docx_preview_blocks, data)
+            blocks = await asyncio.to_thread(od.docx_preview_blocks, data, include_pagebreaks=True)
             data = await asyncio.to_thread(
                 _render_pdf, Rendered(blocks=blocks), pdf_header, foreign=is_foreign_form
             )

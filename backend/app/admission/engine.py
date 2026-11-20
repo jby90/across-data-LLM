@@ -164,13 +164,13 @@ def law_name(title: str) -> str:
 
 
 def _cut(text: str, limit: int) -> str:
-    from app.analysis.clause_gate import _close_delims_before_ellipsis
+    from app.analysis.clause_gate import _close_delims_before_ellipsis, find_clean_sentence_cut
 
     if len(text) <= limit:
         return text
-    cut = max(text.rfind(m, 0, limit) for m in ("。", "；", ";", ". "))
-    if cut > limit // 3:
-        return _close_delims_before_ellipsis(text[: cut + 1].rstrip()) + "……"
+    cut_end = find_clean_sentence_cut(text, limit)
+    if cut_end > 0:
+        return _close_delims_before_ellipsis(text[:cut_end].rstrip(" /\n\t")) + "……"
     end = limit
     if end < len(text) and text[end - 1].isascii() and text[end].isascii():
         while end > limit - 24 and text[end - 1].isalnum():

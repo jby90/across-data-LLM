@@ -1311,7 +1311,7 @@ async def export_document_pdf(
             except PdfEngineUnavailable:
                 pdf_bytes = None
         if pdf_bytes is None:
-            fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, official[0])
+            fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, official[0], include_pagebreaks=True)
             pdf_bytes = await asyncio.to_thread(
                 build_pdf, Rendered(blocks=fb_blocks), official[1], table_style="formal_black"
             )
@@ -1425,7 +1425,7 @@ async def export_edpb_en_pdf(
         except PdfEngineUnavailable:
             pdf_bytes = None
     if pdf_bytes is None:
-        fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, data)
+        fb_blocks = await asyncio.to_thread(od.docx_preview_blocks, data, include_pagebreaks=True)
         pdf_bytes = await asyncio.to_thread(
             build_pdf,
             Rendered(blocks=fb_blocks),
