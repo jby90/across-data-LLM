@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MAP_VIEWBOX, WORLD_COUNTRY_PATHS, buildRouteArcPath, getCountryHub } from '@cyshuhe/shared'
+import { MAP_VIEWBOX, WORLD_COUNTRY_PATHS, buildRouteArcPath, getCountryHub, getCountryLabelOffset } from '@cyshuhe/shared'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
@@ -163,22 +163,12 @@ const mapArcs = computed(() => {
   return out
 })
 
-function labelOffset(cc: string, hub: [number, number]): { x: number; y: number; anchor: 'start' | 'middle' | 'end' } {
-  if (cc === 'CN') return { x: hub[0] - 10, y: hub[1] - 10, anchor: 'end' }
-  if (cc === 'SG') return { x: hub[0] + 9, y: hub[1] + 5, anchor: 'start' }
-  if (cc === 'MA') return { x: hub[0] - 6, y: hub[1] + 21, anchor: 'start' }
-  if (cc === 'TN') return { x: hub[0] - 8, y: hub[1] - 10, anchor: 'middle' }
-  if (cc === 'EG') return { x: hub[0] - 4, y: hub[1] + 21, anchor: 'middle' }
-  if (cc === 'LB') return { x: hub[0] + 9, y: hub[1] - 3, anchor: 'start' }
-  return { x: hub[0] + 8, y: hub[1] - 6, anchor: 'start' }
-}
-
 const mapHubMarkers = computed(() =>
   sovereignCountries.value
     .map((c) => {
       const hub = getCountryHub(c.country_code)
       if (!hub) return null
-      const lbl = labelOffset(c.country_code, hub)
+      const lbl = getCountryLabelOffset(c.country_code, hub)
       return {
         code: c.country_code,
         name: c.country_name_zh,
@@ -976,6 +966,11 @@ onUnmounted(() => {
   stroke-width: 1.8;
   stroke-dasharray: 5 5;
   animation: routeFlow 2.4s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .arc-line {
+    animation: none;
+  }
 }
 .arc-cn {
   stroke: #38bdf8;

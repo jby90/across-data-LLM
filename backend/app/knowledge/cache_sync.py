@@ -87,6 +87,7 @@ def clear_user_caches() -> None:
     adm_router._DETAIL_MEMO.clear()
     doc_projects._PROGRESS_CACHE.clear()
     doc_projects._OVERVIEW_PROJECT_CACHE.clear()
+    doc_projects._COMPLIANCE_OVERVIEW_CACHE.clear()
     document_templates._DEFAULT_TEMPLATES_ENSURED = False
 
 
@@ -208,13 +209,14 @@ def changes_admin_data(method: str, path: str, status: int) -> bool:
 
 def after_admin_change() -> None:
     from app.admission import router as adm_router
-    from app.analysis import doc_applicability
+    from app.analysis import doc_applicability, doc_projects
     from app.iam import cockpit_router
     from app.ingestion.quality_card import clear_cards_cache
     from app.knowledge import router, whitepaper_graph
 
     clear_cards_cache()
     cockpit_router._KB_POSTURE_CACHE.clear()
+    doc_projects._COMPLIANCE_OVERVIEW_CACHE.clear()
     doc_applicability._SOURCE_GROUNDS_CACHE.clear()
     whitepaper_graph._MENTIONS.clear()
     whitepaper_graph._CLAUSES.clear()

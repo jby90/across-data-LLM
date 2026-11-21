@@ -725,7 +725,12 @@ const mainRiskGrid = computed(() =>
         if (curHere) {
           activeLabels.push(initLv && curLv && initLv !== curLv ? `风险 ${n}（原${initLv.replace('风险', '')}）` : `风险 ${n}`)
         } else if (initHere && (r.mitigated === '1' || (curLv && (r.likelihood !== il || r.severity !== isv)))) {
-          movedFrom.push(r.mitigated === '1' ? `原风险 ${n}（已整改）` : `原风险 ${n}（已降级）`)
+          const rankMap: Record<string, number> = { 低风险: 0, 中风险: 1, 高风险: 2 }
+          let suffix = '已调整'
+          if (r.mitigated === '1') suffix = '已整改'
+          else if ((rankMap[curLv] ?? 0) < (rankMap[initLv] ?? 0)) suffix = '已降级'
+          else if ((rankMap[curLv] ?? 0) > (rankMap[initLv] ?? 0)) suffix = '已上调'
+          movedFrom.push(`原风险 ${n}（${suffix}）`)
         }
       })
       return { name: RISK_NAMES[RISK_MATRIX_IDX[i][j]], tone: RISK_MATRIX_IDX[i][j], activeLabels, movedFrom }
@@ -1370,7 +1375,7 @@ const allReady = computed(() => !!project.value?.final.ok)
               <div v-else-if="parsedMainRisks.length > 0" class="main-risk-matrix" data-testid="doc-main-risk-matrix">
                 <div class="mrp-head">
                   <b>风险等级分布（可能性 × 严重程度）</b>
-                  <span class="muted">实框为当前有效风险，虚框标注已降级或已完成整改的初评位置</span>
+                  <span class="muted">实框为当前有效风险，虚框标注已调整或已完成整改的初评位置</span>
                 </div>
                 <table>
                   <thead>

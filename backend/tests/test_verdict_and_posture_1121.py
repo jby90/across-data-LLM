@@ -404,3 +404,41 @@ async def test_cockpit_and_user_posture_overview_role_separation(client, seed, s
         json={"source_country": "中国", "recipient_country": "新加坡", "function": "ota_diagnostics"},
     )
     assert r_viewer_write.status_code == 403
+
+    # 验证缓存指纹实时失效：新建第 2 个项目后 compliance-overview 立即感知，零脏缓存
+    create_res2 = await client.post(
+        BASE,
+        headers=member_a,
+        json={
+            "source_country": "中国",
+            "recipient_country": "新加坡",
+            "function": "connected_vehicle_cloud",
+            "company_name": "华拓汽车",
+        },
+    )
+    assert create_res2.status_code == 201
+    ov_member_a_2 = (await client.get(f"{BASE}/compliance-overview", headers=member_a)).json()
+    assert len(ov_member_a_2["recent_docs"]) == len(ov_member_a["recent_docs"]) + 1
+    assert any(mr["recipient_code"] == "SG" for mr in ov_member_a_2["map_routes"])
+
+    # 验证风险等级轨迹方向标签：上调显示“已上调”，降级显示“已降级”，整改显示“已整改”
+    up_blocks = risk_items.blocks(
+        json.dumps(
+            [
+                {
+                    "id": "u1",
+                    "risk": "实测发现新增敏感生物特征回传",
+                    "init_likelihood": "低",
+                    "init_severity": "中",
+                    "likelihood": "高",
+                    "severity": "高",
+                    "measures": "待补齐网关脱敏",
+                    "mitigated": "",
+                }
+            ],
+            ensure_ascii=False,
+        )
+    )
+    up_txt = _flatten_blocks_text(up_blocks)
+    assert "原风险 1（已上调）" in up_txt
+    assert "原风险 1（已降级）" not in up_txt

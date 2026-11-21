@@ -9,6 +9,22 @@ export function getCountryHub(code: string | null | undefined): [number, number]
   return WORLD_COUNTRY_HUBS[up] || null
 }
 
+export function getCountryLabelOffset(
+  code: string,
+  hub: [number, number],
+): { x: number; y: number; anchor: 'start' | 'middle' | 'end' } {
+  const cc = code.trim().toUpperCase()
+  if (cc === 'CN') return { x: hub[0] - 10, y: hub[1] - 10, anchor: 'end' }
+  if (cc === 'SG') return { x: hub[0] + 9, y: hub[1] + 5, anchor: 'start' }
+  if (cc === 'MA') return { x: hub[0] - 6, y: hub[1] + 21, anchor: 'start' }
+  if (cc === 'TN') return { x: hub[0] - 8, y: hub[1] - 10, anchor: 'middle' }
+  if (cc === 'EG') return { x: hub[0] - 4, y: hub[1] + 21, anchor: 'middle' }
+  if (cc === 'LB') return { x: hub[0] + 9, y: hub[1] - 3, anchor: 'start' }
+  if (cc === 'FR') return { x: hub[0] - 8, y: hub[1] - 8, anchor: 'end' }
+  if (cc === 'DE') return { x: hub[0] + 8, y: hub[1] - 8, anchor: 'start' }
+  return { x: hub[0] + 8, y: hub[1] - 6, anchor: 'start' }
+}
+
 export function buildRouteArcPath(srcCode: string, dstCode: string, index = 0): string {
   const s = getCountryHub(srcCode)
   const d = getCountryHub(dstCode)
@@ -18,8 +34,10 @@ export function buildRouteArcPath(srcCode: string, dstCode: string, index = 0): 
   const dx = d[0] - s[0]
   const dy = d[1] - s[1]
   const dist = Math.hypot(dx, dy)
-  const lift = Math.min(95, Math.max(26, dist * 0.24)) + (index % 2 === 1 ? 14 : 0)
+  // 区分双向往返流向（东向西 vs 西向东）并叠加序号偏移，避免往返弧线重合遮挡
+  const dirBump = dx > 0 ? 18 : 0
+  const lift = Math.min(110, Math.max(26, dist * 0.24)) + dirBump + (index % 2 === 1 ? 14 : 0)
   const cx = Math.round(mx * 10) / 10
-  const cy = Math.round(Math.max(18, my - lift) * 10) / 10
+  const cy = Math.round(Math.max(16, my - lift) * 10) / 10
   return `M${s[0]},${s[1]} Q${cx},${cy} ${d[0]},${d[1]}`
 }

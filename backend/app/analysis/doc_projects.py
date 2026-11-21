@@ -676,12 +676,60 @@ async def projects_progress(ids: str, user: UserDep, session: SessionDep) -> dic
     return out
 
 
+_COMPLIANCE_OVERVIEW_CACHE: dict[tuple[str, str], tuple[tuple, dict]] = {}
+
+
+async def _org_overview_stamp(session: AsyncSession, user: Principal) -> tuple:
+    from sqlalchemy import text
+
+    from app.knowledge import cache_sync
+
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT
+                  (SELECT md5(coalesce(string_agg(id::text || coalesce(updated_at::text, '') || coalesce(archived_at::text, '') || coalesce(title, '') || coalesce(facts_json::text, ''), ',' ORDER BY id), ''))
+                   FROM analysis_tasks WHERE org_id = :org AND kind = 'documents'),
+                  (SELECT count(*)::text || ':' || coalesce(max(created_at)::text, '')
+                   FROM document_narratives WHERE org_id = :org),
+                  (SELECT count(*)::text || ':' || coalesce(max(updated_at)::text, '')
+                   FROM form_instances WHERE org_id = :org),
+                  (SELECT md5(coalesce(string_agg(id::text || status || coalesce(updated_at::text, '') || coalesce(approval::text, '') || coalesce(facts::text, ''), ',' ORDER BY id), ''))
+                   FROM admission_projects WHERE org_id = :org),
+                  (SELECT count(*)::text || ':' || coalesce(max(created_at)::text, '')
+                   FROM admission_drafts WHERE org_id = :org),
+                  (SELECT count(*)::text || ':' || coalesce(max(updated_at)::text, '') || ':' || coalesce(sum(CASE WHEN state = 'open' THEN 1 ELSE 0 END), 0)::text
+                   FROM admission_issues WHERE org_id = :org),
+                  (SELECT count(*)::text || ':' || coalesce(max(created_at)::text, '')
+                   FROM admission_files WHERE org_id = :org),
+                  (SELECT count(*)::text || ':' || coalesce(max(ap.updated_at)::text, '')
+                   FROM admission_progress ap JOIN admission_projects p ON p.id = ap.project_id WHERE p.org_id = :org),
+                  (SELECT count(*)::text || ':' || coalesce(max(created_at)::text, '')
+                   FROM user_notifications WHERE org_id = :org AND user_id = :uid AND read_at IS NULL),
+                  (SELECT count(*)::text || ':' || coalesce(max(version_no), 0)::text
+                   FROM document_templates)
+                """
+            ),
+            {"org": user.org_id, "uid": user.user_id},
+        )
+    ).one()
+    return (*row, cache_sync._last_mark or "")
+
+
 @router.get("/compliance-overview")
 async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
     """Executive compliance overview + actionable risk & pending-item drill-downs for the organization."""
     from app.admission.models import AdmissionEntry
     from app.admission.router import list_projects as list_adm_projects
     from app.updates.models import UserNotification
+
+    cache_key = (str(user.org_id or ""), str(user.user_id or ""))
+    stamp = await _org_overview_stamp(session, user) if user.org_id else None
+    if stamp is not None:
+        cached = _COMPLIANCE_OVERVIEW_CACHE.get(cache_key)
+        if cached is not None and cached[0] == stamp:
+            return copy.deepcopy(cached[1])
 
     paired_docs = await _list(session, user, archived=False)
     recent_docs = [meta for meta, _ in paired_docs]
@@ -951,7 +999,7 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
     level_rank = {"danger": 0, "warning": 1, "info": 2}
     todos.sort(key=lambda item: level_rank.get(item["level"], 9))
 
-    return {
+    payload = {
         "summary": {
             "projects_total": len(rows),
             "ready_projects": ready_projects,
@@ -976,6 +1024,11 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
         "risk_summary": risk_agg,
         "todos": todos[:8],
     }
+    if stamp is not None:
+        if len(_COMPLIANCE_OVERVIEW_CACHE) > 64:
+            _COMPLIANCE_OVERVIEW_CACHE.clear()
+        _COMPLIANCE_OVERVIEW_CACHE[cache_key] = (stamp, copy.deepcopy(payload))
+    return payload
 
 
 async def _list(session: AsyncSession, user: Principal, archived: bool) -> list[tuple[dict, AnalysisTask]]:

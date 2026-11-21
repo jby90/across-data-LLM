@@ -350,18 +350,26 @@ def blocks(value: str | None, blank: str = "") -> list[dict]:
     all_rows = parse(value)
     active = [r for r in all_rows if r.get("mitigated") != "1"]
     cells: dict[tuple[int, int], list[str]] = {}
+    rank_map = {"低风险": 0, "中风险": 1, "高风险": 2}
     for idx, r in enumerate(all_rows, 1):
         il = r.get("init_likelihood") or r.get("likelihood") or ""
         isv = r.get("init_severity") or r.get("severity") or ""
         cur_ok = r.get("mitigated") != "1" and level(r)
         init_ok = il in LEVELS and isv in LEVELS
+        ilv = init_level(r)
+        lv = level(r)
         if cur_ok:
-            ilv = init_level(r)
-            lv = level(r)
             tag = f"风险 {idx}（原{ilv.replace('风险', '')}）" if (ilv and lv and ilv != lv) else f"风险 {idx}"
             cells.setdefault((LEVELS.index(r["likelihood"]), LEVELS.index(r["severity"])), []).append(tag)
         if init_ok and (r.get("mitigated") == "1" or (cur_ok and (r["likelihood"] != il or r["severity"] != isv))):
-            moved_tag = f"原风险 {idx}（已整改）" if r.get("mitigated") == "1" else f"原风险 {idx}（已降级）"
+            if r.get("mitigated") == "1":
+                moved_tag = f"原风险 {idx}（已整改）"
+            elif rank_map.get(lv, 0) < rank_map.get(ilv, 0):
+                moved_tag = f"原风险 {idx}（已降级）"
+            elif rank_map.get(lv, 0) > rank_map.get(ilv, 0):
+                moved_tag = f"原风险 {idx}（已上调）"
+            else:
+                moved_tag = f"原风险 {idx}（已调整）"
             cells.setdefault((LEVELS.index(il), LEVELS.index(isv)), []).append(moved_tag)
     grid = [
         [f"可能性{LEVELS[i]}"] + [

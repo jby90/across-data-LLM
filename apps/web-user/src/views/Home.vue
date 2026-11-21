@@ -10,6 +10,7 @@ import {
   canEdit,
   COUNTRY_NAMES,
   getCountryHub,
+  getCountryLabelOffset,
   localTime,
   userName,
 } from '@cyshuhe/shared'
@@ -294,15 +295,15 @@ interface ArcGroup {
 
 const arcGroups = computed<ArcGroup[]>(() => {
   const groups = new Map<string, ArcGroup>()
-  for (const r of overview.value?.map_routes || []) {
+  ;(overview.value?.map_routes || []).forEach((r, idx) => {
     const sHub = getCountryHub(r.source_code)
     const tHub = getCountryHub(r.recipient_code)
-    if (!sHub || !tHub || r.source_code === r.recipient_code) continue
+    if (!sHub || !tHub || r.source_code === r.recipient_code) return
     const key = `${r.source_code}->${r.recipient_code}`
     let g = groups.get(key)
     if (!g) {
-      const d = buildRouteArcPath(r.source_code, r.recipient_code)
-      if (!d) continue
+      const d = buildRouteArcPath(r.source_code, r.recipient_code, idx)
+      if (!d) return
       g = {
         key,
         sourceCode: r.source_code,
@@ -332,7 +333,7 @@ const arcGroups = computed<ArcGroup[]>(() => {
     } else if (g.tone !== 'danger' && (r.missing > 0 || r.ready < r.total || r.verdict_tone === 'warn')) {
       g.tone = 'warn'
     }
-  }
+  })
   return [...groups.values()].sort((a, b) => b.count - a.count)
 })
 
@@ -353,12 +354,17 @@ const backgroundMapEntries = computed(() =>
 )
 
 const activeMapEntries = computed(() =>
-  [...activeCountryCodes.value].map((cc) => ({
-    code: cc,
-    d: WORLD_COUNTRY_PATHS[cc] || '',
-    hub: getCountryHub(cc),
-    name: COUNTRIES[cc] || cc,
-  })),
+  [...activeCountryCodes.value].map((cc) => {
+    const hub = getCountryHub(cc)
+    const lbl = hub ? getCountryLabelOffset(cc, hub) : null
+    return {
+      code: cc,
+      d: WORLD_COUNTRY_PATHS[cc] || '',
+      hub,
+      lbl,
+      name: COUNTRIES[cc] || cc,
+    }
+  }),
 )
 
 const selectedArc = computed(() => arcGroups.value.find((g) => g.key === selectedRouteKey.value) || null)
@@ -649,6 +655,15 @@ const portalTrialCards = [
 
                 <div class="map-stage">
                   <svg :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="本单位跨境数据流向图">
+                    <g stroke="#131e33" stroke-width="1">
+                      <line x1="0" y1="100" x2="840" y2="100" />
+                      <line x1="0" y1="200" x2="840" y2="200" />
+                      <line x1="0" y1="300" x2="840" y2="300" />
+                      <line x1="210" y1="0" x2="210" y2="400" />
+                      <line x1="420" y1="0" x2="420" y2="400" />
+                      <line x1="630" y1="0" x2="630" y2="400" />
+                    </g>
+
                     <g class="land-bg">
                       <path v-for="[cc, d] in backgroundMapEntries" :key="`bg-${cc}`" :d="d" />
                     </g>
@@ -694,10 +709,17 @@ const portalTrialCards = [
                         :class="{ dimmed: !isCountryHighlighted(item.code) }"
                         @click="selectCountryOnMap(item.code)"
                       >
-                        <template v-if="item.hub">
+                        <template v-if="item.hub && item.lbl">
                           <circle :cx="item.hub[0]" :cy="item.hub[1]" r="7" class="hub-ring" />
                           <circle :cx="item.hub[0]" :cy="item.hub[1]" r="3.4" class="hub-dot" />
-                          <text :x="item.hub[0] + 8" :y="item.hub[1] + 4" class="hub-label">{{ item.name }}</text>
+                          <text
+                            :x="item.lbl.x"
+                            :y="item.lbl.y"
+                            :text-anchor="item.lbl.anchor"
+                            class="hub-label"
+                          >
+                            {{ item.name }}
+                          </text>
                         </template>
                       </g>
                     </g>
@@ -852,6 +874,10 @@ const portalTrialCards = [
 </template>
 
 <style scoped>
+@keyframes routeFlow {
+  to { stroke-dashoffset: -36; }
+}
+
 .home-wrap { display: flex; flex-direction: column; gap: 14px; }
 .home-wrap strong, .home-wrap b, .home-wrap h1, .home-wrap h2 { font-weight: 600; }
 
@@ -949,17 +975,20 @@ const portalTrialCards = [
 .map-pill { border: 1px solid #294d78; background: #102542; color: #cbd5e1; font-size: 13px; padding: 4px 10px; border-radius: 999px; cursor: pointer; }
 .map-pill.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; font-weight: 600; }
 
-.map-stage { flex: 1; display: flex; align-items: center; justify-content: center; background: #071222; border-radius: 8px; overflow: hidden; min-height: 270px; }
+.map-stage { flex: 1; display: flex; align-items: center; justify-content: center; background: #09101d; border-radius: 8px; overflow: hidden; min-height: 270px; }
 .world-svg { width: 100%; height: auto; max-height: 360px; display: block; }
-.land-bg path { fill: #12243d; stroke: #1c3557; stroke-width: 0.55; }
+.land-bg path { fill: #162238; stroke: #263859; stroke-width: 0.7; }
 .active-country { fill: #1e4b7a; stroke: #60a5fa; stroke-width: 0.9; cursor: pointer; transition: opacity 0.2s, fill 0.2s; }
 .active-country:hover { fill: #2563eb; }
 .active-country.dimmed { opacity: 0.35; }
 .arc-item { cursor: pointer; transition: opacity 0.2s; }
 .arc-item.dimmed { opacity: 0.22; }
-.arc-base { fill: none; stroke-width: 2.2; stroke-linecap: round; }
-.arc-item.selected .arc-base { stroke-width: 3.4; }
-.arc-dash { fill: none; stroke: #f8fafc; stroke-width: 1.2; stroke-dasharray: 4 7; opacity: 0.7; }
+.arc-base { fill: none; stroke-width: 2; stroke-linecap: round; opacity: 0.45; }
+.arc-item.selected .arc-base { stroke-width: 3.2; opacity: 0.85; }
+.arc-dash { fill: none; stroke: #e0f2fe; stroke-width: 1.6; stroke-dasharray: 5 5; opacity: 0.9; animation: routeFlow 2.4s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .arc-dash { animation: none; }
+}
 .hub-node { cursor: pointer; transition: opacity 0.2s; }
 .hub-node.dimmed { opacity: 0.32; }
 .hub-ring { fill: rgba(56, 189, 248, 0.22); stroke: #38bdf8; stroke-width: 1; }
