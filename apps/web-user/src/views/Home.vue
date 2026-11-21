@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import { api } from '../api'
@@ -157,29 +157,19 @@ const hasAdmission = computed(() => admItems.value.length > 0)
 const editable = computed(() => canEdit(auth.user))
 const isPortalTrial = computed(() => auth.user?.signup_source === 'portal')
 
-function syncFullscreenState() {
-  isFullscreen.value = Boolean(document.fullscreenElement)
-}
-
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && isFullscreen.value && !document.fullscreenElement) {
+  if (e.key === 'Escape' && isFullscreen.value) {
     isFullscreen.value = false
   }
 }
 
-async function toggleFullscreen() {
-  const next = !isFullscreen.value
-  isFullscreen.value = next
-  try {
-    if (next && !document.fullscreenElement && boardEl.value?.requestFullscreen) {
-      await boardEl.value.requestFullscreen()
-    } else if (!next && document.fullscreenElement) {
-      await document.exitFullscreen()
-    }
-  } catch {
-    /* 容器限制原生全屏时保持视口铺满模式 */
-  }
+function toggleFullscreen() {
+  isFullscreen.value = !isFullscreen.value
 }
+
+watch(isFullscreen, (val) => {
+  document.body.style.overflow = val ? 'hidden' : ''
+})
 
 function admStatus(a: AdmItem): string {
   const f = a.filing
@@ -464,13 +454,12 @@ const TODO_TAG: Record<string, string> = {
 }
 
 onMounted(() => {
-  document.addEventListener('fullscreenchange', syncFullscreenState)
   window.addEventListener('keydown', onKeydown)
   void loadHomeData()
 })
 
 onUnmounted(() => {
-  document.removeEventListener('fullscreenchange', syncFullscreenState)
+  document.body.style.overflow = ''
   window.removeEventListener('keydown', onKeydown)
 })
 

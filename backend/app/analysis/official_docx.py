@@ -135,8 +135,11 @@ def _needs_clean_cac_footer(raw_ftr: bytes) -> bool:
 
 
 def _write_clean_zip(zin: zipfile.ZipFile, doc_xml: bytes, title: str) -> bytes:
+    from app.analysis.export_sanitize import clean_app_xml
+
     buf = io.BytesIO()
     has_core = False
+    has_app = False
     clean_ftr = _clean_cac_footer_xml()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
@@ -145,6 +148,9 @@ def _write_clean_zip(zin: zipfile.ZipFile, doc_xml: bytes, title: str) -> bytes:
             elif item.filename == "docProps/core.xml":
                 has_core = True
                 zout.writestr(item, _clean_core_xml(title))
+            elif item.filename == "docProps/app.xml":
+                has_app = True
+                zout.writestr(item, clean_app_xml())
             elif item.filename == "word/settings.xml":
                 zout.writestr(item, _ensure_update_fields_xml(zin.read(item.filename)))
             elif re.fullmatch(r"word/footer\d+\.xml", item.filename):
@@ -154,6 +160,8 @@ def _write_clean_zip(zin: zipfile.ZipFile, doc_xml: bytes, title: str) -> bytes:
                 zout.writestr(item, zin.read(item.filename))
         if not has_core:
             zout.writestr("docProps/core.xml", _clean_core_xml(title))
+        if not has_app:
+            zout.writestr("docProps/app.xml", clean_app_xml())
     return buf.getvalue()
 
 
@@ -2162,10 +2170,19 @@ def fill_cells(template: bytes, cells: list[tuple[int, int, int, str, bool]]) ->
         gap = " " if append and printed and not printed.endswith(" ") else ""
         _put_text(cell, gap + value, _run_props(cell), after_print=append)
         result.filled.append(f"{ti}/{ri}/{ci}")
+    from app.analysis.export_sanitize import clean_app_xml, clean_core_xml
+
     xml = _serialise(root, original)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            zout.writestr(item, xml if item.filename == "word/document.xml" else zin.read(item.filename))
+            if item.filename == "word/document.xml":
+                zout.writestr(item, xml)
+            elif item.filename == "docProps/core.xml":
+                zout.writestr(item, clean_core_xml(""))
+            elif item.filename == "docProps/app.xml":
+                zout.writestr(item, clean_app_xml())
+            else:
+                zout.writestr(item, zin.read(item.filename))
     result.data = buf.getvalue()
     return result

@@ -528,9 +528,73 @@ async function saveFact(key: string) {
 }
 // 提示条的主按钮：直接去第一处要补的地方
 const firstGap = computed(() => project.value?.readiness.items?.[0] ?? null)
-const gapLabel = (t: string) => (t.startsWith('info') ? '补充信息' : t.startsWith('form') ? '填写官方表格' : t === 'draft' ? (draftStale.value ? '更新申请材料' : '生成申请材料') : '前往修改')
+const gapLabel = (t: string) => (t.startsWith('info') ? '补充信息' : t.startsWith('form') ? '填写申报表' : t === 'draft' ? (draftStale.value ? '更新申请材料' : '生成申请材料') : '前往修改')
 const approvalText = (a: Approval) =>
   a.state === '长期有效' ? '长期有效' : a.days_left === null ? '有效期待填' : a.days_left < 0 ? `已过期 ${-a.days_left} 天` : `${a.expires_on} 到期，剩 ${a.days_left} 天`
+
+const admissionVerdict = computed(() => {
+  const p = project.value
+  if (!p) return null
+  const country = COUNTRIES.value[p.entry.country_code] || p.entry.country_code
+  const authority = authorityText(p.entry) || '目标国主管机关'
+  const st = p.filing.state
+  const ap = p.approval
+  if (st === 'approved') {
+    if (ap && ap.state === '已过期') {
+      return {
+        label: '批文已过期 · 需续期',
+        tone: 'danger',
+        text: `本项属地准入批文${ap.number ? `（编号 ${ap.number}）` : ''}已超过有效期（${approvalText(ap)}），完成续期换证并取得新批文前，应暂缓对应车型或终端在${country}投放与实网激活。`,
+      }
+    }
+    if (ap && ap.state === '即将到期') {
+      return {
+        label: '已获批 · 临期预警',
+        tone: 'warn',
+        text: `已取得${country}主管机关核发的有效批文（${ap.number ? `编号 ${ap.number}，` : ''}${approvalText(ap)}），当前可正常合规放行；建议立即启动续期申报材料准备，防止到期影响业务连续性。`,
+      }
+    }
+    return {
+      label: '已获准入放行',
+      tone: 'ok',
+      text: `已完成${country}属地准入办理并取得有效批文${ap ? `（${ap.number ? `编号 ${ap.number}，` : ''}${approvalText(ap)}）` : ''}，满足目标国前置准入条件；后续车型配置、通信模组或数据跨境范围发生重大变更时须按规定办理变更登记。`,
+    }
+  }
+  if (st === 'rejected') {
+    return {
+      label: '未获通过 · 暂缓上线',
+      tone: 'danger',
+      text: `受理机构审查未通过${p.filing.reason ? `（退回原因：${p.filing.reason}）` : ''}，对应车型与车载服务暂不得在${country}投放上线，须按主管机关退回意见整改补齐后重新提交申报。`,
+    }
+  }
+  if (st === 'correcting') {
+    return {
+      label: '补正审查中 · 暂缓放行',
+      tone: 'warn',
+      text: `本项准入已进入主管机关补正审查阶段（第 ${p.filing.rounds || 1} 轮补正），须按规定时限补交补正说明并取得正式批文后方可放行。`,
+    }
+  }
+  if (st === 'submitted') {
+    return {
+      label: '已递交待批 · 暂缓上线',
+      tone: 'warn',
+      text: `申报材料已于 ${p.filing.submitted_on || '近期'} 递交${authority}审查，须待正式批文签发并登记批文编号后，方可启动对应实车投放或车联网实网激活。`,
+    }
+  }
+  if (p.readiness.ready && !openIssues.value.length) {
+    return {
+      label: '材料已齐 · 可递交申报',
+      tone: 'ok',
+      text: `本项属地准入所需基础信息${p.forms.length ? `、${p.forms.length} 套法定申报表` : ''}与申请材料均已备齐并通过核验${p.foreign_lang_zh ? `（可同步核对并导出${p.foreign_lang_zh}正式稿）` : ''}；请打印签章后向${authority}正式递交，取得批文前暂缓实车上线。`,
+    }
+  }
+  const gapSummary = readyTitle.value || '尚有必填基础信息、法定申报表或申请材料未完成'
+  return {
+    label: '材料待补 · 暂不可递交',
+    tone: 'warn',
+    text: `${gapSummary}${openIssues.value.length ? `，且存在 ${openIssues.value.length} 项待修正核验问题` : ''}；须逐项补齐并通过核验后，方可向${authority}正式递交准入申请。`,
+  }
+})
 
 // ---------- 关联合规评估项目：评估里答过的企业、数据、接收方信息带入表格和申请材料 ----------
 const docProjects = ref<Array<{ id: string; title: string }>>([])
@@ -634,6 +698,13 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
           <li v-if="project.filing.state === 'correcting' || project.filing.rounds" :class="{ now: project.filing.state === 'correcting', done: project.filing.state !== 'correcting' }"><strong>补正</strong><small v-if="project.filing.rounds">{{ project.filing.rounds > 1 ? `共 ${project.filing.rounds} 次` : project.filing.correction_on }}</small></li>
           <li :class="{ now: ['approved', 'rejected'].includes(project.filing.state), bad: project.filing.state === 'rejected' }"><strong>{{ project.filing.state === 'rejected' ? '未通过' : '取得批文' }}</strong><small v-if="project.filing.result_on">{{ project.filing.result_on }}</small></li>
         </ol>
+      <section v-if="admissionVerdict" class="adm-verdict" :class="admissionVerdict.tone" data-testid="admission-verdict-card">
+        <div class="adm-verdict-head">
+          <span class="adm-verdict-k">准入办理综合判定结论</span>
+          <span class="adm-verdict-pill" :class="admissionVerdict.tone">{{ admissionVerdict.label }}</span>
+        </div>
+        <p class="adm-verdict-text">{{ admissionVerdict.text }}</p>
+      </section>
       <dl class="where-box">
         <dt>受理机构</dt><dd>{{ authorityText(project.entry) }}<small v-if="authorityWhy(project.entry)" class="auth-note" data-testid="admission-authority-note">{{ authorityWhy(project.entry) }}</small>
           <small v-if="project.entry.authority_roles" class="auth-note">职责分工：{{ project.entry.authority_roles }}</small>
@@ -716,7 +787,7 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
           <li v-for="(d, i) in (allVersions ? shownDrafts : shownDrafts.slice(0, 3))" :key="d.id" data-testid="admission-draft-version"><span>{{ localTime(d.created_at) }}<small v-if="sent"> · 递交存档版</small><small v-else-if="i === 0 && !draftStale"> · 最新版</small><small v-if="d.missing.length"> · 生成时缺 {{ d.missing.length }} 项</small></span>
             <span class="cy-links"><el-button link type="primary" @click="showDraft(d.id)">查看</el-button><el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" @click="downloadDraft(d.id, 'docx')">Word</el-button></span></el-tooltip><el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" @click="downloadDraft(d.id, 'pdf')">PDF</el-button></span></el-tooltip>
               <el-button v-if="d.has_foreign && d.id !== activeDraft?.id" link type="primary" @click="showForeignDraft(d.id)">{{ d.foreign_lang_zh || project.foreign_lang_zh || '外文' }}正式稿</el-button>
-              <el-tooltip v-for="f in d.forms" :key="f.code" :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" :data-testid="`admission-draft-form-${f.code}`" @click="downloadDraftForm(d.id, f)">{{ d.forms.length > 1 ? f.name : '对应版本官方表格' }}</el-button></span></el-tooltip></span></li>
+              <el-tooltip v-for="f in d.forms" :key="f.code" :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top"><span><el-button link type="primary" :disabled="!downloadable" :data-testid="`admission-draft-form-${f.code}`" @click="downloadDraftForm(d.id, f)">{{ d.forms.length > 1 ? f.name : '对应版本法定申报表' }}</el-button></span></el-tooltip></span></li>
         </ul>
         <el-button v-if="!sent && project.drafts.length > 3" link type="primary" data-testid="admission-all-versions" @click="allVersions = !allVersions">{{ allVersions ? '只看最近 3 版' : `查看全部 ${project.drafts.length} 版` }}</el-button>
         <div v-if="project.foreign_lang_zh && activeDraft" class="row" data-testid="admission-foreign-row">
@@ -1065,6 +1136,17 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
 .ready-more { border: 0; background: none; color: var(--el-color-primary); font: inherit; font-size: 13px; cursor: pointer; }
 .project-title { margin: 0 0 6px; font-size: 24px; line-height: 1.4; }
 .filing-steps.top { margin: 16px 0 4px; max-width: 720px; }
+.adm-verdict { margin: 14px 0 4px; padding: 14px 18px; border: 1px solid var(--cy-line); border-left: 3px solid var(--cy-line); border-radius: 8px; background: #fff; }
+.adm-verdict.ok { border-left-color: #15803d; }
+.adm-verdict.warn { border-left-color: #b45309; }
+.adm-verdict.danger { border-left-color: #b91c1c; }
+.adm-verdict-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.adm-verdict-k { font-size: 13px; font-weight: 600; color: var(--cy-text-2); }
+.adm-verdict-pill { font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 4px; border: 1px solid transparent; }
+.adm-verdict-pill.ok { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
+.adm-verdict-pill.warn { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+.adm-verdict-pill.danger { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
+.adm-verdict-text { margin: 0; font-size: 14px; font-weight: 400; line-height: 1.75; color: var(--cy-text-1); }
 .ready-item { border: 0; background: none; padding: 0; color: var(--el-color-primary); cursor: pointer; font: inherit; font-size: 13px; text-align: left; }
 .issues { margin: 12px 0 4px; } .issues h3 { font-size: 14px; margin: 0 0 6px; } .issues h3 small { margin-left: 10px; font-weight: 400; color: var(--el-text-color-secondary); }
 .issue-row { display: flex; justify-content: space-between; width: 100%; text-align: left; padding: 8px 12px; margin-bottom: 6px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; cursor: pointer; font: inherit; font-size: 13px; }

@@ -876,11 +876,21 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
         elif pg_num is not None:
             pg_num.attrib.pop(W + "start", None)
     xml_bytes = _serialise(root, original_xml)
+    from app.analysis.export_sanitize import clean_app_xml, clean_core_xml
+
     buf = io.BytesIO()
+    has_core = False
+    has_app = False
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
         for info in zin.infolist():
             if info.filename == "word/document.xml":
                 zout.writestr(info, xml_bytes)
+            elif info.filename == "docProps/core.xml":
+                has_core = True
+                zout.writestr(info, clean_core_xml("Data Protection Impact Assessment (DPIA)"))
+            elif info.filename == "docProps/app.xml":
+                has_app = True
+                zout.writestr(info, clean_app_xml())
             elif info.filename == "word/footer1.xml":
                 ftr_txt = zin.read(info.filename).decode("utf-8")
                 ftr_txt = ftr_txt.replace(
@@ -898,6 +908,10 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
                 zout.writestr(info, st_raw)
             else:
                 zout.writestr(info, zin.read(info.filename))
+        if not has_core:
+            zout.writestr("docProps/core.xml", clean_core_xml("Data Protection Impact Assessment (DPIA)"))
+        if not has_app:
+            zout.writestr("docProps/app.xml", clean_app_xml())
     return buf.getvalue()
 
 

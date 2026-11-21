@@ -805,24 +805,36 @@ def _docx_package(
         "<Default Extension='xml' ContentType='application/xml'/>"
         f"<Override PartName='/word/document.xml' ContentType='{main_ct}'/></Types>"
     )
+    from app.analysis.export_sanitize import clean_app_xml, clean_core_xml
+
     wml = "application/vnd.openxmlformats-officedocument.wordprocessingml"
     content_types = content_types.replace(
         "</Types>",
         f"<Override PartName='/word/header1.xml' ContentType='{wml}.header+xml'/>"
         f"<Override PartName='/word/footer1.xml' ContentType='{wml}.footer+xml'/>"
         f"<Override PartName='/word/styles.xml' ContentType='{wml}.styles+xml'/>"
-        f"<Override PartName='/word/settings.xml' ContentType='{wml}.settings+xml'/></Types>",
+        f"<Override PartName='/word/settings.xml' ContentType='{wml}.settings+xml'/>"
+        "<Override PartName='/docProps/core.xml' ContentType='application/vnd.openxmlformats-package.core-properties+xml'/>"
+        "<Override PartName='/docProps/app.xml' ContentType='application/vnd.openxmlformats-officedocument.extended-properties+xml'/>"
+        "</Types>",
     )
     rel_type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+    core_rel = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
+    app_rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties"
     rels = (
         "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
         "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
-        f"<Relationship Id='rId1' Type='{rel_type}' Target='word/document.xml'/></Relationships>"
+        f"<Relationship Id='rId1' Type='{rel_type}' Target='word/document.xml'/>"
+        f"<Relationship Id='rId2' Type='{core_rel}' Target='docProps/core.xml'/>"
+        f"<Relationship Id='rId3' Type='{app_rel}' Target='docProps/app.xml'/>"
+        "</Relationships>"
     )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", content_types)
         zf.writestr("_rels/.rels", rels)
+        zf.writestr("docProps/core.xml", clean_core_xml(context))
+        zf.writestr("docProps/app.xml", clean_app_xml())
         zf.writestr("word/document.xml", document_xml)
         zf.writestr(
             "word/_rels/document.xml.rels",

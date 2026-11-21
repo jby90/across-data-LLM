@@ -29,6 +29,8 @@ from collections import OrderedDict
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from app.analysis.export_sanitize import sanitize_pdf_metadata
+
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _W = "{" + _W_NS + "}"
 _CHECKED_SYMS = {"F0FE", "00FE", "F052", "0052"}
@@ -363,7 +365,7 @@ def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
                     pdf = folder / f"{i:03d}.pdf"
                     if not pdf.exists():
                         raise PdfEngineUnavailable("Word 转 PDF 失败")
-                    pdf_bytes = pdf.read_bytes()
+                    pdf_bytes = sanitize_pdf_metadata(pdf.read_bytes())
                     out[key] = pdf_bytes
                     _CACHE[key] = pdf_bytes
                     while len(_CACHE) > CACHE_SIZE:

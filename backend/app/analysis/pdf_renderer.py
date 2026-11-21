@@ -359,8 +359,17 @@ def render_pdf(task, rv, **kwargs):
                 raise ValueError("报告渲染禁止网络及非字体文件访问")
             return super().fetch(url, headers)
 
+    from app.analysis.export_sanitize import sanitize_pdf_metadata
+
+    def _clear_pdf_info(_doc, pdf) -> None:
+        info = getattr(pdf, "info", None)
+        if info is not None:
+            for k in ("Producer", "Creator", "Author", "Subject", "Keywords"):
+                info.pop(k, None)
+                info.pop(k.encode(), None)
+
     with _RENDER_LOCK:
-        return HTML(
+        raw_pdf = HTML(
             string=report_html(task, rv, **kwargs),
             url_fetcher=OfflineFonts(
                 allowed_protocols={"file"},
@@ -369,4 +378,6 @@ def render_pdf(task, rv, **kwargs):
         ).write_pdf(
             font_config=FontConfiguration(),
             full_fonts=False,
+            finisher=_clear_pdf_info,
         )
+    return sanitize_pdf_metadata(raw_pdf)

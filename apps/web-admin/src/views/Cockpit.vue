@@ -105,28 +105,14 @@ async function load() {
   }
 }
 
-function syncFullscreenState() {
-  isFullscreen.value = Boolean(document.fullscreenElement)
-}
-
 function onFullscreenKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && isFullscreen.value && !document.fullscreenElement) {
+  if (e.key === 'Escape' && isFullscreen.value) {
     isFullscreen.value = false
   }
 }
 
-async function toggleFullscreen() {
-  const next = !isFullscreen.value
-  isFullscreen.value = next
-  try {
-    if (next && !document.fullscreenElement && boardRef.value?.requestFullscreen) {
-      await boardRef.value.requestFullscreen()
-    } else if (!next && document.fullscreenElement) {
-      await document.exitFullscreen()
-    }
-  } catch {
-    /* 嵌入容器不支持原生全屏时保持视口全屏展示 */
-  }
+function toggleFullscreen() {
+  isFullscreen.value = !isFullscreen.value
 }
 
 const sovereignCountries = computed(() =>
@@ -248,19 +234,19 @@ watch(
   isFullscreen,
   (val) => {
     document.documentElement.classList.toggle('cy-cockpit-fullscreen', val)
+    document.body.style.overflow = val ? 'hidden' : ''
   },
   { immediate: true },
 )
 
 onMounted(() => {
-  document.addEventListener('fullscreenchange', syncFullscreenState)
   window.addEventListener('keydown', onFullscreenKeydown)
   void load()
 })
 
 onUnmounted(() => {
   document.documentElement.classList.remove('cy-cockpit-fullscreen')
-  document.removeEventListener('fullscreenchange', syncFullscreenState)
+  document.body.style.overflow = ''
   window.removeEventListener('keydown', onFullscreenKeydown)
 })
 </script>

@@ -1068,6 +1068,132 @@ const routeNote = computed(() => {
   return r ? [r.vehicle_model, r.company_name].filter((x) => x && !project.value!.title.includes(x)).join(' · ') : ''
 })
 const allReady = computed(() => !!project.value?.final.ok)
+
+// ---------- 极简双项目并排对比弹窗（纯读已有概览接口，不改原项目数据） ----------
+const compareVisible = ref(false)
+const compareLoading = ref(false)
+const compareLeftId = ref('')
+const compareRightId = ref('')
+const compareLeft = ref<Project | null>(null)
+const compareRight = ref<Project | null>(null)
+
+async function fetchProjectForCompare(id: string): Promise<Project | null> {
+  if (!id) return null
+  if (project.value?.id === id) return project.value
+  return await api.get<Project>(`/api/analysis/doc-projects/${id}`)
+}
+
+async function loadComparePair() {
+  if (!compareLeftId.value && !compareRightId.value) return
+  compareLoading.value = true
+  try {
+    const [left, right] = await Promise.all([
+      fetchProjectForCompare(compareLeftId.value),
+      fetchProjectForCompare(compareRightId.value),
+    ])
+    compareLeft.value = left
+    compareRight.value = right
+  } catch (e) {
+    ElMessage.error((e as Error).message || '加载项目对比数据失败')
+  } finally {
+    compareLoading.value = false
+  }
+}
+
+function openCompare() {
+  const pool = items.value
+  if (pool.length < 2) return
+  const curId = openId.value && pool.some((x) => x.id === openId.value) ? openId.value : pool[0].id
+  const curItem = pool.find((x) => x.id === curId) || pool[0]
+  const baseTitle = curItem.title.replace(/（副本）$/, '')
+  const twin = pool.find((x) => x.id !== curId && (x.title === `${baseTitle}（副本）` || x.title === baseTitle))
+  const other = twin || pool.find((x) => x.id !== curId) || pool[1]
+  compareLeftId.value = curId
+  compareRightId.value = other.id
+  compareVisible.value = true
+  void loadComparePair()
+}
+
+function swapCompare() {
+  const tmpId = compareLeftId.value
+  compareLeftId.value = compareRightId.value
+  compareRightId.value = tmpId
+  const tmpData = compareLeft.value
+  compareLeft.value = compareRight.value
+  compareRight.value = tmpData
+}
+
+function cmpRouteLine(p: Project | null): string {
+  if (!p) return '—'
+  const r = p.route
+  return [
+    `${r.source_country || '未填'} → ${r.recipient_country || '未填'}`,
+    r.vehicle_model,
+    r.business_scene || r.function,
+  ].filter(Boolean).join(' · ')
+}
+
+function cmpStatutoryRoute(p: Project | null): string {
+  if (!p) return '—'
+  return p.project_verdict?.route_text || p.cn_route?.text || '依据双方现行法规开展评估'
+}
+
+function cmpRiskSummary(p: Project | null): string {
+  if (!p) return '—'
+  const evo = p.risk_evolution
+  if (!evo || !evo.total) return '尚未识别风险项'
+  const c = evo.current_counts || {}
+  const init = evo.init_counts || {}
+  const base = `当前 高 ${c['高风险'] || 0} · 中 ${c['中风险'] || 0} · 低 ${c['低风险'] || 0}`
+  const initLine = `初评 高 ${init['高风险'] || 0} · 中 ${init['中风险'] || 0} · 低 ${init['低风险'] || 0}`
+  const changes = [
+    evo.downgraded_count ? `已降级 ${evo.downgraded_count} 项` : '',
+    evo.upgraded_count ? `已上调 ${evo.upgraded_count} 项` : '',
+    evo.excluded_count ? `已整改 ${evo.excluded_count} 项` : '',
+  ].filter(Boolean).join('，')
+  return changes ? `${base}（${initLine}；${changes}）` : `${base}（${initLine}）`
+}
+
+function cmpRequiredDocs(p: Project | null): DocView[] {
+  if (!p) return []
+  return p.documents.filter((d) => p.applicability?.[d.code]?.state !== 'na')
+}
+
+function cmpAdmissionSummary(p: Project | null): string {
+  if (!p) return '—'
+  const ap = p.applicability?.admission
+  if (ap?.state === 'na') return '不涉及海外属地准入办理'
+  const doc = p.documents.find((d) => d.code === 'admission')
+  if (doc?.verdict) return `${doc.verdict.label}：${doc.verdict.text}`
+  return ap?.why || '需按目标国法规履行属地准入'
+}
+
+const compareDocDiff = computed(() => {
+  const aDocs = cmpRequiredDocs(compareLeft.value)
+  const bDocs = cmpRequiredDocs(compareRight.value)
+  const aMap = new Map(aDocs.map((d) => [d.code, d]))
+  const bMap = new Map(bDocs.map((d) => [d.code, d]))
+  const onlyA = aDocs.filter((d) => !bMap.has(d.code)).map((d) => d.name)
+  const onlyB = bDocs.filter((d) => !aMap.has(d.code)).map((d) => d.name)
+  const unionCodes: string[] = []
+  for (const d of [...aDocs, ...bDocs]) {
+    if (!unionCodes.includes(d.code)) unionCodes.push(d.code)
+  }
+  const rows = unionCodes.map((code) => {
+    const da = aMap.get(code) || null
+    const db = bMap.get(code) || null
+    const labelA = da ? (da.verdict?.label || (da.state === 'ready' ? '已就绪' : '待完善')) : '无需办理'
+    const labelB = db ? (db.verdict?.label || (db.state === 'ready' ? '已就绪' : '待完善')) : '无需办理'
+    return { code, name: da?.name || db?.name || code, labelA, labelB, toneA: da?.verdict?.tone || '', toneB: db?.verdict?.tone || '', diff: labelA !== labelB }
+  })
+  return { onlyA, onlyB, rows }
+})
+
+function jumpFromCompare(id: string) {
+  if (!id) return
+  compareVisible.value = false
+  void router.push({ query: { project: id } })
+}
 </script>
 
 <template>
@@ -1083,6 +1209,7 @@ const allReady = computed(() => !!project.value?.final.ok)
         <div class="side-top">
           <strong>合规文件项目</strong>
           <span class="side-top-actions">
+            <el-button v-if="items.length >= 2" size="small" data-testid="doc-compare-open" @click="openCompare">对比</el-button>
             <el-button v-if="editable" size="small" data-testid="doc-new" @click="router.push({ query: {} })">+ 新建</el-button>
             <button v-if="!isNew" type="button" class="cy-rail-toggle" title="收起项目列表" aria-label="收起项目列表" data-testid="doc-rail-close" @click="railCollapsed = true">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
@@ -1762,6 +1889,116 @@ const allReady = computed(() => !!project.value?.final.ok)
         <BlocksView v-if="previewBlocks.length" :blocks="previewBlocks" hide-title :outline="previewHasOutline" :editable="previewEditMode && editable && !locked && !previewIsEdpbEn" :saving="previewSaving" @edit="savePreviewEdit" />
       </div>
     </el-drawer>
+    <el-dialog v-model="compareVisible" title="合规项目方案对比" width="min(980px, 94vw)" append-to-body destroy-on-close data-testid="doc-compare-dialog">
+      <div v-loading="compareLoading" class="cmp-wrap">
+        <div class="cmp-bar">
+          <div class="cmp-pick">
+            <span class="cmp-pick-label">方案 A</span>
+            <el-select v-model="compareLeftId" placeholder="选择项目 A" style="flex: 1" data-testid="doc-compare-left" @change="loadComparePair">
+              <el-option v-for="it in items" :key="it.id" :label="it.title" :value="it.id" />
+            </el-select>
+          </div>
+          <el-button size="small" @click="swapCompare">对调</el-button>
+          <div class="cmp-pick">
+            <span class="cmp-pick-label">方案 B</span>
+            <el-select v-model="compareRightId" placeholder="选择项目 B" style="flex: 1" data-testid="doc-compare-right" @change="loadComparePair">
+              <el-option v-for="it in items" :key="it.id" :label="it.title" :value="it.id" />
+            </el-select>
+          </div>
+        </div>
+
+        <table v-if="compareLeft && compareRight" class="cmp-table" data-testid="doc-compare-table">
+          <thead>
+            <tr>
+              <th class="cmp-col-dim">对比维度</th>
+              <th>
+                <div class="cmp-th-head">
+                  <span>{{ compareLeft.title }}</span>
+                  <button type="button" class="cmp-jump" @click="jumpFromCompare(compareLeft.id)">打开</button>
+                </div>
+              </th>
+              <th>
+                <div class="cmp-th-head">
+                  <span>{{ compareRight.title }}</span>
+                  <button type="button" class="cmp-jump" @click="jumpFromCompare(compareRight.id)">打开</button>
+                </div>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :class="{ 'cmp-diff': cmpRouteLine(compareLeft) !== cmpRouteLine(compareRight) }">
+              <th>跨境流向与场景</th>
+              <td>{{ cmpRouteLine(compareLeft) }}</td>
+              <td>{{ cmpRouteLine(compareRight) }}</td>
+            </tr>
+            <tr :class="{ 'cmp-diff': cmpStatutoryRoute(compareLeft) !== cmpStatutoryRoute(compareRight) }">
+              <th>发出国法定路径</th>
+              <td>{{ cmpStatutoryRoute(compareLeft) }}</td>
+              <td>{{ cmpStatutoryRoute(compareRight) }}</td>
+            </tr>
+            <tr :class="{ 'cmp-diff': compareLeft.project_verdict?.label !== compareRight.project_verdict?.label }">
+              <th>场景综合判定结论</th>
+              <td>
+                <div v-if="compareLeft.project_verdict" class="cmp-verdict-cell">
+                  <span class="verdict-pill" :class="`tone-${compareLeft.project_verdict.tone}`">{{ compareLeft.project_verdict.label }}</span>
+                  <p>{{ compareLeft.project_verdict.text }}</p>
+                </div>
+                <span v-else class="muted">待完善必填要素</span>
+              </td>
+              <td>
+                <div v-if="compareRight.project_verdict" class="cmp-verdict-cell">
+                  <span class="verdict-pill" :class="`tone-${compareRight.project_verdict.tone}`">{{ compareRight.project_verdict.label }}</span>
+                  <p>{{ compareRight.project_verdict.text }}</p>
+                </div>
+                <span v-else class="muted">待完善必填要素</span>
+              </td>
+            </tr>
+            <tr :class="{ 'cmp-diff': cmpRiskSummary(compareLeft) !== cmpRiskSummary(compareRight) }">
+              <th>风险等级与压降进度</th>
+              <td>{{ cmpRiskSummary(compareLeft) }}</td>
+              <td>{{ cmpRiskSummary(compareRight) }}</td>
+            </tr>
+            <tr :class="{ 'cmp-diff': compareDocDiff.onlyA.length > 0 || compareDocDiff.onlyB.length > 0 }">
+              <th>本次应出文件（份数与差异）</th>
+              <td>
+                <div><strong>{{ compareLeft.ready_count }} / {{ cmpRequiredDocs(compareLeft).length }} 份已就绪</strong></div>
+                <div v-if="compareDocDiff.onlyA.length" class="cmp-only">仅本方案必办：{{ compareDocDiff.onlyA.join('、') }}</div>
+              </td>
+              <td>
+                <div><strong>{{ compareRight.ready_count }} / {{ cmpRequiredDocs(compareRight).length }} 份已就绪</strong></div>
+                <div v-if="compareDocDiff.onlyB.length" class="cmp-only">仅本方案必办：{{ compareDocDiff.onlyB.join('、') }}</div>
+              </td>
+            </tr>
+            <tr :class="{ 'cmp-diff': cmpAdmissionSummary(compareLeft) !== cmpAdmissionSummary(compareRight) }">
+              <th>海外属地准入结论</th>
+              <td>{{ cmpAdmissionSummary(compareLeft) }}</td>
+              <td>{{ cmpAdmissionSummary(compareRight) }}</td>
+            </tr>
+            <tr>
+              <th>逐项文件结论对照</th>
+              <td colspan="2" class="cmp-sub-cell">
+                <table class="cmp-sub-table">
+                  <thead>
+                    <tr>
+                      <th>合规文件</th>
+                      <th>方案 A</th>
+                      <th>方案 B</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in compareDocDiff.rows" :key="row.code" :class="{ 'cmp-diff': row.diff }">
+                      <td>{{ row.name }}</td>
+                      <td><span v-if="row.toneA" class="verdict-pill" :class="`tone-${row.toneA}`">{{ row.labelA }}</span><span v-else>{{ row.labelA }}</span></td>
+                      <td><span v-if="row.toneB" class="verdict-pill" :class="`tone-${row.toneB}`">{{ row.labelB }}</span><span v-else>{{ row.labelB }}</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -2050,4 +2287,26 @@ const allReady = computed(() => !!project.value?.final.ok)
   .vo-col { border-right: 0; padding-right: 0; border-bottom: 1px dashed #cbd5e1; padding-bottom: 8px; }
   .vo-col-verdict { border-bottom: 0; padding-bottom: 0; }
 }
+.cmp-wrap { display: flex; flex-direction: column; gap: 14px; }
+.cmp-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cmp-pick { flex: 1; min-width: 240px; display: flex; align-items: center; gap: 8px; }
+.cmp-pick-label { font-size: 13px; font-weight: 600; color: #334155; white-space: nowrap; }
+.cmp-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; color: #0f172a; background: #fff; }
+.cmp-table th, .cmp-table td { border: 1px solid #cbd5e1; padding: 10px 12px; vertical-align: top; text-align: left; line-height: 1.65; word-break: break-word; }
+.cmp-table thead th { background: #f8fafc; font-weight: 600; font-size: 14px; }
+.cmp-table tbody th { background: #f8fafc; font-weight: 600; color: #334155; }
+.cmp-col-dim { width: 164px; }
+.cmp-th-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.cmp-jump { flex: none; border: 0; background: none; padding: 0; color: #1d4ed8; font: inherit; font-size: 13px; font-weight: 400; cursor: pointer; }
+.cmp-jump:hover { text-decoration: underline; }
+.cmp-diff > td { background: #f8fbff; }
+.cmp-verdict-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.cmp-verdict-cell p { margin: 0; font-size: 13px; color: #1e293b; line-height: 1.6; }
+.cmp-only { margin-top: 4px; font-size: 13px; color: #92400e; }
+.cmp-sub-cell { padding: 0 !important; }
+.cmp-sub-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cmp-sub-table th, .cmp-sub-table td { border: 0; border-bottom: 1px solid #e2e8f0; border-right: 1px solid #e2e8f0; padding: 7px 10px; }
+.cmp-sub-table tr:last-child td { border-bottom: 0; }
+.cmp-sub-table th:last-child, .cmp-sub-table td:last-child { border-right: 0; }
+.cmp-sub-table thead th { background: #f8fafc; font-size: 13px; font-weight: 600; color: #475569; }
 </style>

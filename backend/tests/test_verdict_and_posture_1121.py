@@ -442,3 +442,90 @@ async def test_cockpit_and_user_posture_overview_role_separation(client, seed, s
     up_txt = _flatten_blocks_text(up_blocks)
     assert "原风险 1（已上调）" in up_txt
     assert "原风险 1（已降级）" not in up_txt
+
+
+def test_export_metadata_sanitization_docx_and_pdf():
+    """Verify exported .docx (standard & EDPB English) and .pdf (WeasyPrint, LibreOffice, Word)
+    strip underlying engine Creator/Producer/Author traces while preserving clean document titles
+    and byte-offset integrity."""
+    import io
+    import re
+    import zipfile
+
+    import pypdfium2
+
+    from app.analysis.export_sanitize import sanitize_docx_metadata, sanitize_pdf_metadata
+    from app.analysis.official_eu_edpb_dpia import render_edpb_2026_docx
+    from app.analysis.pdf_renderer import render_pdf
+    from app.analysis.report_exporter import _docx_package, _w_p
+
+    # 1. Platform-generated .docx carries only clean title, empty creator/application/company
+    raw_docx = _docx_package([_w_p("正文段落")], "汽车数据跨境风险评估报告", clean=True, foreign=True)
+    with zipfile.ZipFile(io.BytesIO(raw_docx), "r") as zf:
+        core_xml = zf.read("docProps/core.xml").decode("utf-8")
+        app_xml = zf.read("docProps/app.xml").decode("utf-8")
+    assert "<dc:title>汽车数据跨境风险评估报告</dc:title>" in core_xml
+    assert "<dc:creator></dc:creator>" in core_xml
+    assert "<cp:lastModifiedBy></cp:lastModifiedBy>" in core_xml
+    assert "<Application></Application>" in app_xml
+    assert "<Company></Company>" in app_xml
+
+    # 2. EDPB 2026 English DPIA .docx has clean metadata and 0 Chinese characters
+    edpb_docx = render_edpb_2026_docx(
+        {
+            "project_name": "Connected Vehicle Diagnostics",
+            "controller": {"name_and_address": "Test OEM GmbH, Munich"},
+            "risks": [],
+            "decision": {"outcome": "CONDITIONALLY_APPROVED", "justification": "Controls in place."},
+        },
+        assessment_date="2026-11-21",
+    )
+    with zipfile.ZipFile(io.BytesIO(edpb_docx), "r") as zf:
+        e_core = zf.read("docProps/core.xml").decode("utf-8")
+        e_app = zf.read("docProps/app.xml").decode("utf-8")
+    assert "<dc:creator></dc:creator>" in e_core
+    assert "<Application></Application>" in e_app
+    assert not re.search(r"[\u4e00-\u9fff]", e_core + e_app)
+
+    # 3. Generic sanitize_docx_metadata clears custom creator/company on arbitrary docx
+    dirty = sanitize_docx_metadata(raw_docx, "合规简报")
+    with zipfile.ZipFile(io.BytesIO(dirty), "r") as zf:
+        assert "<dc:title>合规简报</dc:title>" in zf.read("docProps/core.xml").decode("utf-8")
+
+    # 4. WeasyPrint offline PDF has empty Producer/Creator/Author and renders cleanly
+    from types import SimpleNamespace
+
+    wp_pdf = render_pdf(
+        SimpleNamespace(country_code="SG", vehicle_model="DemoEV"),
+        SimpleNamespace(consulting=None),
+        dimension=None,
+        context="数据合规评估报告",
+        country="新加坡",
+        notices=[],
+        blocks=[{"t": "h1", "text": "数据合规评估报告"}, {"t": "p", "text": "测试正文内容。"}],
+    )
+    wp_doc = pypdfium2.PdfDocument(wp_pdf)
+    wp_meta = wp_doc.get_metadata_dict()
+    assert not wp_meta.get("Producer")
+    assert not wp_meta.get("Creator")
+    assert not wp_meta.get("Author")
+    assert len(wp_doc) >= 1
+
+    # 5. In-place PDF Info + XMP scrubber strips LibreOffice/Word strings while preserving byte length
+    fake_lo = (
+        b"%PDF-1.5\n"
+        b"1 0 obj\n<</Title<FEFF6570636E>\n"
+        b"/Creator<FEFF005700720069007400650072>\n"
+        b"/Producer<FEFF004C0069006200720065004F0066006600690063006500200037002E0034>\n"
+        b"/Author(InternalUser)>>\nendobj\n"
+        b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><pdf:Producer>Microsoft Word</pdf:Producer>"
+        b"<xmp:CreatorTool>Microsoft Word</xmp:CreatorTool></x:xmpmeta>\n"
+        b"trailer\n<</Info 1 0 R>>\n%%EOF\n"
+    )
+    cleaned_lo = sanitize_pdf_metadata(fake_lo)
+    assert len(cleaned_lo) == len(fake_lo)
+    assert b"<FEFF6570636E>" in cleaned_lo  # Title preserved
+    assert b"005700720069007400650072" not in cleaned_lo  # Writer stripped
+    assert b"004C0069006200720065" not in cleaned_lo  # LibreOffice stripped
+    assert b"InternalUser" not in cleaned_lo
+    assert b"Microsoft Word" not in cleaned_lo
