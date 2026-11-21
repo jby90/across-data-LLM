@@ -1845,19 +1845,19 @@ const allReady = computed(() => !!project.value?.final.ok)
 .docs { border: 1px solid var(--cy-line); border-radius: 10px; overflow: hidden; }
 .docs-group-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; padding: 10px 18px; background: #f8fafc; border-bottom: 1px solid var(--cy-line); font-size: 13px; }
 .docs-group-head b { color: var(--cy-text-1); font-size: 14px; }
-.docs-col-head { display: grid; grid-template-columns: minmax(0, 1fr) 108px 136px minmax(200px, auto); column-gap: 16px; padding: 7px 18px; background: #f8fafc; border-bottom: 1px solid var(--cy-line); font-size: 13px; color: #64748b; }
+.docs-col-head { display: grid; grid-template-columns: minmax(0, 1fr) 92px 136px 296px; column-gap: 16px; padding: 7px 18px; background: #f8fafc; border-bottom: 1px solid var(--cy-line); font-size: 13px; color: #64748b; }
 .docs-col-head .col-act { text-align: right; }
 .na-group-toggle { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 18px; border: 0; border-top: 1px solid var(--cy-line); background: #f8fafc; color: var(--cy-text-2); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }
 .na-group-toggle:hover { background: #f1f5f9; color: var(--cy-text-1); }
 .na-toggle-act { color: var(--el-color-primary); font-size: 13px; white-space: nowrap; flex-shrink: 0; }
 .na-docs-wrap { border-top: 1px solid var(--cy-line); }
-.doc { display: grid; grid-template-columns: minmax(0, 1fr) 108px 136px minmax(200px, auto); column-gap: 16px; align-items: start; padding: 14px 18px; border-bottom: 1px solid var(--cy-line); }
+.doc { display: grid; grid-template-columns: minmax(0, 1fr) 92px 136px 296px; column-gap: 16px; align-items: start; padding: 14px 18px; border-bottom: 1px solid var(--cy-line); }
 .doc-verdict { display: flex; align-items: center; padding-top: 2px; min-height: 24px; }
 .verdict-pill { display: inline-block; font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px; line-height: 20px; white-space: nowrap; }
 .verdict-pill.tone-done { background: #dcfce7; color: #166534; }
 .verdict-pill.tone-warn { background: #fef3c7; color: #92400e; }
 .verdict-pill.tone-danger { background: #fee2e2; color: #991b1b; }
-@container (max-width: 760px) {
+@container (max-width: 860px) {
   .docs-col-head { display: none; }
   .doc { grid-template-columns: minmax(0, 1fr) auto; row-gap: 8px; }
   .doc-verdict { grid-column: 1 / -1; }

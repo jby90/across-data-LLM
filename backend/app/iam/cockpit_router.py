@@ -14,13 +14,13 @@ from app.core.db import get_session
 from app.forms import service as forms_service
 from app.iam import service as iam_service
 from app.iam.deps import Principal, require_super_admin
-from app.knowledge.cache_sync import use_cached
+from app.knowledge import cache_sync
 from app.sources.attention import attention_of
 from app.sources.models import SourceSite
 
 router = APIRouter(prefix="/api/admin/cockpit", tags=["cockpit"])
 
-_KB_POSTURE_CACHE: dict[str, dict[str, Any]] = {}
+_KB_POSTURE_CACHE: dict[str, tuple[str, dict[str, Any]]] = {}
 
 
 def _safe_pct(num: int, den: int) -> float | None:
@@ -31,10 +31,11 @@ def _safe_pct(num: int, den: int) -> float | None:
 
 async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
     """法规底座聚合指标（法规、条文、译文、图谱、标准、简报、准入事项与入库质量）：
-    线上由 cache_sync 后台线程预热并在管理端写操作后自动重建；单测期实时查库。"""
+    基于全库实时指纹校验缓存，无论管理端操作还是后台采集/翻译入库均即时同步。"""
+    kb_mark = await cache_sync.mark(session)
     hit = _KB_POSTURE_CACHE.get("posture")
-    if use_cached(hit):
-        return hit
+    if hit is not None and hit[0] == kb_mark and not cache_sync.rebuilding.get():
+        return hit[1]
 
     # 1. 各国有效法规数（取每部法规最新非草案、未驳回修订版，统计相关性在范围内且现行有效的法规）
     doc_rows = (
@@ -363,7 +364,7 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
         "adm_entries_by_cc": adm_entries_by_cc,
         "quality_unpassed": quality_unpassed,
     }
-    _KB_POSTURE_CACHE["posture"] = built
+    _KB_POSTURE_CACHE["posture"] = (kb_mark, built)
     return built
 
 
