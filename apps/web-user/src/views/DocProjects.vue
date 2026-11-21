@@ -1123,13 +1123,22 @@ function swapCompare() {
   compareRight.value = tmpData
 }
 
+function cmpLabelOf(key: string | undefined, list: { key: string; label: string }[]): string {
+  const k = (key || '').trim()
+  if (!k) return ''
+  const hit = list.find((x) => x.key === k || x.label === k)
+  if (hit) return hit.label
+  return /^[a-z0-9_]+$/i.test(k) ? '' : k
+}
+
 function cmpRouteLine(p: Project | null): string {
   if (!p) return '—'
   const r = p.route
+  const sceneText = cmpLabelOf(r.business_scene, options.value.scenes) || cmpLabelOf(r.function, options.value.functions)
   return [
     `${r.source_country || '未填'} → ${r.recipient_country || '未填'}`,
     r.vehicle_model,
-    r.business_scene || r.function,
+    sceneText,
   ].filter(Boolean).join(' · ')
 }
 
@@ -1159,13 +1168,16 @@ function cmpRequiredDocs(p: Project | null): DocView[] {
   return p.documents.filter((d) => p.applicability?.[d.code]?.state !== 'na')
 }
 
-function cmpAdmissionSummary(p: Project | null): string {
-  if (!p) return '—'
+function cmpAdmissionSummary(p: Project | null): { label: string; tone: string; detail: string } {
+  if (!p) return { label: '—', tone: '', detail: '' }
   const ap = p.applicability?.admission
-  if (ap?.state === 'na') return '不涉及海外属地准入办理'
+  if (ap?.state === 'na') return { label: '无需办理', tone: '', detail: '不涉及海外属地准入办理' }
   const doc = p.documents.find((d) => d.code === 'admission')
-  if (doc?.verdict) return `${doc.verdict.label}：${doc.verdict.text}`
-  return ap?.why || '需按目标国法规履行属地准入'
+  if (doc?.verdict) {
+    const detail = (doc.verdict.text || '').trim() || (ap?.why || '').trim()
+    return { label: doc.verdict.label, tone: doc.verdict.tone || '', detail }
+  }
+  return { label: '待核定', tone: '', detail: (ap?.why || '').trim() || '需按目标国法规履行属地准入' }
 }
 
 const compareDocDiff = computed(() => {
@@ -1209,7 +1221,6 @@ function jumpFromCompare(id: string) {
         <div class="side-top">
           <strong>合规文件项目</strong>
           <span class="side-top-actions">
-            <el-button v-if="items.length >= 2" size="small" data-testid="doc-compare-open" @click="openCompare">对比</el-button>
             <el-button v-if="editable" size="small" data-testid="doc-new" @click="router.push({ query: {} })">+ 新建</el-button>
             <button v-if="!isNew" type="button" class="cy-rail-toggle" title="收起项目列表" aria-label="收起项目列表" data-testid="doc-rail-close" @click="railCollapsed = true">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
@@ -1217,10 +1228,11 @@ function jumpFromCompare(id: string) {
           </span>
         </div>
         <div class="archive-bar">
-          <button type="button" class="archive-toggle" data-testid="doc-archive-toggle" @click="showArchive = !showArchive">{{ showArchive ? '← 返回项目' : `查看已归档的项目（${archivedItems.length}）` }}</button>
-          <span v-if="editable" class="batch-bar">
-            <button v-if="!showArchive && items.length" type="button" class="batch-link" :disabled="busy === 'batch-archive'" data-testid="doc-batch-archive" @click="batchArchive">一键归档</button>
-            <template v-else-if="showArchive && archivedItems.length">
+          <button type="button" class="archive-toggle" data-testid="doc-archive-toggle" @click="showArchive = !showArchive">{{ showArchive ? '← 返回项目' : `已归档（${archivedItems.length}）` }}</button>
+          <span class="batch-bar">
+            <button v-if="!showArchive && items.length >= 2" type="button" class="batch-link cmp-trigger" data-testid="doc-compare-open" @click="openCompare">方案对比</button>
+            <button v-if="editable && !showArchive && items.length" type="button" class="batch-link" :disabled="busy === 'batch-archive'" data-testid="doc-batch-archive" @click="batchArchive">一键归档</button>
+            <template v-else-if="editable && showArchive && archivedItems.length">
               <button type="button" class="batch-link" :disabled="busy === 'batch-restore'" data-testid="doc-batch-restore" @click="batchRestore">一键恢复</button>
               <button type="button" class="batch-link danger" :disabled="busy === 'batch-delete'" data-testid="doc-batch-delete" @click="batchDelete">一键清空</button>
             </template>
@@ -1969,10 +1981,22 @@ function jumpFromCompare(id: string) {
                 <div v-if="compareDocDiff.onlyB.length" class="cmp-only">仅本方案必办：{{ compareDocDiff.onlyB.join('、') }}</div>
               </td>
             </tr>
-            <tr :class="{ 'cmp-diff': cmpAdmissionSummary(compareLeft) !== cmpAdmissionSummary(compareRight) }">
+            <tr :class="{ 'cmp-diff': cmpAdmissionSummary(compareLeft).label !== cmpAdmissionSummary(compareRight).label }">
               <th>海外属地准入结论</th>
-              <td>{{ cmpAdmissionSummary(compareLeft) }}</td>
-              <td>{{ cmpAdmissionSummary(compareRight) }}</td>
+              <td>
+                <div class="cmp-verdict-cell">
+                  <span v-if="cmpAdmissionSummary(compareLeft).tone" class="verdict-pill" :class="`tone-${cmpAdmissionSummary(compareLeft).tone}`">{{ cmpAdmissionSummary(compareLeft).label }}</span>
+                  <strong v-else>{{ cmpAdmissionSummary(compareLeft).label }}</strong>
+                  <p v-if="cmpAdmissionSummary(compareLeft).detail">{{ cmpAdmissionSummary(compareLeft).detail }}</p>
+                </div>
+              </td>
+              <td>
+                <div class="cmp-verdict-cell">
+                  <span v-if="cmpAdmissionSummary(compareRight).tone" class="verdict-pill" :class="`tone-${cmpAdmissionSummary(compareRight).tone}`">{{ cmpAdmissionSummary(compareRight).label }}</span>
+                  <strong v-else>{{ cmpAdmissionSummary(compareRight).label }}</strong>
+                  <p v-if="cmpAdmissionSummary(compareRight).detail">{{ cmpAdmissionSummary(compareRight).detail }}</p>
+                </div>
+              </td>
             </tr>
             <tr>
               <th>逐项文件结论对照</th>
@@ -2287,7 +2311,8 @@ function jumpFromCompare(id: string) {
   .vo-col { border-right: 0; padding-right: 0; border-bottom: 1px dashed #cbd5e1; padding-bottom: 8px; }
   .vo-col-verdict { border-bottom: 0; padding-bottom: 0; }
 }
-.cmp-wrap { display: flex; flex-direction: column; gap: 14px; }
+.cmp-wrap { display: flex; flex-direction: column; gap: 14px; max-height: 76vh; overflow-y: auto; padding-right: 2px; }
+.cmp-trigger { color: #1d4ed8 !important; font-weight: 600 !important; }
 .cmp-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .cmp-pick { flex: 1; min-width: 240px; display: flex; align-items: center; gap: 8px; }
 .cmp-pick-label { font-size: 13px; font-weight: 600; color: #334155; white-space: nowrap; }
