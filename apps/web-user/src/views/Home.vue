@@ -11,7 +11,6 @@ import {
   COUNTRY_NAMES,
   getCountryHub,
   localTime,
-  statusClass,
   userName,
 } from '@cyshuhe/shared'
 import { useAuth } from '../auth'
@@ -120,6 +119,9 @@ interface ComplianceOverview {
   route_distribution: RouteBucket[]
   legal_route_distribution?: RouteBucket[]
   map_routes?: MapRouteItem[]
+  recent_docs?: DocItem[]
+  recent_progress?: Record<string, Progress>
+  recent_admissions?: AdmItem[]
   deadlines?: DeadlineItem[]
   risk_summary: {
     init_high: number
@@ -138,7 +140,6 @@ interface ComplianceOverview {
 const COUNTRIES: Record<string, string> = COUNTRY_NAMES
 const FOLD_LIMIT = 5
 
-const viewMode = ref<'map' | 'metrics' | 'list'>('map')
 const isFullscreen = ref(false)
 const boardEl = ref<HTMLElement | null>(null)
 const selectedRouteKey = ref<string>('ALL')
@@ -149,13 +150,11 @@ const overview = ref<ComplianceOverview | null>(null)
 const docItems = ref<DocItem[]>([])
 const progress = ref<Record<string, Progress>>({})
 const admItems = ref<AdmItem[]>([])
-const docsLoaded = ref(false)
-const admsLoaded = ref(false)
-const hasAdmission = ref(false)
+const loaded = ref(false)
+const hasAdmission = computed(() => admItems.value.length > 0)
 
 const editable = computed(() => canEdit(auth.user))
 const isPortalTrial = computed(() => auth.user?.signup_source === 'portal')
-const loaded = computed(() => docsLoaded.value && admsLoaded.value)
 
 function syncFullscreenState() {
   isFullscreen.value = Boolean(document.fullscreenElement)
@@ -427,69 +426,26 @@ const legalDistribution = computed<RouteBucket[]>(() => {
 
 const maxLegalCount = computed(() => Math.max(1, ...legalDistribution.value.map((x) => x.count)))
 
-async function fetchDocsWithProgress(): Promise<{ docs: DocItem[]; prog: Record<string, Progress> }> {
+async function loadHomeData() {
   try {
     localStorage.removeItem('home-doc-progress-v2')
   } catch {
     /* 忽略浏览器存储限制 */
   }
-  let docs: DocItem[] = []
-  try {
-    const res = await api.get<DocItem[]>('/api/analysis/doc-projects')
-    docs = Array.isArray(res) ? res : []
-  } catch {
-    docs = []
-  }
-  const ids = docs.map((d) => d.id)
-  if (!ids.length) return { docs, prog: {} }
-  const fresh: Record<string, Progress> = {}
-  const batches: string[][] = []
-  for (let i = 0; i < ids.length; i += 20) batches.push(ids.slice(i, i + 20))
-  await Promise.all(
-    batches.map(async (batch) => {
-      try {
-        const chunk = await api.get<Record<string, Progress>>(
-          `/api/analysis/doc-projects/progress?ids=${batch.join(',')}`,
-        )
-        Object.assign(fresh, chunk)
-      } catch {
-        /* 单批查询异常时不注入陈旧本地缓存 */
-      }
-    }),
-  )
-  return { docs, prog: fresh }
-}
-
-async function fetchAdmissionList(): Promise<AdmItem[]> {
-  try {
-    const all = await api.get<AdmItem[]>('/api/admission/projects')
-    return Array.isArray(all) ? [...all].sort((a, b) => b.updated_at.localeCompare(a.updated_at)) : []
-  } catch {
-    return []
-  }
-}
-
-async function loadRecentAll() {
   if (isPortalTrial.value) {
-    docsLoaded.value = true
-    admsLoaded.value = true
+    loaded.value = true
     return
   }
-  const [{ docs, prog }, adms] = await Promise.all([fetchDocsWithProgress(), fetchAdmissionList()])
-  docItems.value = docs
-  progress.value = prog
-  admItems.value = adms
-  hasAdmission.value = adms.length > 0
-  docsLoaded.value = true
-  admsLoaded.value = true
-}
-
-async function loadOverview() {
-  if (isPortalTrial.value) return
   try {
-    overview.value = await api.get<ComplianceOverview>('/api/analysis/doc-projects/compliance-overview')
+    const res = await api.get<ComplianceOverview>('/api/analysis/doc-projects/compliance-overview')
+    overview.value = res
+    docItems.value = Array.isArray(res.recent_docs) ? res.recent_docs : []
+    progress.value = res.recent_progress || {}
+    admItems.value = Array.isArray(res.recent_admissions) ? res.recent_admissions : []
   } catch {
     overview.value = null
+  } finally {
+    loaded.value = true
   }
 }
 
@@ -504,8 +460,7 @@ const TODO_TAG: Record<string, string> = {
 onMounted(() => {
   document.addEventListener('fullscreenchange', syncFullscreenState)
   window.addEventListener('keydown', onKeydown)
-  void loadRecentAll()
-  void loadOverview()
+  void loadHomeData()
 })
 
 onUnmounted(() => {
@@ -548,75 +503,45 @@ const portalTrialCards = [
 
     <!-- 企业账号（企业经办人 member / 本单位普通查看者 viewer） -->
     <template v-else>
-      <div ref="boardEl" class="user-board" :class="{ 'is-fullscreen': isFullscreen, 'is-map-mode': viewMode === 'map' && loaded && rows.length > 0 }">
+      <div ref="boardEl" class="user-board" :class="{ 'is-fullscreen': isFullscreen, 'has-projects': loaded && rows.length > 0 }">
         <header class="hero-head">
           <div class="hero-title-group">
             <h1>欢迎，{{ userName(auth.user) }}</h1>
             <span v-if="loaded && rows.length" class="hero-sub">
-              {{ editable ? '本单位跨境数据流向与项目推进实时态势' : '只读查看模式 · 本单位共享项目实时同步' }}
+              {{ editable ? '本单位跨境数据流向与项目推进实时状态' : '只读查看模式 · 本单位共享项目实时同步' }}
             </span>
           </div>
 
           <div class="hero-actions">
-            <template v-if="loaded && rows.length">
-              <div class="view-switcher" role="tablist" aria-label="工作概览展示方式">
-                <button
-                  type="button"
-                  class="vs-btn"
-                  :class="{ active: viewMode === 'map' }"
-                  data-testid="user-view-map"
-                  @click="viewMode = 'map'"
-                >
-                  跨境态势
-                </button>
-                <button
-                  type="button"
-                  class="vs-btn"
-                  :class="{ active: viewMode === 'metrics' }"
-                  data-testid="user-view-metrics"
-                  @click="viewMode = 'metrics'"
-                >
-                  指标分析
-                </button>
-                <button
-                  type="button"
-                  class="vs-btn"
-                  :class="{ active: viewMode === 'list' }"
-                  data-testid="user-view-list"
-                  @click="viewMode = 'list'"
-                >
-                  项目台账
-                </button>
-              </div>
-              <button
-                type="button"
-                class="fs-btn"
-                data-testid="user-fullscreen-btn"
-                @click="toggleFullscreen"
-              >
-                {{ isFullscreen ? '退出全屏' : '全屏展示' }}
-              </button>
-            </template>
+            <button
+              v-if="loaded && rows.length"
+              type="button"
+              class="fs-btn"
+              data-testid="user-fullscreen-btn"
+              @click="toggleFullscreen"
+            >
+              {{ isFullscreen ? '退出全屏' : '全屏展示' }}
+            </button>
             <RouterLink v-if="editable && loaded && rows.length" to="/documents">
               <el-button type="primary" data-testid="home-new">新建合规评估</el-button>
             </RouterLink>
           </div>
         </header>
 
-        <div v-if="!loaded" v-loading="true" class="recent recent-loading" data-testid="home-recent-loading" />
+        <div v-if="!loaded" v-loading="true" class="recent-loading" data-testid="home-recent-loading" />
 
         <!-- 空企业状态：无项目时不展示空地图，给出清晰新建引导或只读说明 -->
         <div v-else-if="!rows.length" class="empty-org-card" data-testid="home-recent-empty">
           <template v-if="editable">
             <h2>开始本单位首个汽车数据跨境合规评估</h2>
-            <p>选定数据发出国、数据接收国与车载业务场景后，平台将自动研判法定出境路径、筛选必备合规文件清单并同步呈现跨境流向态势。</p>
+            <p>选定数据发出国、数据接收国与车载业务场景后，平台将自动研判法定出境路径、筛选必备合规文件清单并同步呈现跨境流向状态。</p>
             <RouterLink to="/documents"><el-button type="primary" data-testid="home-new">新建合规评估项目</el-button></RouterLink>
           </template>
           <p v-else class="viewer-empty">当前暂无本单位共享项目，您可以先查阅法规知识库或使用咨询助手提问查法。</p>
         </div>
 
-        <!-- 视图一：跨境态势（默认首屏，动态点亮本单位真实流向 + 右侧双业务列表联动） -->
-        <section v-else-if="viewMode === 'map'" class="posture-screen" data-testid="user-posture-screen">
+        <!-- 工作概览态势主视图 -->
+        <section v-else class="posture-screen" data-testid="user-posture-screen">
           <div class="kpi-strip">
             <div class="kpi-tile">
               <span class="kpi-label">在办评估项目</span>
@@ -674,7 +599,7 @@ const portalTrialCards = [
                 <p v-else class="p-empty">暂无评估项目路径分布</p>
               </div>
 
-              <div class="p-panel">
+              <div class="p-panel p-panel-flex">
                 <div class="p-panel-head">
                   <h2>风险初评与当前对比</h2>
                   <span>动态复评同步</span>
@@ -723,22 +648,7 @@ const portalTrialCards = [
                 </div>
 
                 <div class="map-stage">
-                  <svg :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="本单位跨境数据流向态势图">
-                    <defs>
-                      <linearGradient id="userArcSafe" x1="0%" y1="0%" x2="100%" y2="0%">
-                        <stop offset="0%" stop-color="#38bdf8" />
-                        <stop offset="100%" stop-color="#34d399" />
-                      </linearGradient>
-                      <linearGradient id="userArcWarn" x1="0%" y1="0%" x2="100%" y2="0%">
-                        <stop offset="0%" stop-color="#38bdf8" />
-                        <stop offset="100%" stop-color="#fbbf24" />
-                      </linearGradient>
-                      <linearGradient id="userArcDanger" x1="0%" y1="0%" x2="100%" y2="0%">
-                        <stop offset="0%" stop-color="#fb923c" />
-                        <stop offset="100%" stop-color="#f87171" />
-                      </linearGradient>
-                    </defs>
-
+                  <svg :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="本单位跨境数据流向图">
                     <g class="land-bg">
                       <path v-for="[cc, d] in backgroundMapEntries" :key="`bg-${cc}`" :d="d" />
                     </g>
@@ -770,7 +680,7 @@ const portalTrialCards = [
                         <path
                           :d="arc.path"
                           class="arc-base"
-                          :stroke="arc.tone === 'danger' ? 'url(#userArcDanger)' : arc.tone === 'warn' ? 'url(#userArcWarn)' : 'url(#userArcSafe)'"
+                          :stroke="arc.tone === 'danger' ? '#f87171' : arc.tone === 'warn' ? '#fbbf24' : '#38bdf8'"
                         />
                         <path :d="arc.path" class="arc-dash" />
                       </g>
@@ -928,136 +838,6 @@ const portalTrialCards = [
             </div>
           </div>
         </section>
-
-        <!-- 视图二：指标分析（浅色白底统计卡片视图） -->
-        <section v-else-if="viewMode === 'metrics'" class="metrics-view" data-testid="user-metrics-view">
-          <div class="metrics-kpi-grid">
-            <div class="m-card">
-              <span class="m-label">在办合规评估项目</span>
-              <strong class="m-num">{{ summaryMetrics.projTotal }}</strong>
-              <span class="m-note">已完成全部必备文件 {{ summaryMetrics.projReady }} 个</span>
-            </div>
-            <div class="m-card">
-              <span class="m-label">应出合规文件齐套进度</span>
-              <strong class="m-num">{{ summaryMetrics.docsReady }} / {{ summaryMetrics.docsReq }}</strong>
-              <span class="m-note">{{ summaryMetrics.docsReq ? `齐套率 ${Math.round((summaryMetrics.docsReady / summaryMetrics.docsReq) * 100)}%` : '暂无应出文件' }}</span>
-            </div>
-            <div class="m-card">
-              <span class="m-label">当前未化解高风险</span>
-              <strong class="m-num" :class="{ danger: summaryMetrics.curHigh > 0 }">{{ summaryMetrics.curHigh }}</strong>
-              <span class="m-note">累计已降级或消除高风险 {{ summaryMetrics.clearedHigh }} 项</span>
-            </div>
-            <div class="m-card">
-              <span class="m-label">海外属地准入办理</span>
-              <strong class="m-num">{{ summaryMetrics.admTotal }}</strong>
-              <span class="m-note">材料已备齐或已获批 {{ summaryMetrics.admReady }} 项</span>
-            </div>
-          </div>
-
-          <div class="metrics-two-col">
-            <div class="m-panel">
-              <h2>各跨境流向文件准备进度</h2>
-              <div v-if="overview?.route_distribution?.length" class="m-rows">
-                <div v-for="rt in overview.route_distribution" :key="rt.route" class="m-bar-item">
-                  <div class="m-bar-head">
-                    <strong>{{ rt.route }}</strong>
-                    <span>{{ rt.count }} 个项目 · 已就绪文件 {{ rt.docs_ready }}/{{ rt.docs_total }} 份</span>
-                  </div>
-                  <el-progress
-                    :percentage="rt.docs_total ? Math.round((rt.docs_ready / rt.docs_total) * 100) : 0"
-                    :stroke-width="8"
-                  />
-                </div>
-              </div>
-              <p v-else class="viewer-empty">暂无流向分布数据。</p>
-            </div>
-
-            <div class="m-panel">
-              <h2>法定出境路径与风险等级结构</h2>
-              <div v-if="legalDistribution.length" class="m-rows">
-                <div v-for="lg in legalDistribution" :key="lg.label" class="m-stat-line">
-                  <span>{{ lg.label }}</span>
-                  <strong>{{ lg.count }} 项（齐套 {{ lg.ready }} 项）</strong>
-                </div>
-              </div>
-              <div v-if="overview?.risk_summary" class="m-risk-table">
-                <div class="m-stat-line">
-                  <span>高风险（初评 → 当前正式报告）</span>
-                  <strong>{{ overview.risk_summary.init_high }} 项 → {{ overview.risk_summary.current_high }} 项</strong>
-                </div>
-                <div class="m-stat-line">
-                  <span>中风险（初评 → 当前正式报告）</span>
-                  <strong>{{ overview.risk_summary.init_medium }} 项 → {{ overview.risk_summary.current_medium }} 项</strong>
-                </div>
-                <div class="m-stat-line">
-                  <span>低风险（初评 → 当前正式报告）</span>
-                  <strong>{{ overview.risk_summary.init_low }} 项 → {{ overview.risk_summary.current_low }} 项</strong>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- 视图三：项目台账（清爽宽表清单视图） -->
-        <section v-else class="welcome-hero list-view" data-testid="user-list-view">
-          <div class="recent" data-testid="home-recent">
-            <div class="recent-head">
-              <h2>最近项目与办理进度<small v-if="rows.length > FOLD_LIMIT" class="recent-count">共 {{ rows.length }} 项</small></h2>
-              <span class="recent-links">
-                <RouterLink to="/documents" data-testid="home-recent-all">查看评估 →</RouterLink>
-                <RouterLink v-if="hasAdmission" to="/admission" data-testid="home-recent-all-admission">查看准入 →</RouterLink>
-                <RouterLink to="/analysis" data-testid="home-go-consulting">咨询助手 →</RouterLink>
-              </span>
-            </div>
-            <RouterLink v-for="r in visibleRows" :key="r.key" class="recent-row" :to="r.to" data-testid="home-recent-row">
-              <span class="recent-module">{{ r.module }}</span>
-              <span class="recent-main">
-                <strong>{{ r.title }}</strong>
-                <small>
-                  {{ r.code }}
-                  <template v-if="r.at && !r.code.startsWith(localTime(r.at, 'date'))"> · {{ localTime(r.at, 'date') }} 更新</template>
-                  <template v-if="r.status && r.status !== r.short"> · {{ r.status }}</template>
-                </small>
-              </span>
-              <span class="recent-status" data-testid="home-recent-status">
-                <span v-if="r.short" class="cy-status" :class="r.ok ? 'cy-status--done' : statusClass(r.short)">{{ r.short }}</span>
-                <span v-else class="cy-status cy-status--muted">进行中</span>
-              </span>
-              <span class="recent-go">{{ (!editable || r.ok) ? '查看 →' : '继续 →' }}</span>
-            </RouterLink>
-            <button
-              v-if="rows.length > FOLD_LIMIT"
-              type="button"
-              class="cy-fold-toggle"
-              data-testid="home-recent-fold-toggle"
-              @click="recentExpanded = !recentExpanded"
-            >
-              <span>{{ recentExpanded ? '收起' : `展开其余 ${rows.length - FOLD_LIMIT} 项` }}</span>
-              <AppIcon :name="recentExpanded ? 'chevron-up' : 'chevron-down'" />
-            </button>
-          </div>
-
-          <div v-if="overview?.todos?.length" class="risk-todos" data-testid="home-risk-todos">
-            <div class="recent-head">
-              <h2>待处理事项与更新通知<small v-if="overview.todos.length > FOLD_LIMIT" class="recent-count">共 {{ overview.todos.length }} 项</small></h2>
-            </div>
-            <RouterLink v-for="t in visibleTodos" :key="t.id" class="todo-row" :to="t.to" data-testid="home-todo-row">
-              <span class="todo-tag" :class="t.level">{{ TODO_TAG[t.kind] || '待办提醒' }}</span>
-              <span class="recent-main"><strong>{{ t.title }}</strong><small>{{ t.detail }}</small></span>
-              <span class="recent-go">{{ editable ? `${t.action_label} →` : '查看详情 →' }}</span>
-            </RouterLink>
-            <button
-              v-if="overview.todos.length > FOLD_LIMIT"
-              type="button"
-              class="cy-fold-toggle"
-              data-testid="home-todos-fold-toggle"
-              @click="todosExpanded = !todosExpanded"
-            >
-              <span>{{ todosExpanded ? '收起' : `展开其余 ${overview.todos.length - FOLD_LIMIT} 项` }}</span>
-              <AppIcon :name="todosExpanded ? 'chevron-up' : 'chevron-down'" />
-            </button>
-          </div>
-        </section>
       </div>
 
       <nav v-if="!isFullscreen" class="quick-links" aria-label="常用功能" data-testid="home-quick">
@@ -1086,12 +866,11 @@ const portalTrialCards = [
 .portal-card-body strong { font-size: 16px; color: #0f172a; }
 .portal-card-body span { font-size: 13px; line-height: 1.6; color: #475569; }
 
-/* 顶部标题与三视图/全屏切换栏 */
+/* 顶部标题与全屏栏 */
 .user-board { display: flex; flex-direction: column; gap: 12px; }
-.user-board.is-fullscreen { position: fixed; inset: 0; z-index: 2000; padding: 18px 24px; overflow-y: auto; background: #f8fafc; }
-.user-board.is-fullscreen.is-map-mode { background: #071120; }
-.user-board.is-fullscreen.is-map-mode .hero-title-group h1 { color: #f8fafc; }
-.user-board.is-fullscreen.is-map-mode .hero-sub { color: #94a3b8; }
+.user-board.is-fullscreen { position: fixed; inset: 0; z-index: 2000; padding: 18px 24px; overflow-y: auto; background: #071120; }
+.user-board.is-fullscreen .hero-title-group h1 { color: #f8fafc; }
+.user-board.is-fullscreen .hero-sub { color: #94a3b8; }
 
 .hero-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 16px; flex-wrap: wrap; }
 .hero-title-group { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
@@ -1099,19 +878,19 @@ const portalTrialCards = [
 .hero-sub { font-size: 13px; color: #64748b; }
 .hero-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
-.view-switcher { display: inline-flex; background: #e2e8f0; border-radius: 8px; padding: 2px; }
-.vs-btn { border: 0; background: transparent; color: #334155; font-size: 13px; padding: 5px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
-.vs-btn.active { background: #fff; color: #1d4ed8; font-weight: 600; }
-.fs-btn { border: 1px solid #cbd5e1; background: #fff; color: #1e293b; font-size: 13px; padding: 5px 12px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.fs-btn { border: 1px solid #cbd5e1; background: #fff; color: #1e293b; font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .fs-btn:hover { border-color: #2563eb; color: #1d4ed8; }
+
+.recent-loading { min-height: 220px; border-radius: 10px; background: #ffffff; border: 1px solid #e2e8f0; }
 
 /* 空企业引导卡 */
 .empty-org-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 28px 30px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
 .empty-org-card h2 { margin: 0; font-size: 18px; color: #0f172a; }
 .empty-org-card p { margin: 0; font-size: 14px; line-height: 1.7; color: #475569; max-width: 760px; }
+.viewer-empty { margin: 0; color: #64748b; font-size: 14px; }
 
-/* 视图一：跨境态势深海蓝地图大屏 */
-.posture-screen { background: #081426; border: 1px solid #1e3a5f; border-radius: 12px; padding: 14px 16px; color: #e2e8f0; display: flex; flex-direction: column; gap: 12px; }
+/* 工作概览主看板 */
+.posture-screen { background: #081426; border: 1px solid #1e3a5f; border-radius: 10px; padding: 14px 16px; color: #e2e8f0; display: flex; flex-direction: column; gap: 12px; font-variant-numeric: tabular-nums; }
 .kpi-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .kpi-tile { background: #0f213a; border: 1px solid #1e3a5f; border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 4px; }
 .kpi-label { font-size: 13px; color: #94a3b8; }
@@ -1122,14 +901,23 @@ const portalTrialCards = [
 .kpi-unit { font-size: 13px; color: #cbd5e1; }
 .kpi-sub { margin-left: auto; font-size: 13px; color: #94a3b8; }
 
-.posture-grid { display: grid; grid-template-columns: 248px minmax(0, 1fr) 332px; gap: 12px; align-items: stretch; }
+/* 宽屏或全屏时左中右三栏；1280/1440 带左侧菜单栏时自动变为上地图、下双栏，零挤压零截断 */
+.posture-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: stretch; }
+.posture-center { grid-column: 1 / -1; order: -1; }
+@media (min-width: 1560px) {
+  .posture-grid { grid-template-columns: 256px minmax(0, 1fr) 348px; }
+  .posture-center { grid-column: auto; order: 0; }
+}
+.user-board.is-fullscreen .posture-grid { grid-template-columns: 264px minmax(0, 1fr) 360px; }
+.user-board.is-fullscreen .posture-center { grid-column: auto; order: 0; }
+
 .posture-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .p-panel { background: #0f213a; border: 1px solid #1e3a5f; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
 .p-panel-flex { flex: 1; min-height: 0; }
 .p-panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .p-panel-head h2 { margin: 0; font-size: 14px; color: #f8fafc; }
 .p-panel-head span { font-size: 13px; color: #94a3b8; }
-.p-head-links { display: inline-flex; gap: 10px; }
+.p-head-links { display: inline-flex; gap: 10px; flex-wrap: wrap; }
 .p-head-links a { color: #60a5fa; text-decoration: none; font-size: 13px; }
 .p-head-links a:hover { text-decoration: underline; }
 .p-empty { margin: 0; font-size: 13px; color: #94a3b8; line-height: 1.6; }
@@ -1153,7 +941,7 @@ const portalTrialCards = [
 .rc-pair b { color: #f8fafc; }
 .rc-foot { display: flex; justify-content: space-between; gap: 8px; color: #94a3b8; font-size: 13px; padding-top: 2px; }
 
-.map-card { flex: 1; background: #0a182c; border: 1px solid #1e3a5f; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; min-height: 410px; }
+.map-card { flex: 1; background: #0a182c; border: 1px solid #1e3a5f; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; min-height: 400px; }
 .map-topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
 .map-topbar h2 { margin: 0 0 2px; font-size: 15px; color: #f8fafc; }
 .map-sub { font-size: 13px; color: #94a3b8; }
@@ -1161,7 +949,7 @@ const portalTrialCards = [
 .map-pill { border: 1px solid #294d78; background: #102542; color: #cbd5e1; font-size: 13px; padding: 4px 10px; border-radius: 999px; cursor: pointer; }
 .map-pill.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; font-weight: 600; }
 
-.map-stage { flex: 1; display: flex; align-items: center; justify-content: center; background: #071222; border-radius: 8px; overflow: hidden; min-height: 280px; }
+.map-stage { flex: 1; display: flex; align-items: center; justify-content: center; background: #071222; border-radius: 8px; overflow: hidden; min-height: 270px; }
 .world-svg { width: 100%; height: auto; max-height: 360px; display: block; }
 .land-bg path { fill: #12243d; stroke: #1c3557; stroke-width: 0.55; }
 .active-country { fill: #1e4b7a; stroke: #60a5fa; stroke-width: 0.9; cursor: pointer; transition: opacity 0.2s, fill 0.2s; }
@@ -1193,20 +981,20 @@ const portalTrialCards = [
 .mf-legend .lg.warn::before { background: #fbbf24; }
 .mf-legend .lg.danger::before { background: #f87171; }
 
-.p-scroll-list { display: flex; flex-direction: column; gap: 8px; max-height: 230px; overflow-y: auto; padding-right: 2px; }
+.p-scroll-list { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; padding-right: 2px; }
 .p-proj-row { background: #0a182c; border: 1px solid #1b3556; border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; cursor: pointer; }
 .p-proj-row:hover, .p-proj-row.active { border-color: #38bdf8; background: #102542; }
-.p-proj-top { display: flex; align-items: center; gap: 6px; }
+.p-proj-top { display: flex; align-items: flex-start; gap: 6px; }
 .p-mod-tag { font-size: 13px; color: #93c5fd; background: #172e4d; border-radius: 4px; padding: 1px 6px; white-space: nowrap; flex-shrink: 0; }
-.p-proj-title { flex: 1; min-width: 0; color: #f8fafc; font-weight: 600; font-size: 13px; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-proj-title { flex: 1; min-width: 0; color: #f8fafc; font-weight: 600; font-size: 13px; line-height: 1.45; text-decoration: none; word-break: break-word; }
 .p-proj-title:hover { color: #60a5fa; text-decoration: underline; }
 .p-proj-go { color: #60a5fa; font-size: 13px; text-decoration: none; white-space: nowrap; flex-shrink: 0; }
 .p-proj-go:hover { text-decoration: underline; }
-.p-proj-meta { display: flex; align-items: center; gap: 8px; font-size: 13px; min-width: 0; }
+.p-proj-meta { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; min-width: 0; }
 .p-status-chip { font-size: 13px; font-weight: 600; border-radius: 999px; padding: 1px 8px; white-space: nowrap; flex-shrink: 0; }
 .p-status-chip.is-ok { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
 .p-status-chip.is-pending { background: rgba(245, 158, 11, 0.2); color: #fde68a; }
-.p-proj-sub { color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.p-proj-sub { color: #94a3b8; line-height: 1.45; min-width: 0; word-break: break-word; }
 
 .p-todo-row { background: #0a182c; border: 1px solid #1b3556; border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; text-decoration: none; color: #e2e8f0; }
 .p-todo-row:hover { border-color: #38bdf8; }
@@ -1221,68 +1009,17 @@ const portalTrialCards = [
 .p-fold-btn { border: 1px solid #23436b; background: #0a182c; color: #93c5fd; border-radius: 6px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
 .p-fold-btn:hover { border-color: #38bdf8; }
 
-/* 视图二：浅色指标分析 */
-.metrics-view { display: flex; flex-direction: column; gap: 14px; }
-.metrics-kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.m-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
-.m-label { font-size: 13px; color: #64748b; }
-.m-num { font-size: 22px; color: #0f172a; }
-.m-num.danger { color: #dc2626; }
-.m-note { font-size: 13px; color: #475569; }
-.metrics-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.m-panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
-.m-panel h2 { margin: 0; font-size: 16px; color: #0f172a; }
-.m-rows { display: flex; flex-direction: column; gap: 10px; }
-.m-bar-item { display: flex; flex-direction: column; gap: 6px; }
-.m-bar-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: #334155; flex-wrap: wrap; }
-.m-stat-line { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; color: #334155; }
-.m-risk-table { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px dashed #e2e8f0; }
-
-/* 视图三：清爽项目台账与通用快捷栏 */
-.risk-todos { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
-.todo-row { display: grid; grid-template-columns: 104px minmax(0, 1fr) 116px; align-items: center; gap: 14px; padding: 10px 16px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; color: #0f172a; text-decoration: none; font-size: 14px; }
-.todo-row:hover { border-color: #3b82f6; }
-.todo-tag { display: inline-block; font-size: 13px; font-weight: 600; border-radius: 999px; padding: 2px 8px; text-align: center; white-space: nowrap; }
-.todo-tag.danger { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-.todo-tag.warning { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
-.todo-tag.info { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
-.recent { display: flex; flex-direction: column; gap: 8px; }
-.recent-loading { min-height: 180px; border-radius: 10px; background: rgba(255, 255, 255, 0.72); border: 1px solid #e2e8f0; }
-.recent-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
-.recent-head h2 { font-size: 16px; font-weight: 600; color: var(--cy-text-1); margin: 0 0 4px; display: inline-flex; align-items: baseline; gap: 8px; }
-.recent-count { font-size: 13px; font-weight: 400; color: var(--cy-text-3); }
-.recent-head a { font-size: 13px; color: #2563eb; text-decoration: none; }
-.recent-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) 136px 64px; align-items: center; gap: 16px; padding: 10px 16px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; color: #0f172a; text-decoration: none; font-size: 14px; }
-.recent-row:hover, .recent-row:focus-visible { border-color: #3b82f6; outline: none; }
-.recent-module { font-size: 13px; color: #475569; background: #f1f5f9; border-radius: 4px; padding: 2px 6px; text-align: center; white-space: nowrap; }
-.recent-main { display: flex; flex-direction: column; min-width: 0; }
-.recent-main small { color: var(--cy-text-2); font-size: 13px; }
-.recent-status { color: var(--cy-tone-warn-fg); font-size: 14px; text-align: left; }
-.recent-links { display: flex; gap: 16px; }
-.recent-go { font-size: 14px; color: var(--el-color-primary); text-align: right; }
 .quick-links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .quick-link { display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #fff; border: 1px solid var(--cy-line); border-radius: 10px; color: var(--cy-text-1); text-decoration: none; }
 .quick-link strong { flex: 1; font-size: 16px; }
 .quick-link:hover { border-color: var(--el-color-primary-light-5); color: var(--el-color-primary); }
 .quick-link .feature-icon { width: 36px; height: 36px; margin: 0; }
-.viewer-empty { margin: 0; color: #64748b; font-size: 14px; }
 
 @media (max-width: 1240px) {
-  .posture-grid { grid-template-columns: 1fr; }
-  .kpi-strip, .metrics-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metrics-two-col { grid-template-columns: 1fr; }
+  .kpi-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-@media (max-width: 800px) {
-  .portal-grid, .kpi-strip, .metrics-kpi-grid, .quick-links { grid-template-columns: 1fr; }
-  .recent-row { grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px 10px; padding: 12px 14px; }
-  .recent-row .recent-module { order: 1; }
-  .recent-row .recent-status { order: 2; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .recent-row .recent-go { order: 3; white-space: nowrap; }
-  .recent-row .recent-main { grid-column: 1 / -1; order: 4; width: 100%; }
-  .todo-row { grid-template-columns: auto minmax(0, 1fr); gap: 8px 10px; padding: 12px 14px; }
-  .todo-row .todo-tag { order: 1; justify-self: start; }
-  .todo-row .recent-go { order: 2; justify-self: end; white-space: nowrap; }
-  .todo-row .recent-main { grid-column: 1 / -1; order: 3; width: 100%; }
+@media (max-width: 860px) {
+  .posture-grid, .portal-grid, .kpi-strip, .quick-links { grid-template-columns: 1fr; }
 }
 </style>

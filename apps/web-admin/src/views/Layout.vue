@@ -221,7 +221,7 @@ async function savePassword() {
             class="topbar-back"
             :aria-label="isSuper ? '返回平台总览' : '返回工作概览'"
             data-testid="back-to-overview"
-            ><AppIcon name="arrow-left" /><span class="topbar-back__full">{{ isSuper ? '返回平台总览' : '返回工作概览' }}</span><span class="topbar-back__short">总览</span></RouterLink
+            ><AppIcon name="arrow-left" /><span class="topbar-back__full">{{ isSuper ? '返回平台总览' : '返回工作概览' }}</span><span class="topbar-back__short">{{ isSuper ? '总览' : '概览' }}</span></RouterLink
           ><RouterLink v-if="route.path !== '/' && route.path !== '/cockpit'" to="/" class="topbar-crumb-home">{{ deskName }}</RouterLink
           ><span v-else>{{ deskName }}</span><span class="topbar-divider">/</span
           ><strong>{{ current?.title || (isSuper ? '平台总览' : '工作概览') }}</strong>

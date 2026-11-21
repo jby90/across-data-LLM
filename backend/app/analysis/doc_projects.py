@@ -211,7 +211,7 @@ def _apply_manual_docs(applicability: dict, facts: dict) -> dict:
                 "state": "need",
                 "manual_include": True,
                 "auto_why": orig_why,
-                "why": f"已手动纳入本次出件（原路径判断：{orig_why}）",
+                "why": f"已纳入本次出件（原路径判断：{orig_why}）",
             }
     return out
 
@@ -679,20 +679,14 @@ async def projects_progress(ids: str, user: UserDep, session: SessionDep) -> dic
 @router.get("/compliance-overview")
 async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
     """Executive compliance overview + actionable risk & pending-item drill-downs for the organization."""
-    from app.admission.models import AdmissionEntry, AdmissionProject
+    from app.admission.models import AdmissionEntry
+    from app.admission.router import list_projects as list_adm_projects
     from app.updates.models import UserNotification
 
-    rows = (
-        await session.scalars(
-            select(AnalysisTask)
-            .where(
-                AnalysisTask.org_id == user.org_id,
-                AnalysisTask.kind == "documents",
-                AnalysisTask.archived_at.is_(None),
-            )
-            .order_by(AnalysisTask.updated_at.desc())
-        )
-    ).all()
+    paired_docs = await _list(session, user, archived=False)
+    recent_docs = [meta for meta, _ in paired_docs]
+    rows = [task for _, task in paired_docs]
+    recent_progress: dict[str, dict] = {}
 
     library = await D.library_countries(session)
     await ensure_default_templates(session)
@@ -721,6 +715,7 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
 
     for task in rows:
         prog = await _fast_progress(session, task, templates, library)
+        recent_progress[str(task.id)] = prog
         docs_ready_total += prog["ready"]
         docs_required_total += prog["total"]
         is_ready = prog["total"] > 0 and prog["ready"] >= prog["total"] and prog["missing"] == 0
@@ -881,45 +876,46 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
                 }
             )
 
-    adm_projects = list(
-        (
-            await session.scalars(
-                select(AdmissionProject)
-                .where(AdmissionProject.org_id == user.org_id, AdmissionProject.status != "archived")
-                .order_by(AdmissionProject.updated_at.desc())
-            )
-        ).all()
+    all_adm_items = await list_adm_projects(user=user, session=session)
+    recent_admissions = sorted(
+        all_adm_items,
+        key=lambda x: str(x.get("updated_at") or ""),
+        reverse=True,
     )
-    adm_total = len(adm_projects)
+    active_adm_items = [a for a in recent_admissions if a.get("status") != "archived"]
+    adm_total = len(active_adm_items)
     adm_ready = 0
-    if adm_projects:
-        from app.admission.router import _readiness
-
-        entry_map = {
-            e.id: e
-            for e in (
-                await session.scalars(
-                    select(AdmissionEntry).where(AdmissionEntry.id.in_({ap.entry_id for ap in adm_projects}))
-                )
-            ).all()
-        }
-        for ap in adm_projects:
-            rd = await _readiness(session, ap)
-            if rd.get("ready"):
+    if active_adm_items:
+        entry_ids = {uuid.UUID(str(a["entry_id"])) for a in active_adm_items if a.get("entry_id")}
+        entry_map = (
+            {
+                str(e.id): e
+                for e in (
+                    await session.scalars(
+                        select(AdmissionEntry).where(AdmissionEntry.id.in_(entry_ids))
+                    )
+                ).all()
+            }
+            if entry_ids
+            else {}
+        )
+        for ap in active_adm_items:
+            if ap.get("ready"):
                 adm_ready += 1
                 continue
-            entry = entry_map.get(ap.entry_id)
-            adm_cc = COUNTRY_NAMES_ZH.get(entry.country_code, entry.country_code) if entry else ""
-            summary_txt = str(rd.get("summary") or "").strip() or "存在待补齐的申报材料"
+            entry = entry_map.get(str(ap.get("entry_id") or ""))
+            cc_raw = str(ap.get("country_code") or (entry.country_code if entry else ""))
+            adm_cc = COUNTRY_NAMES_ZH.get(cc_raw, cc_raw) if cc_raw else ""
+            summary_txt = str(ap.get("summary") or "").strip() or "存在待补齐的申报材料"
             todos.append(
                 {
-                    "id": f"adm-{ap.id}",
+                    "id": f"adm-{ap['id']}",
                     "kind": "admission_pending",
-                    "level": "warning" if not rd.get("started") or int(rd.get("blocking") or 0) > 0 else "info",
-                    "title": f"{ap.title}：{summary_txt}",
+                    "level": "warning" if not ap.get("started") or int(ap.get("blocking") or 0) > 0 else "info",
+                    "title": f"{ap['title']}：{summary_txt}",
                     "detail": f"{adm_cc} 属地准入 · {entry.authority_zh if entry else '目标监管机构'}",
                     "action_label": "前往办理",
-                    "to": {"path": "/admission", "query": {"project": str(ap.id)}},
+                    "to": {"path": "/admission", "query": {"project": str(ap["id"])}},
                 }
             )
 
@@ -973,6 +969,9 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
             legal_buckets.values(), key=lambda r: (r["count"], r["docs_ready"]), reverse=True
         ),
         "map_routes": map_routes,
+        "recent_docs": recent_docs,
+        "recent_progress": recent_progress,
+        "recent_admissions": recent_admissions,
         "deadlines": deadlines[:8],
         "risk_summary": risk_agg,
         "todos": todos[:8],

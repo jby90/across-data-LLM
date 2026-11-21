@@ -1,4 +1,4 @@
-"""超级管理员专属合规态势看板聚合接口（100% 实时数据库真实统计，零模拟指标）。"""
+"""超级管理员专属平台总览聚合接口（100% 实时数据库真实统计，零模拟指标）。"""
 
 from __future__ import annotations
 
@@ -14,10 +14,13 @@ from app.core.db import get_session
 from app.forms import service as forms_service
 from app.iam import service as iam_service
 from app.iam.deps import Principal, require_super_admin
+from app.knowledge.cache_sync import use_cached
 from app.sources.attention import attention_of
 from app.sources.models import SourceSite
 
 router = APIRouter(prefix="/api/admin/cockpit", tags=["cockpit"])
+
+_KB_POSTURE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _safe_pct(num: int, den: int) -> float | None:
@@ -26,20 +29,27 @@ def _safe_pct(num: int, den: int) -> float | None:
     return round(min(num, den) * 100.0 / den, 1)
 
 
-@router.get("/overview", summary="全球法规底座与平台服务态势概览")
-async def cockpit_overview(
-    _: Principal = Depends(require_super_admin),
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    seven_days_ago = now - timedelta(days=7)
+async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
+    """法规底座聚合指标（法规、条文、译文、图谱、标准、简报、准入事项与入库质量）：
+    线上由 cache_sync 后台线程预热并在管理端写操作后自动重建；单测期实时查库。"""
+    hit = _KB_POSTURE_CACHE.get("posture")
+    if use_cached(hit):
+        return hit
 
     # 1. 各国有效法规数（取每部法规最新非草案、未驳回修订版，统计相关性在范围内且现行有效的法规）
     doc_rows = (
         await session.execute(
             text(
                 """
-                WITH latest_dv AS (
+                WITH held_docs AS MATERIALIZED (
+                    SELECT DISTINCT target_id AS doc_id
+                    FROM knowledge_change_proposals
+                    WHERE target_type = 'documents'
+                      AND status IN ('pending_review', 'approved')
+                      AND coalesce((payload->>'safety_hold')::boolean, false) = true
+                      AND target_id IS NOT NULL
+                ),
+                latest_dv AS MATERIALIZED (
                     SELECT DISTINCT ON (document_id)
                            id, document_id, legal_status
                     FROM document_versions
@@ -51,15 +61,10 @@ async def cockpit_overview(
                 SELECT d.country_code, count(DISTINCT d.id) AS doc_cnt
                 FROM documents d
                 JOIN latest_dv dv ON dv.document_id = d.id
+                LEFT JOIN held_docs hd ON hd.doc_id = d.id
                 WHERE d.relevance IN ('relevant', 'related')
                   AND coalesce(dv.legal_status, 'in_force') NOT IN ('repealed', 'draft')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM knowledge_change_proposals p
-                      WHERE p.target_type = 'documents'
-                        AND p.target_id = d.id
-                        AND p.status IN ('pending_review', 'approved')
-                        AND coalesce((p.payload->>'safety_hold')::boolean, false) = true
-                  )
+                  AND hd.doc_id IS NULL
                 GROUP BY d.country_code
                 """
             )
@@ -71,12 +76,33 @@ async def cockpit_overview(
         (await session.execute(text("SELECT count(*) FROM documents"))).scalar_one() or 0
     )
 
-    # 2. 各国条文数与译文覆盖数（中文原文条文天然可读；外文条文统计已生成/已核验中文译文）
+    # 2. 各国条文数与译文覆盖数（先物化安全拦截表，消除逐条嵌套子查询）
     clause_rows = (
         await session.execute(
             text(
                 """
-                WITH latest_dv AS (
+                WITH held_docs AS MATERIALIZED (
+                    SELECT DISTINCT target_id AS doc_id
+                    FROM knowledge_change_proposals
+                    WHERE target_type = 'documents'
+                      AND status IN ('pending_review', 'approved')
+                      AND coalesce((payload->>'safety_hold')::boolean, false) = true
+                      AND target_id IS NOT NULL
+                ),
+                held_page_rules AS MATERIALIZED (
+                    SELECT target_id,
+                           payload->'source_parse_revision'->>'version_id' AS ver_id_txt,
+                           CASE
+                             WHEN (payload->'source_parse_revision'->>'page_number') ~ '^-?[0-9]+$'
+                             THEN (payload->'source_parse_revision'->>'page_number')::int
+                             ELSE NULL
+                           END AS page_no
+                    FROM knowledge_change_proposals
+                    WHERE target_type = 'clauses'
+                      AND status IN ('pending_review', 'approved')
+                      AND payload->'source_parse_revision'->>'scope' = 'whole_source_page'
+                ),
+                latest_dv AS MATERIALIZED (
                     SELECT DISTINCT ON (document_id)
                            id, document_id, legal_status
                     FROM document_versions
@@ -85,7 +111,7 @@ async def cockpit_overview(
                       AND coalesce(legal_status, 'in_force') <> 'draft'
                     ORDER BY document_id, version_no DESC, parse_revision DESC
                 ),
-                valid_tr AS (
+                valid_tr AS MATERIALIZED (
                     SELECT clause_id,
                            max(review_status) AS review_status
                     FROM clause_translations
@@ -107,32 +133,20 @@ async def cockpit_overview(
                 FROM clauses c
                 JOIN latest_dv dv ON dv.id = c.version_id
                 JOIN documents d ON d.id = dv.document_id
+                LEFT JOIN held_docs hd ON hd.doc_id = d.id
                 LEFT JOIN valid_tr ct ON ct.clause_id = c.id
                 WHERE d.relevance IN ('relevant', 'related')
                   AND coalesce(dv.legal_status, 'in_force') NOT IN ('repealed', 'draft')
+                  AND hd.doc_id IS NULL
                   AND NOT EXISTS (
-                      SELECT 1 FROM knowledge_change_proposals p
-                      WHERE p.target_type = 'documents'
-                        AND p.target_id = d.id
-                        AND p.status IN ('pending_review', 'approved')
-                        AND coalesce((p.payload->>'safety_hold')::boolean, false) = true
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM knowledge_change_proposals p
-                      WHERE p.target_type = 'clauses'
-                        AND p.status IN ('pending_review', 'approved')
-                        AND p.payload->'source_parse_revision'->>'scope' = 'whole_source_page'
-                        AND (
-                          p.target_id = c.id
-                          OR (
-                            p.payload->'source_parse_revision'->>'version_id'
-                              = c.version_id::text
-                            AND (p.payload->'source_parse_revision'->>'page_number')::int
-                              >= c.page_start
-                            AND (p.payload->'source_parse_revision'->>'page_number')::int
-                              <= c.page_end
-                          )
-                        )
+                      SELECT 1 FROM held_page_rules hp
+                      WHERE hp.target_id = c.id
+                         OR (
+                           hp.ver_id_txt = c.version_id::text
+                           AND hp.page_no IS NOT NULL
+                           AND hp.page_no >= c.page_start
+                           AND hp.page_no <= c.page_end
+                         )
                   )
                 GROUP BY d.country_code, d.language
                 """
@@ -152,7 +166,7 @@ async def cockpit_overview(
             translated_by_cc[cc] = translated_by_cc.get(cc, 0) + int(trans_c or 0)
             approved_tr_by_cc[cc] = approved_tr_by_cc.get(cc, 0) + int(appr_c or 0)
 
-    # 3. 知识图谱六要素节点与语义关系（与 _build_graph_payload 完全同源过滤）
+    # 3. 知识图谱六要素节点与语义关系（物化可用法规、条文与有效节点集合，消除双端重复嵌套扫描）
     from sqlalchemy import func, or_
 
     from app.ingestion.layout_safety import clause_layout_available
@@ -161,39 +175,54 @@ async def cockpit_overview(
     from app.knowledge.graph_evidence import active_edge_filters
     from app.knowledge.models import KgEdge, KgNode
 
-    active_node_conds = (
-        KgNode.review_status.notin_(("superseded", "stale", "rejected")),
-        func.coalesce(KgNode.verify_state, "") != "retired",
-        or_(
-            KgNode.document_id.is_(None),
-            KgNode.document_id.in_(
-                select(Document.id).where(
-                    document_available(),
-                    Document.relevance.in_(("relevant", "related")),
-                )
-            ),
-        ),
-        or_(
-            KgNode.evidence_clause_id.is_(None),
-            KgNode.evidence_clause_id.in_(
-                select(Clause.id)
-                .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
-                .join(Document, Document.id == DocumentVersion.document_id)
-                .where(
-                    document_available(),
-                    clause_layout_available(),
-                    Document.relevance.in_(("relevant", "related")),
-                    DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
-                    DocumentVersion.review_status != "rejected",
-                )
-            ),
-        ),
+    citable_docs_cte = (
+        select(Document.id)
+        .where(
+            document_available(),
+            Document.relevance.in_(("relevant", "related")),
+        )
+        .cte("citable_docs")
+        .prefix_with("MATERIALIZED")
     )
+    citable_clauses_cte = (
+        select(Clause.id)
+        .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .where(
+            document_available(),
+            clause_layout_available(),
+            Document.relevance.in_(("relevant", "related")),
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+            DocumentVersion.review_status != "rejected",
+        )
+        .cte("citable_clauses")
+        .prefix_with("MATERIALIZED")
+    )
+    valid_nodes_cte = (
+        select(KgNode.id, KgNode.country_code, KgNode.node_type)
+        .where(
+            KgNode.review_status.notin_(("superseded", "stale", "rejected")),
+            func.coalesce(KgNode.verify_state, "") != "retired",
+            or_(
+                KgNode.document_id.is_(None),
+                KgNode.document_id.in_(select(citable_docs_cte.c.id)),
+            ),
+            or_(
+                KgNode.evidence_clause_id.is_(None),
+                KgNode.evidence_clause_id.in_(select(citable_clauses_cte.c.id)),
+            ),
+        )
+        .cte("valid_nodes")
+        .prefix_with("MATERIALIZED")
+    )
+
     node_rows = (
         await session.execute(
-            select(KgNode.country_code, KgNode.node_type, func.count(KgNode.id))
-            .where(*active_node_conds)
-            .group_by(KgNode.country_code, KgNode.node_type)
+            select(
+                valid_nodes_cte.c.country_code,
+                valid_nodes_cte.c.node_type,
+                func.count(valid_nodes_cte.c.id),
+            ).group_by(valid_nodes_cte.c.country_code, valid_nodes_cte.c.node_type)
         )
     ).all()
     kg_nodes_by_cc: dict[str, int] = {}
@@ -205,15 +234,14 @@ async def cockpit_overview(
         if ntype:
             kg_by_type[str(ntype)] = kg_by_type.get(str(ntype), 0) + c
 
-    valid_node_ids = select(KgNode.id).where(*active_node_conds)
     edge_rows = (
         await session.execute(
             select(KgEdge.country_code, func.count(KgEdge.id))
             .where(
                 *active_edge_filters(),
                 func.coalesce(KgEdge.verify_state, "") != "retired",
-                KgEdge.source_node_id.in_(valid_node_ids),
-                KgEdge.target_node_id.in_(valid_node_ids),
+                KgEdge.source_node_id.in_(select(valid_nodes_cte.c.id)),
+                KgEdge.target_node_id.in_(select(valid_nodes_cte.c.id)),
             )
             .group_by(KgEdge.country_code)
         )
@@ -235,7 +263,7 @@ async def cockpit_overview(
     ).all()
     standards_by_cc = {r[0]: int(r[1]) for r in std_rows if r[0]}
 
-    # 5. 国家合规简报（最新可用版本 + 待更新数与 Home.vue 同源）
+    # 5. 国家合规简报（最新可用版本 + 待更新数同源核验）
     wp_rows = (
         await session.execute(
             text(
@@ -260,16 +288,16 @@ async def cockpit_overview(
     }
     whitepapers_outdated = 0
     if wp_by_cc:
-        from app.knowledge.whitepaper_router import _hash_cache
+        from app.knowledge.whitepaper_router import known_hash
 
         for wp_cc, wp_meta in wp_by_cc.items():
             if wp_cc in ("CN", "ZZ", "INTL") or not wp_meta["ready"]:
                 continue
-            cur_hash = _hash_cache.get(wp_cc)
+            cur_hash = await known_hash(session, wp_cc)
             if cur_hash is not None and cur_hash != wp_meta["source_hash"]:
                 whitepapers_outdated += 1
 
-    # 6. 海外属地准入事项（与用户端已就绪展示 shown 有效事项口径完全一致）与官方申报表
+    # 6. 海外属地准入事项与法定申报表
     from app.admission.models import AdmissionEntry, AdmissionStep
     from app.admission.router import SHOWN, _basis, amount_conflicts, legal_basis
 
@@ -306,6 +334,63 @@ async def cockpit_overview(
             if await amount_conflicts(session, e, e_steps):
                 continue
             adm_entries_by_cc[e.country_code] = adm_entries_by_cc.get(e.country_code, 0) + 1
+
+    quality_unpassed = 0
+    try:
+        from app.ingestion.quality_card import cards_in
+
+        q_cards = await cards_in(session)
+        quality_unpassed = sum(
+            1 for r in q_cards if not (r["card"].passed and not r.get("todo"))
+        )
+    except Exception:  # noqa: BLE001
+        quality_unpassed = 0
+
+    built = {
+        "docs_by_cc": docs_by_cc,
+        "laws_total": laws_total,
+        "laws_archived_total": laws_archived_total,
+        "clauses_by_cc": clauses_by_cc,
+        "foreign_clauses_by_cc": foreign_clauses_by_cc,
+        "translated_by_cc": translated_by_cc,
+        "approved_tr_by_cc": approved_tr_by_cc,
+        "kg_nodes_by_cc": kg_nodes_by_cc,
+        "kg_by_type": kg_by_type,
+        "kg_edges_by_cc": kg_edges_by_cc,
+        "standards_by_cc": standards_by_cc,
+        "wp_by_cc": wp_by_cc,
+        "whitepapers_outdated": whitepapers_outdated,
+        "adm_entries_by_cc": adm_entries_by_cc,
+        "quality_unpassed": quality_unpassed,
+    }
+    _KB_POSTURE_CACHE["posture"] = built
+    return built
+
+
+@router.get("/overview", summary="全球法规底座与平台服务态势概览")
+async def cockpit_overview(
+    _: Principal = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    seven_days_ago = now - timedelta(days=7)
+
+    kb = await _kb_posture(session)
+    docs_by_cc = kb["docs_by_cc"]
+    laws_total = kb["laws_total"]
+    laws_archived_total = kb["laws_archived_total"]
+    clauses_by_cc = kb["clauses_by_cc"]
+    foreign_clauses_by_cc = kb["foreign_clauses_by_cc"]
+    translated_by_cc = kb["translated_by_cc"]
+    approved_tr_by_cc = kb["approved_tr_by_cc"]
+    kg_nodes_by_cc = kb["kg_nodes_by_cc"]
+    kg_by_type = kb["kg_by_type"]
+    kg_edges_by_cc = kb["kg_edges_by_cc"]
+    standards_by_cc = kb["standards_by_cc"]
+    wp_by_cc = kb["wp_by_cc"]
+    whitepapers_outdated = kb["whitepapers_outdated"]
+    adm_entries_by_cc = kb["adm_entries_by_cc"]
+    quality_unpassed = kb["quality_unpassed"]
 
     from app.analysis.documents_router import _CN_OFFICIAL
 
@@ -542,17 +627,6 @@ async def cockpit_overview(
         ).scalar_one()
         or 0
     )
-    quality_unpassed = 0
-    try:
-        from app.ingestion.quality_card import cards_in
-
-        q_cards = await cards_in(session)
-        quality_unpassed = sum(
-            1 for r in q_cards if not (r["card"].passed and not r.get("todo"))
-        )
-    except Exception:  # noqa: BLE001
-        quality_unpassed = 0
-
     audit_7d = int(
         (
             await session.execute(

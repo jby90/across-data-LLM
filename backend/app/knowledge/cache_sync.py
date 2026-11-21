@@ -53,10 +53,12 @@ def clear_user_caches() -> None:
         evaluation,
         question_basis,
     )
+    from app.iam import cockpit_router
     from app.ingestion.quality_card import clear_cards_cache
     from app.knowledge import library_view, router, whitepaper, whitepaper_graph, whitepaper_router
 
     clear_cards_cache()
+    cockpit_router._KB_POSTURE_CACHE.clear()
     benchmarks._BENCH_CACHE.clear()
     evaluation._LATEST_EVAL_CACHE.clear()
     clause_gate.clear_title_names()
@@ -102,7 +104,9 @@ async def mark(session) -> str:
                 " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(verify_state, '') || name_zh, ',' order by id), '')) from kg_nodes),"
                 " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(verify_state, ''), ',' order by id), '')) from kg_edges),"
                 " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(merged_into::text, ''), ',' order by id), '')) from admission_entries),"
-                " (select count(*)::text || md5(coalesce(string_agg(status || coalesce(target_type, ''), ',' order by id), '')) from knowledge_change_proposals)"
+                " (select count(*)::text || md5(coalesce(string_agg(status || coalesce(target_type, ''), ',' order by id), '')) from knowledge_change_proposals),"
+                " (select count(*)::text || md5(coalesce(string_agg(status, ',' order by id), '')) from standard_entries),"
+                " (select count(*)::text || coalesce(max(version_no)::text, '') from country_whitepapers)"
             )
         )
     ).one()
@@ -134,6 +138,7 @@ def _rebuild_in_thread() -> str:
                     async with factory() as session:
                         from app.analysis.benchmarks import run_retrieval_benchmarks
                         from app.analysis.evaluation import latest_evaluation
+                        from app.iam import cockpit_router
                         from app.ingestion.ref_check import scan
                         from app.knowledge import router as k_router
 
@@ -143,6 +148,7 @@ def _rebuild_in_thread() -> str:
                         for _cc in ("SG", "EG", "TN", "MA", "LB", "CN"):
                             _gp = await k_router._build_graph_payload(session, _cc, only_approved=False)
                             k_router._GRAPH_JSON_CACHE[(_cc, False)] = _gp.model_dump_json()
+                        await cockpit_router._kb_posture(session)
             finally:
                 rebuilding.reset(token)
             return current
@@ -203,10 +209,12 @@ def changes_admin_data(method: str, path: str, status: int) -> bool:
 def after_admin_change() -> None:
     from app.admission import router as adm_router
     from app.analysis import doc_applicability
+    from app.iam import cockpit_router
     from app.ingestion.quality_card import clear_cards_cache
     from app.knowledge import router, whitepaper_graph
 
     clear_cards_cache()
+    cockpit_router._KB_POSTURE_CACHE.clear()
     doc_applicability._SOURCE_GROUNDS_CACHE.clear()
     whitepaper_graph._MENTIONS.clear()
     whitepaper_graph._CLAUSES.clear()

@@ -392,6 +392,10 @@ async def test_cockpit_and_user_posture_overview_role_separation(client, seed, s
     assert len(ov_viewer_a["map_routes"]) == len(ov_member_a["map_routes"])
     assert isinstance(ov_member_a["legal_route_distribution"], list)
     assert isinstance(ov_member_a["deadlines"], list)
+    assert any(d["id"] == create_res.json()["id"] for d in ov_member_a["recent_docs"])
+    assert create_res.json()["id"] in ov_member_a["recent_progress"]
+    assert isinstance(ov_member_a["recent_admissions"], list)
+    assert all(d["id"] != create_res.json()["id"] for d in ov_member_b["recent_docs"])
     assert all(mr["recipient_code"] != "MA" for mr in ov_member_b["map_routes"])
 
     r_viewer_write = await client.post(
