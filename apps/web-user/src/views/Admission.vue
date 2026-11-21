@@ -693,14 +693,14 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
       </section>
 
       <section v-if="project.forms.length" id="sec-forms" class="block" data-testid="admission-forms">
-        <h3>2. 官方表格<small>{{ editable && downloadable ? '平台代填官方原表，下载后签字盖章' : '平台代填的官方原表' }}</small></h3>
+        <h3>2. 法定申报表<small>{{ editable && downloadable ? '平台自动带入填报项，下载后签字盖章' : '已关联填报的法定申报表' }}</small></h3>
         <div v-for="f in project.forms" :key="f.code" class="row">
           <span class="main"><span class="name-line"><strong>{{ f.name }}</strong></span><small>{{ f.authority_zh }} · {{ /^\d/.test(f.version) ? f.version + ' 版' : f.version }}<template v-if="f.filled"> · {{ f.missing.length ? `还缺 ${f.missing.length} 项必填` : '必填已填完' }}</template></small><small v-if="f.applies_when" class="applies">适用情形：{{ f.applies_when }}</small><small v-if="f.version_note" class="applies" data-testid="form-version-note">{{ f.version_note }}</small><small v-if="f.carried" class="carried" data-testid="admission-form-carried">{{ f.carried }}</small></span>
           <span class="row-state"><span v-if="!sent" class="mat-state" :class="matState(f.filled, `form:${f.code}`, f.missing.length > 0).cls">{{ matState(f.filled, `form:${f.code}`, f.missing.length > 0).text }}</span></span>
           <span class="row-actions"><el-button v-if="canChange" size="small" :type="f.filled && !f.missing.length ? 'default' : 'primary'" :loading="formBusy === f.code" :data-testid="`admission-form-${f.code}`" @click="fillForm(f)">{{ f.filled ? '继续填写' : '填写' }}</el-button>
             <el-button v-else-if="!editable && f.instance_id" size="small" :data-testid="`admission-form-${f.code}`" @click="fillForm(f)">查看表格</el-button>
             <el-tooltip v-if="f.filled" :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
-              <span><el-button size="small" :disabled="!downloadable" @click="downloadForm(f)">下载官方原表</el-button></span>
+              <span><el-button size="small" :disabled="!downloadable" @click="downloadForm(f)">下载申报表</el-button></span>
             </el-tooltip></span>
         </div>
       </section>
@@ -838,7 +838,7 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
       <el-radio-group v-model="tab" class="tabs cy-page-tabs">
         <el-radio-button value="prepare">准备材料</el-radio-button>
         <el-radio-button value="library">准入事项库</el-radio-button>
-        <el-radio-button value="forms">官方申报原表<template v-if="formCatalog.length">（{{ formCatalog.length }}）</template></el-radio-button>
+        <el-radio-button value="forms">法定申报表<template v-if="formCatalog.length">（{{ formCatalog.length }}）</template></el-radio-button>
       </el-radio-group>
 
       <section v-if="tab === 'prepare'" v-loading="planBusy || projectsLoading" class="prepare-section">
@@ -934,7 +934,7 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
       </section>
 
       <section v-else v-loading="formsBusy" data-testid="admission-forms-catalog">
-        <div class="country-bar" role="group" aria-label="按国家筛选官方原表">
+        <div class="country-bar" role="group" aria-label="按国家筛选法定申报表">
           <el-check-tag :checked="!formCountry" @change="formCountry = ''">全部国家（{{ formCatalog.length }}）</el-check-tag>
           <el-check-tag
             v-for="c in countryList.filter((x) => formCatalog.some((f) => f.country === x.code))"
@@ -944,7 +944,7 @@ onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLi
           >{{ c.name }}</el-check-tag>
         </div>
         <div v-for="[cc, fList] in groupedCatalogForms" :key="cc" class="category">
-          <h2>{{ COUNTRIES[cc] ?? cc }}官方申报原表<small>{{ fList.length }} 套</small></h2>
+          <h2>{{ COUNTRIES[cc] ?? cc }}法定申报表<small>{{ fList.length }} 套</small></h2>
           <button
             v-for="f in fList"
             :key="f.code"

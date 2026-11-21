@@ -424,6 +424,7 @@ async def cockpit_overview(
         )
     ).all()
     routes_map: dict[str, int] = {}
+    routes_codes: dict[str, tuple[str, str]] = {}
     projects_by_cc: dict[str, int] = {}
     doc_projects_total = 0
 
@@ -447,14 +448,15 @@ async def cockpit_overview(
         c = int(cnt or 0)
         doc_projects_total += c
         t_cc = str(task_cc or "").upper()
+        src_cc_all = country_of(src_raw) or ""
+        dst_cc_all = country_of(dst_raw) or ""
         bucket_cc = t_cc if t_cc in matrix_codes else ""
         if not bucket_cc:
-            src_cc = country_of(src_raw) or ""
-            dst_cc = country_of(dst_raw) or ""
+            fallback_cc = src_cc_all or dst_cc_all or t_cc
             bucket_cc = (
-                src_cc
-                if src_cc in matrix_codes
-                else (dst_cc if dst_cc in matrix_codes else (src_cc or dst_cc or t_cc))
+                src_cc_all
+                if src_cc_all in matrix_codes
+                else (dst_cc_all if dst_cc_all in matrix_codes else fallback_cc)
             )
         if bucket_cc:
             projects_by_cc[bucket_cc] = projects_by_cc.get(bucket_cc, 0) + c
@@ -463,8 +465,15 @@ async def cockpit_overview(
         if s_zh or d_zh:
             label = f"{s_zh} 至 {d_zh}" if s_zh and d_zh and s_zh != d_zh else (s_zh or d_zh)
             routes_map[label] = routes_map.get(label, 0) + c
+            if label not in routes_codes and (src_cc_all or dst_cc_all):
+                routes_codes[label] = (src_cc_all, dst_cc_all)
     routes_summary = [
-        {"route_label": k, "project_count": v}
+        {
+            "route_label": k,
+            "project_count": v,
+            "source_code": routes_codes.get(k, ("", ""))[0],
+            "recipient_code": routes_codes.get(k, ("", ""))[1],
+        }
         for k, v in sorted(routes_map.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
 

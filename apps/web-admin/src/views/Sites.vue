@@ -433,9 +433,9 @@ onMounted(load)
           <el-table-column label="开始时间" width="148" class-name="cy-col-nowrap"
             ><template #default="{ row }">{{ fmt(row.started_at) }}</template></el-table-column
           >
-          <el-table-column label="方式" width="68" class-name="cy-col-nowrap"
+          <el-table-column label="方式" width="92" class-name="cy-col-nowrap"
             ><template #default="{ row }">{{
-              row.trigger === 'manual' ? '手动' : '定时'
+              row.trigger === 'manual' ? '人工触发' : '定时巡检'
             }}</template></el-table-column
           >
           <el-table-column label="结果" width="88" class-name="cy-col-nowrap"

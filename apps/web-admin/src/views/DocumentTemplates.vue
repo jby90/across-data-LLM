@@ -8,10 +8,17 @@ interface Fact { key: string; label: string; question: string; why: string; from
 interface Block { type: string; text?: string; items?: string[]; keys?: string[]; key?: string; name?: string; dimensions?: string[]; limit?: number }
 interface NarrativePart { key: string; heading: string; brief: string; facts: string[]; side?: string; dimensions?: string[]; flow?: boolean; risks?: boolean; field_table?: boolean }
 interface Section { heading?: string; narrative?: boolean; blocks?: Block[]; when?: Record<string, string>; unless?: Record<string, string> }
-interface Definition { title: string; facts: Fact[]; sections: Section[]; narrative?: NarrativePart[] }
+interface VerdictRule { tier: string; condition: string; label: string; tone: string; template: string }
+interface VerdictDocGroup { code: string; name: string; version_no: number; customized: boolean; rules: VerdictRule[] }
+interface Definition { title: string; facts: Fact[]; sections: Section[]; narrative?: NarrativePart[]; verdict_rules?: VerdictRule[] }
 interface Row { code: string; version_no: number; name: string; status: string; customized?: boolean; updated_at?: string | null }
 
+const pageTab = ref<'outline' | 'verdict'>('outline')
 const rows = ref<Row[]>([])
+const verdictTokens = ref<string[]>([])
+const verdictDocs = ref<VerdictDocGroup[]>([])
+const verdictLoading = ref(false)
+const verdictSaving = ref('')
 const editing = ref<{ code: string; name: string; version_no: number; def: Definition } | null>(null)
 const busy = ref(false)
 const editorMode = ref<'edit' | 'preview'>('edit')
@@ -30,6 +37,9 @@ const BLOCK_LABEL: Record<string, string> = {
 
 const SLOT_LABEL: Record<string, string> = {
   route: '出境路径结论',
+  verdict_decision: '综合评估与流转结论',
+  remediation_verdict: '整改核验结论',
+  admission_verdict: '属地准入办理结论',
   issues: '合规问题清单',
   fix_route: '分阶段整改路线图',
   advice: '整改建议清单',
@@ -590,11 +600,52 @@ async function save() {
 interface Official { code: string; country_zh: string; name_zh: string; authority_zh: string; version: string; file: string; source_url: string; used_for: string }
 const officials = ref<Official[]>([])
 const officialGroups = computed(() => [
-  { title: '数据出境合规评估官方原表', hint: '数据发出国配有官方原表时，对应合规文件直接按官方原件版式填报导出', rows: officials.value.filter((o) => !o.used_for.startsWith('海外属地准入')) },
-  { title: '海外属地准入官方申报原表', hint: '企业在海外属地准入办理事项时，平台按官方原表版式带入填报信息', rows: officials.value.filter((o) => o.used_for.startsWith('海外属地准入')) },
+  { title: '数据出境合规评估法定申报表', hint: '数据发出国配有法定申报表时，对应合规文件直接按主管机关正式版式填报导出', rows: officials.value.filter((o) => !o.used_for.startsWith('海外属地准入')) },
+  { title: '海外属地准入法定申报表', hint: '企业在海外属地准入办理事项时，平台按主管机关表格版式带入填报信息', rows: officials.value.filter((o) => o.used_for.startsWith('海外属地准入')) },
 ].filter((g) => g.rows.length))
 async function loadOfficial() {
   try { officials.value = await api.get<Official[]>('/admin/document-templates/official') } catch (err) { ElMessage.error((err as Error).message) }
+}
+async function loadVerdictRules() {
+  verdictLoading.value = true
+  try {
+    const res = await api.get<{ tokens: string[]; items: VerdictDocGroup[] }>('/api/admin/document-templates/verdict-rules')
+    verdictTokens.value = res.tokens || []
+    verdictDocs.value = (res.items || []).map((it) => ({
+      ...it,
+      rules: (it.rules || []).map((r) => ({ ...r })),
+    }))
+  } catch (err) {
+    ElMessage.error((err as Error).message || '加载判定结论范本失败')
+  } finally {
+    verdictLoading.value = false
+  }
+}
+function insertVerdictToken(rule: VerdictRule, tok: string) {
+  rule.template = `${rule.template || ''}${tok}`
+}
+async function saveVerdictDoc(doc: VerdictDocGroup) {
+  verdictSaving.value = doc.code
+  try {
+    const res = await api.put<{ code: string; version_no: number; rules: VerdictRule[] }>(
+      `/api/admin/document-templates/verdict-rules/${encodeURIComponent(doc.code)}`,
+      { rules: doc.rules },
+    )
+    doc.version_no = res.version_no
+    doc.customized = true
+    doc.rules = (res.rules || doc.rules).map((r) => ({ ...r }))
+    ElMessage.success(`已保存《${doc.name}》标准判定结论范本（第 ${res.version_no} 版）`)
+    await load()
+  } catch (err) {
+    ElMessage.error((err as Error).message || '保存判定结论范本失败')
+  } finally {
+    verdictSaving.value = ''
+  }
+}
+function verdictToneLabel(tone: string): string {
+  if (tone === 'done') return '放行 / 齐备'
+  if (tone === 'warn') return '待补 / 前置'
+  return '暂缓 / 阻断'
 }
 async function downloadOriginal(o: Official) {
   const res = await fetch(`/api/admin/document-templates/official/${o.code}/original`, { headers: { Authorization: `Bearer ${api.token()}` } })
@@ -604,19 +655,40 @@ async function downloadOriginal(o: Official) {
   window.setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 
-onMounted(() => { load(); loadOfficial() })
+onMounted(() => { load(); loadOfficial(); loadVerdictRules() })
 </script>
 
 <template>
   <div class="management-page tpl-page">
-    <header v-if="!editing" class="page-heading">
+    <header v-if="!editing" class="page-heading tpl-heading-row">
       <div>
         <h1>合规文件模板</h1>
-        <p>管理 8 类合规文件的标准结构大纲与各国监管官方原件目录；保存修订后仅作用于新生成的文件，历史已出具报告保持不变。</p>
+        <p>管理 8 类合规文件的标准结构大纲、6 类评估报告的确定性判定结论范本及各国法定申报表目录；保存修订后作用于后续评估与文件导出。</p>
+      </div>
+      <div class="mode-switch" role="tablist" aria-label="模板管理分类">
+        <button
+          type="button"
+          class="mode-btn"
+          :class="{ active: pageTab === 'outline' }"
+          data-testid="tpl-tab-outline"
+          @click="pageTab = 'outline'"
+        >
+          文件结构与申报表目录
+        </button>
+        <button
+          type="button"
+          class="mode-btn"
+          :class="{ active: pageTab === 'verdict' }"
+          data-testid="tpl-tab-verdict"
+          @click="pageTab = 'verdict'"
+        >
+          标准判定结论范本
+        </button>
       </div>
     </header>
 
-    <el-table v-if="!editing" :data="latest" size="small" border>
+    <template v-if="!editing && pageTab === 'outline'">
+    <el-table :data="latest" size="small" border>
       <el-table-column prop="name" label="合规文件名称" min-width="220" />
       <el-table-column label="当前版本" width="120">
         <template #default="{ row }">
@@ -645,12 +717,12 @@ onMounted(() => { load(); loadOfficial() })
       </el-table-column>
     </el-table>
 
-    <section v-if="!editing" class="official" data-testid="official-templates">
+    <section class="official" data-testid="official-templates">
       <template v-for="g in officialGroups" :key="g.title">
         <h3>{{ g.title }}<small class="muted">（{{ g.rows.length }} 份）{{ g.hint }}</small></h3>
         <el-table :data="g.rows" size="small" border>
           <el-table-column prop="country_zh" label="国家" width="84" />
-          <el-table-column label="官方原表" min-width="220">
+          <el-table-column label="法定申报表" min-width="220">
             <template #default="{ row }">
               <strong>{{ row.name_zh }}</strong>
               <div class="muted">{{ row.authority_zh }}</div>
@@ -667,8 +739,76 @@ onMounted(() => { load(); loadOfficial() })
         </el-table>
       </template>
     </section>
+    </template>
 
-    <div v-else class="editor-studio" data-testid="template-editor-studio">
+    <section v-else-if="!editing && pageTab === 'verdict'" v-loading="verdictLoading" class="verdict-studio" data-testid="verdict-rules-panel">
+      <div class="verdict-intro">
+        <div>
+          <strong>确定性判定结论同步说明：</strong>
+          <span>企业项目风险定级、必填项完整度或整改状态变化时，平台依据下方分档规则实时重算 6 类评估与跟踪报告的判定结论，并同步校准导出正文与网信办申报附件结论段，确保同一项目多份报告结论一致、不出现前后矛盾（申报表与标准合同不设结论档位）。</span>
+        </div>
+        <div v-if="verdictTokens.length" class="verdict-token-legend">
+          <span class="muted">可用动态要素（点击任一规则上方的要素按钮可插入正文）：</span>
+          <span v-for="tk in verdictTokens" :key="tk" class="sum-chip">{{ tk }}</span>
+        </div>
+      </div>
+
+      <article v-for="doc in verdictDocs" :key="doc.code" class="tpl-card verdict-doc-card" :data-testid="`verdict-doc-${doc.code}`">
+        <div class="card-head">
+          <div class="sec-title-left">
+            <strong>{{ doc.name }}</strong>
+            <span class="ver-pill">第 {{ doc.version_no }} 版</span>
+            <span v-if="doc.customized" class="cy-status cy-status--active">已自定义范本</span>
+            <span v-else class="muted">系统标准范本</span>
+          </div>
+          <div class="sec-actions">
+            <el-button size="small" @click="openVersionHistory(doc.code, doc.name, doc.version_no)">版本历史</el-button>
+            <el-button
+              size="small"
+              type="primary"
+              :loading="verdictSaving === doc.code"
+              :data-testid="`save-verdict-${doc.code}`"
+              @click="saveVerdictDoc(doc)"
+            >
+              保存本文件结论范本
+            </el-button>
+          </div>
+        </div>
+
+        <div v-for="rule in doc.rules" :key="rule.tier" class="verdict-rule-row" :data-testid="`verdict-rule-${doc.code}-${rule.tier}`">
+          <div class="verdict-rule-top">
+            <span class="verdict-tone-badge" :class="`tone-${rule.tone}`">{{ verdictToneLabel(rule.tone) }}</span>
+            <span class="verdict-cond">触发情形：{{ rule.condition }}</span>
+            <div class="verdict-label-box">
+              <span class="muted">结论简称</span>
+              <el-input v-model="rule.label" size="small" maxlength="28" style="width: 176px" :data-testid="`verdict-label-${doc.code}-${rule.tier}`" />
+            </div>
+          </div>
+          <div v-if="verdictTokens.length" class="fact-bar compact">
+            <span class="capsule-hint">插入要素：</span>
+            <button
+              v-for="tk in verdictTokens"
+              :key="`${doc.code}-${rule.tier}-${tk}`"
+              type="button"
+              class="fact-capsule"
+              @click="insertVerdictToken(rule, tk)"
+            >
+              + {{ tk }}
+            </button>
+          </div>
+          <el-input
+            v-model="rule.template"
+            type="textarea"
+            :rows="2"
+            maxlength="600"
+            placeholder="请输入正式报告结论段范本"
+            :data-testid="`verdict-tpl-${doc.code}-${rule.tier}`"
+          />
+        </div>
+      </article>
+    </section>
+
+    <div v-else-if="editing" class="editor-studio" data-testid="template-editor-studio">
       <div class="studio-topbar">
         <button type="button" class="back-btn" @click="editing = null">← 返回模板目录</button>
         <span class="sep">/</span>
@@ -1023,6 +1163,19 @@ onMounted(() => { load(); loadOfficial() })
 .official { margin-top: 28px; }
 .official h3 { font-size: 16px; margin: 18px 0 10px; }
 .src { margin-left: 10px; font-size: 13px; color: #1d4ed8; }
+.tpl-heading-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 20px; flex-wrap: wrap; }
+.verdict-studio { display: flex; flex-direction: column; gap: 14px; }
+.verdict-intro { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 16px; font-size: 13px; line-height: 1.7; color: #334155; display: flex; flex-direction: column; gap: 8px; }
+.verdict-token-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.verdict-doc-card { gap: 12px; }
+.verdict-rule-row { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.verdict-rule-top { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.verdict-cond { font-size: 13px; font-weight: 600; color: #1e293b; flex: 1 1 280px; }
+.verdict-label-box { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.verdict-tone-badge { font-size: 13px; font-weight: 600; border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+.verdict-tone-badge.tone-done { background: #dcfce7; color: #166534; }
+.verdict-tone-badge.tone-warn { background: #fef3c7; color: #92400e; }
+.verdict-tone-badge.tone-danger { background: #fee2e2; color: #991b1b; }
 
 .editor-studio { display: flex; flex-direction: column; gap: 10px; }
 .studio-topbar { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04); }

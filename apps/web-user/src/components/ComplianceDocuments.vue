@@ -256,7 +256,7 @@ async function download(kind: 'docx' | 'xlsx' | 'pdf' = 'docx') {
       <el-alert v-if="current.official_forms?.length" type="success" :closable="false" show-icon class="official" data-testid="doc-official">
         <template #title>数据从该国发出时，主管机构有官方表格：{{ current.official_forms.map((f) => f.name_zh).join('、') }}</template>
         <template #default>
-          <span>评估里已有的信息会自动带入，缺的逐项问，导出的是官方原表，可直接打印盖章。</span>
+          <span>评估里已有的信息会自动带入，缺的逐项问，导出的是主管机关法定申报表，可直接打印盖章。</span>
           <el-button v-for="f in current.official_forms" :key="f.code" size="small" type="success" style="margin-left: 10px" :loading="busy" data-testid="btn-open-official" @click="openOfficial(f.code)">{{ editable ? '填写官方表格' : '查看官方表格' }}</el-button>
         </template>
       </el-alert>

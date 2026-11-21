@@ -750,7 +750,29 @@ async def _prepare(
             paper = await _write_paper(session, task, code, template, values, citations, None)
 
     pre_probe = render(template.definition, values, citations, None, paper, draft, {}, "")
-    slots = await doc_sections.slots(session, task, code, values, missing_count=len(pre_probe.missing))
+    from app.analysis import verdict_rules
+
+    merged_probe_vals = {**doc_sections.answered(task), **{k: v for k, v in values.items() if v}}
+    route_info = (
+        await doc_rules.route(session, merged_probe_vals, task.country_code)
+        if code in verdict_rules.VERDICT_DOC_CODES
+        else {}
+    )
+    v_info = verdict_rules.compute_doc_verdict(
+        code,
+        merged_probe_vals,
+        route_info,
+        task_country_code=task.country_code,
+        missing_count=len(pre_probe.missing),
+        definition=template.definition,
+    )
+    if code == "risk_report" and values.get("risk_conclusion") and v_info:
+        values = {**values, "risk_conclusion": verdict_rules.reconcile_conclusion_text(values["risk_conclusion"], v_info)}
+    if paper and v_info:
+        paper = verdict_rules.reconcile_paper_blocks(paper, code, v_info)
+    slots = await doc_sections.slots(
+        session, task, code, values, missing_count=len(pre_probe.missing), definition=template.definition
+    )
 
     if paper:
         if code == "dpia":
@@ -1111,6 +1133,7 @@ async def _official_cn_base(
     session: AsyncSession, task: AnalysisTask, code: str, draft: bool
 ) -> tuple[bytes, str] | None:
     """Build the filled official Chinese CAC Word .docx prior to any online user edits."""
+    from app.analysis import doc_rules, doc_sections, verdict_rules
     from app.analysis import official_docx as od
     from app.analysis.document_basis import CN
     from app.analysis.document_narrative import usable
@@ -1130,7 +1153,7 @@ async def _official_cn_base(
         if not draft and found is None:
             raise HTTPException(409, "论述部分还没有生成，请先点击“生成论述”")
         if found is not None:
-            from app.analysis import clause_gate, doc_rules
+            from app.analysis import clause_gate
             from app.knowledge.whitepaper import one_name_per_body
 
             await clause_gate.load_title_names(session)
@@ -1154,13 +1177,30 @@ async def _official_cn_base(
             od.cn_standard_contract, values, DRAFT_BLANK if draft else ""
         )
         return result.data, "个人信息出境标准合同"
-    from app.analysis import doc_sections
 
     pre_probe = render(template.definition, in_values, cits, None, paper_blocks, draft, {}, "")
     if code == "dpia":  # DPIA = 标准合同备案指南附件 5 个人信息保护影响评估报告；同一项目为风险评估报告回答过的信息一并用上
         _, other, _ = await _inputs(session, task, "risk_report")
         merged_pia_vals = {**other, **values}
-        cn_slots = await doc_sections.slots(session, task, code, merged_pia_vals, missing_count=len(pre_probe.missing))
+        cn_route_info = await doc_rules.route(session, merged_pia_vals, task.country_code)
+        cn_v = verdict_rules.compute_doc_verdict(
+            code,
+            merged_pia_vals,
+            cn_route_info,
+            task_country_code=task.country_code,
+            missing_count=len(pre_probe.missing),
+            definition=template.definition,
+        )
+        if merged_pia_vals.get("risk_conclusion") and cn_v:
+            merged_pia_vals = {
+                **merged_pia_vals,
+                "risk_conclusion": verdict_rules.reconcile_conclusion_text(merged_pia_vals["risk_conclusion"], cn_v),
+            }
+        if paper_blocks and cn_v:
+            paper_blocks = verdict_rules.reconcile_paper_blocks(paper_blocks, code, cn_v)
+        cn_slots = await doc_sections.slots(
+            session, task, code, merged_pia_vals, missing_count=len(pre_probe.missing), definition=template.definition
+        )
         pia_extra = {
             "（2）个人信息处理者和境外接收方处理个人信息的目的": cn_slots.get("necessity_comparison", []),
             "4.遵守个人信息保护相关法律法规的情况": cn_slots.get("safeguard_effectiveness", []),
@@ -1170,7 +1210,25 @@ async def _official_cn_base(
             od.cn_pia, merged_pia_vals, DRAFT_BLANK if draft else "", paper_blocks, pia_extra
         )
         return result.data, "个人信息保护影响评估报告（出境版）"
-    cn_slots = await doc_sections.slots(session, task, code, values, missing_count=len(pre_probe.missing))
+    cn_route_info = await doc_rules.route(session, values, task.country_code)
+    cn_v = verdict_rules.compute_doc_verdict(
+        code,
+        values,
+        cn_route_info,
+        task_country_code=task.country_code,
+        missing_count=len(pre_probe.missing),
+        definition=template.definition,
+    )
+    if values.get("risk_conclusion") and cn_v:
+        values = {
+            **values,
+            "risk_conclusion": verdict_rules.reconcile_conclusion_text(values["risk_conclusion"], cn_v),
+        }
+    if paper_blocks and cn_v:
+        paper_blocks = verdict_rules.reconcile_paper_blocks(paper_blocks, code, cn_v)
+    cn_slots = await doc_sections.slots(
+        session, task, code, values, missing_count=len(pre_probe.missing), definition=template.definition
+    )
     sa_extra = {
         "4.拟出境数据在境内存储的系统平台": cn_slots.get("necessity_comparison", []),
         "3.数据安全保障措施有效性证明": cn_slots.get("safeguard_effectiveness", []),
@@ -1766,6 +1824,60 @@ async def admin_list_versions(code: str, _: PlatformAdminDep, session: SessionDe
     ]
 
 
+class VerdictRulesIn(BaseModel):
+    rules: list[dict[str, Any]] = Field(min_length=1, max_length=12)
+
+
+@admin_router.get("/verdict-rules")
+async def admin_get_verdict_rules(_: PlatformAdminDep, session: SessionDep) -> dict:
+    """List standard verdict templates across the 6 assessment and tracking documents."""
+    from app.analysis import verdict_rules
+
+    await ensure_default_templates(session)
+    items: list[dict[str, Any]] = []
+    for code in verdict_rules.VERDICT_DOC_CODES:
+        row = await latest_template(session, code)
+        defn = row.definition if row else {}
+        items.append(
+            {
+                "code": code,
+                "name": row.name_zh if row else verdict_rules.VERDICT_DOC_NAMES.get(code, code),
+                "version_no": row.version_no if row else 1,
+                "customized": bool(defn and isinstance(defn.get("verdict_rules"), list)),
+                "rules": verdict_rules.get_effective_rules(code, defn),
+            }
+        )
+    return {"tokens": list(verdict_rules.AVAILABLE_TOKENS), "items": items}
+
+
+@admin_router.put("/verdict-rules/{code}")
+async def admin_save_verdict_rules(
+    code: str, body: VerdictRulesIn, request: Request, user: PlatformAdminDep, session: SessionDep
+) -> dict:
+    """Save deterministic verdict rule templates onto a new template version."""
+    from app.analysis import verdict_rules
+
+    await ensure_default_templates(session)
+    row = await latest_template(session, code)
+    if row is None:
+        raise HTTPException(404, "没有这种合规文件")
+    try:
+        cleaned = verdict_rules.validate_verdict_rules(code, body.rules)
+        new_def = copy.deepcopy(row.definition or {})
+        new_def["verdict_rules"] = cleaned
+        saved = await save_template(
+            session, code, row.name_zh, new_def, uuid.UUID(str(user.user_id))
+        )
+    except TemplateError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await session.commit()
+    from app.analysis import doc_projects as _dp
+
+    _dp._OVERVIEW_PROJECT_CACHE.clear()
+    set_detail(request, summary=f"更新标准判定结论范本：{row.name_zh}（第 {saved.version_no} 版）")
+    return {"code": saved.code, "version_no": saved.version_no, "rules": cleaned}
+
+
 @admin_router.get("/{code}")
 async def admin_get(code: str, _: PlatformAdminDep, session: SessionDep) -> dict:
     await ensure_default_templates(session)
@@ -1792,4 +1904,7 @@ async def admin_save(
     except TemplateError as exc:
         raise HTTPException(422, str(exc)) from exc
     await session.commit()
+    from app.analysis import doc_projects as _dp
+
+    _dp._OVERVIEW_PROJECT_CACHE.clear()
     return {"code": row.code, "version_no": row.version_no}

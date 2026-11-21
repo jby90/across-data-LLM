@@ -820,12 +820,21 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
 
         _populate_dynamic_rows(tables[29], rrows, _fill_t29)
 
-    res_concl = str(
-        data.get("residual_risk_conclusion")
-        or (
-            "Following the Eliminate > Reduce > Transfer > Accept risk treatment hierarchy, all identified inherent risks are mitigated to acceptable Low/Medium residual levels through on-vehicle edge de-identification, mTLS encryption, RBAC isolation and enforceable transfer clauses; no unmitigated high residual risk remains that would trigger mandatory prior consultation under Article 36(1) GDPR."
+    has_high_res = any(str(rr.get("res_level") or "").strip().upper().startswith("HIGH") for rr in rrows)
+    if has_high_res:
+        res_concl = (
+            "Unmitigated high residual risk remains in the current assessment scope. Deployment and cross-border "
+            "data transfer are deferred until additional technical and contractual safeguards reduce all residual "
+            "risks to acceptable Low or Medium levels or mandatory prior consultation with the competent "
+            "supervisory authority under Article 36(1) GDPR is completed."
         )
-    )
+    else:
+        res_concl = str(
+            data.get("residual_risk_conclusion")
+            or (
+                "Following the Eliminate > Reduce > Transfer > Accept risk treatment hierarchy, all identified inherent risks are mitigated to acceptable Low/Medium residual levels through on-vehicle edge de-identification, mTLS encryption, RBAC isolation and enforceable transfer clauses; no unmitigated high residual risk remains that would trigger mandatory prior consultation under Article 36(1) GDPR."
+            )
+        )
     _insert_note_below_table(body, tables[29], "Residual Risk Conclusion:", res_concl)
 
     _set_cell_text(tables[30].findall(W + "tr")[0].findall(W + "tc")[0], str(data.get("action_plan") or ""), append_below=True)
@@ -834,7 +843,11 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
 
     dec = data.get("decision") or {}
     c33 = tables[33].findall(W + "tr")[0].findall(W + "tc")[0]
-    outcome_norm = re.sub(r"[\s\-]+", "_", str(dec.get("outcome") or "CONDITIONALLY_APPROVED").strip().upper())
+    outcome_norm = (
+        "CONSULTATION_REQUIRED"
+        if has_high_res
+        else re.sub(r"[\s\-]+", "_", str(dec.get("outcome") or "CONDITIONALLY_APPROVED").strip().upper())
+    )
     if any(x in outcome_norm for x in ("REJECT", "NOT_APPROVED", "DISAPPROVED", "PROHIBITED", "ABANDON")):
         _check_boxes_in_cell(c33, ["^rejected:"])
     elif "CONSULT" in outcome_norm:
@@ -845,7 +858,12 @@ def render_edpb_2026_docx(data: dict[str, Any], assessment_date: str | None = No
         _replace_underscore_in_cell(c33, "condition 2:", str(dec.get("condition_2") or ""))
     else:
         _check_boxes_in_cell(c33, ["^approved:"])
-    _set_cell_text(tables[34].findall(W + "tr")[0].findall(W + "tc")[0], str(dec.get("justification") or ""))
+    justif_txt = (
+        "Transfer and deployment are deferred pending remediation of unmitigated high residual risk or completion of prior supervisory consultation under Article 36(1) GDPR."
+        if has_high_res
+        else str(dec.get("justification") or "")
+    )
+    _set_cell_text(tables[34].findall(W + "tr")[0].findall(W + "tc")[0], justif_txt)
 
     _unlink_broken_ref_fields(root)
     for idx, sect in enumerate(body.iter(W + "sectPr")):

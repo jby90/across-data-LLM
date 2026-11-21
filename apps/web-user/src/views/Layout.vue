@@ -54,8 +54,8 @@ const breadcrumbParent = computed<{ to: string; title: string } | null>(() => {
   return null
 })
 const breadcrumbTitle = computed(() => {
-  if (route.path.startsWith('/forms')) return '官方申报原表'
-  if (route.path === '/admission' && route.query.tab === 'forms') return '官方申报原表'
+  if (route.path.startsWith('/forms')) return '法定申报表'
+  if (route.path === '/admission' && route.query.tab === 'forms') return '法定申报表'
   return current.value?.title || '工作概览'
 })
 const groups = [

@@ -146,6 +146,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/analysis/doc-projects/{project_id}/documents/{code}/paper"): "生成论述",
     ("GET", "/api/analysis/doc-projects/{project_id}/delivery-aid/{aid_kind}/export.{fmt}"): "下载项目交付辅助清单",
     ("GET", "/api/analysis/doc-projects/{project_id}/export.zip"): "下载成稿包",
+    ("PUT", "/api/admin/document-templates/verdict-rules/{code}"): "修改标准判定结论范本",
     ("PUT", "/api/admin/document-templates/{code}"): "修改文件模板",
     ("GET", "/api/admin/document-templates/official/{code}/original"): "下载官方表格原件",
     ("GET", "/api/admin/document-templates/official-forms/{code}/original"): "下载官方表格原件",

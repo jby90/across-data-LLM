@@ -139,6 +139,17 @@ def validate_definition(definition: dict) -> None:
             unknown = refs - facts
             if unknown:
                 raise TemplateError("内容块引用了未声明的事实项")
+    raw_vrules = definition.get("verdict_rules")
+    if raw_vrules is not None:
+        if not isinstance(raw_vrules, list):
+            raise TemplateError("标准判定结论范本格式不正确")
+        for vr in raw_vrules:
+            if not isinstance(vr, dict) or not str(vr.get("tier") or "").strip():
+                raise TemplateError("标准判定结论范本缺少档位标识")
+            for fk in ("label", "condition", "template"):
+                fv = str(vr.get(fk) or "")
+                if "\x00" in fv or len(fv) > 2000:
+                    raise TemplateError("标准判定结论范本内容不合法或超出长度上限")
 
 
 def resolve_facts(definition: dict, task_values: dict[str, str], answers: dict[str, str]) -> dict:

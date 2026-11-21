@@ -471,7 +471,7 @@ const backTarget = computed(() => {
 })
 const backButtonText = computed(() => {
   const target = backTarget.value
-  if (target.startsWith('/admission?tab=forms') || target === '/forms') return '← 返回官方申报原表目录'
+  if (target.startsWith('/admission?tab=forms') || target === '/forms') return '← 返回法定申报表目录'
   if (target.startsWith('/admission')) return '← 返回准入办理项目'
   if (target.startsWith('/documents')) return '← 返回关联评估项目'
   return '← 返回上一页'
@@ -535,7 +535,7 @@ watch(instanceId, () => (instanceId.value ? loadOne() : loadList()))
   <div class="management-page forms-page" :class="{ 'has-copilot': !!instanceId, 'is-copilot-open': !!instanceId && copilotOpen }" :style="copilotStyle" v-loading="loading">
     <template v-if="!instanceId">
       <header class="page-heading">
-        <div><h1>官方表格</h1><p>汇集各国监管机构发布的官方申报原表，自动带入已关联项目的填报信息并按原表版式导出。</p></div>
+        <div><h1>法定申报表</h1><p>汇集各国主管机关发布的法定申报表，自动带入已关联项目的填报信息并按正式版式导出。</p></div>
       </header>
       <section v-if="rows.length">
         <h2>{{ editable ? '填写中的官方表格' : '本企业已填表格' }}</h2>

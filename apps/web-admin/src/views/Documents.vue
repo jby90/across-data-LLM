@@ -52,7 +52,7 @@ function dupTag(row: DocumentOut): string {
 
 const STEP_LABEL: Record<string, string> = {
   download: '下载归档',
-  upload: '手动上传',
+  upload: '本地上传',
   parse: '分出条文',
   parse_layout: '版面处理',
   ocr: '识别扫描件文字',
@@ -85,7 +85,7 @@ function cleanProcessNote(raw: string | null | undefined): string {
     .replace(/[（(][A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout)[)）]/g, '')
     .replace(/\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout)\s*[:：]?\s*/g, '')
     .trim()
-  if (/^(?:HTTP\s*)?(?:403|429|5\d\d)\b/i.test(s)) s = '官方网站自动访问受限，可浏览器访问或手动上传原文'
+  if (/^(?:HTTP\s*)?(?:403|429|5\d\d)\b/i.test(s)) s = '官方网站自动访问受限，可浏览器访问或本地上传原文'
   return s || '处理异常，请核查原文或稍后重试'
 }
 
@@ -975,7 +975,7 @@ const COMPARE_STATUS_META: Record<
 
     <el-dialog
       v-model="uploadDialog"
-      :title="uploadForm.document_id ? '上传该法规的新版本原文' : '手动上传官方原文'"
+      :title="uploadForm.document_id ? '上传该法规的新版本原文' : '本地上传官方原文'"
       width="min(560px, 94vw)"
     >
       <el-alert

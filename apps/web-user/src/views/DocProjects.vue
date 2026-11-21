@@ -14,6 +14,8 @@ import ProjectChat from '../components/ProjectChat.vue'
 import BlocksView, { type Block as PreviewBlock } from '../components/BlocksView.vue'
 import type { CopilotProposal } from '../components/CopilotFillCard.vue'
 
+interface DocVerdict { tier: string; label: string; tone: string; text: string }
+interface ProjectVerdict { label: string; tone: string; tier: string; text: string; route_text: string }
 interface DocView {
   code: string; name: string; basis_kind: 'official' | 'eu' | 'law'; basis_label: string; basis: string[]
   // 四态：未开始 / 填写中 / 待生成论述 / 已就绪（没有论述环节的文件只有三态）
@@ -21,6 +23,7 @@ interface DocView {
   official_only: boolean; official_missing: number; has_edpb_en?: boolean
   narrative: boolean; paper: { state: string; seconds?: number; error?: string } | null; basis_updated?: boolean
   official_forms: { code: string; kind?: string; name_zh: string; authority_zh: string; side_label: string; short: string; title: string; note: string; missing: number; instance_id: string | null }[]; edited: boolean
+  verdict?: DocVerdict | null
 }
 // 能不能下载成稿（后端算，打包接口按同一结果放行或拒绝）：要的文件都已就绪才行；按目前情况不需要、没就绪的不放进成稿包
 interface FinalStatus {
@@ -51,7 +54,7 @@ interface RedactionBrief { total: number; labels: string[]; custom_terms_configu
 interface SuggestDiagnosis { doc_kind?: string; summary: string; gaps: string[]; followups: string[]; redaction?: RedactionBrief | null }
 interface RiskEvolution { total: number; active_count: number; excluded_count: number; downgraded_count: number; upgraded_count: number; has_change: boolean; init_counts: Record<string, number>; current_counts: Record<string, number> }
 interface RiskSync { stale?: boolean; can_diagnose?: boolean }
-interface Project { id: string; title: string; conversation_code: string; archived: boolean; route: Route; documents: DocView[]; questions: Question[]; thin_count?: number; third_country_checklists?: ThirdCountryChecklist[]; signoff_summary?: SignoffSummary | null; ready_count: number; required_count?: number; final: FinalStatus; route_issues: Issue[]; suggest: SuggestState; suggest_diagnosis?: SuggestDiagnosis | null; risk_evolution?: RiskEvolution | null; risk_sync?: RiskSync | null; route_suggestions: Record<string, Suggestion>; cn_route: CnRoute | null; applicability: Record<string, Applies> }
+interface Project { id: string; title: string; conversation_code: string; archived: boolean; route: Route; documents: DocView[]; questions: Question[]; thin_count?: number; third_country_checklists?: ThirdCountryChecklist[]; signoff_summary?: SignoffSummary | null; ready_count: number; required_count?: number; final: FinalStatus; route_issues: Issue[]; suggest: SuggestState; suggest_diagnosis?: SuggestDiagnosis | null; risk_evolution?: RiskEvolution | null; risk_sync?: RiskSync | null; project_verdict?: ProjectVerdict | null; route_suggestions: Record<string, Suggestion>; cn_route: CnRoute | null; applicability: Record<string, Applies> }
 interface Item { id: string; title: string; conversation_code: string; source_country: string; recipient_country: string; updated_at: string | null }
 interface Options { countries: string[]; library_countries: string[]; functions: { key: string; label: string }[]; scenes: { key: string; label: string }[] }
 
@@ -602,6 +605,7 @@ watch(() => project.value?.suggest.state, (now, before) => {
 watch(openId, (id) => {
   showNaDocs.value = false
   showThirdCountry.value = false
+  showMainRiskEditor.value = false
   diagCollapsed.value = true
   if (id) void open(id)
   else if (!editable.value && items.value.length > 0) void router.replace({ query: { project: items.value[0].id } })
@@ -673,6 +677,65 @@ const advisorSummary = computed(() => {
   }
   return `出件范围说明：结合当前跨境业务流向与合法性基础，建议完整编制下方 ${requiredDocs.value.length} 份合规文件以形成完整齐套的合规证明文件。`
 })
+const showMainRiskEditor = ref(false)
+watch(showAll, (v) => { if (v) showMainRiskEditor.value = false })
+const RISK_LEVELS = ['低', '中', '高']
+const RISK_MATRIX_IDX = [[0, 0, 1], [0, 1, 2], [1, 2, 2]]
+const RISK_NAMES = ['低风险', '中风险', '高风险']
+interface ParsedRiskRow { id: string; risk: string; likelihood: string; severity: string; measures: string; mitigated: string; init_likelihood: string; init_severity: string }
+const riskQuestion = computed(() => (project.value?.questions ?? []).find((q) => q.key === 'risk_rating') ?? null)
+const parsedMainRisks = computed<ParsedRiskRow[]>(() => {
+  const raw = (edits.risk_rating ?? riskQuestion.value?.value ?? '').trim()
+  if (!raw || raw.startsWith('暂不确定') || !raw.startsWith('[')) return []
+  try {
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return []
+    return arr.map((r: Record<string, unknown>, i: number) => ({
+      id: String(r?.id || `r${i + 1}`),
+      risk: String(r?.risk || '').trim(),
+      likelihood: RISK_LEVELS.includes(String(r?.likelihood || '')) ? String(r.likelihood) : '',
+      severity: RISK_LEVELS.includes(String(r?.severity || '')) ? String(r.severity) : '',
+      measures: String(r?.measures || '').trim(),
+      mitigated: r?.mitigated === '1' || r?.mitigated === true || r?.mitigated === 'true' ? '1' : '',
+      init_likelihood: RISK_LEVELS.includes(String(r?.init_likelihood || '')) ? String(r.init_likelihood) : '',
+      init_severity: RISK_LEVELS.includes(String(r?.init_severity || '')) ? String(r.init_severity) : '',
+    })).filter((r) => r.risk || r.likelihood || r.severity || r.measures)
+  } catch {
+    return []
+  }
+})
+function riskRowLevel(l: string, s: string): string {
+  if (!RISK_LEVELS.includes(l) || !RISK_LEVELS.includes(s)) return ''
+  return RISK_NAMES[RISK_MATRIX_IDX[RISK_LEVELS.indexOf(l)][RISK_LEVELS.indexOf(s)]]
+}
+const mainRiskGrid = computed(() =>
+  [2, 1, 0].map((i) => ({
+    label: `可能性：${RISK_LEVELS[i]}`,
+    cells: [0, 1, 2].map((j) => {
+      const activeLabels: string[] = []
+      const movedFrom: string[] = []
+      parsedMainRisks.value.forEach((r, idx) => {
+        const n = idx + 1
+        const curHere = r.mitigated !== '1' && r.likelihood === RISK_LEVELS[i] && r.severity === RISK_LEVELS[j]
+        const il = r.init_likelihood || r.likelihood
+        const isv = r.init_severity || r.severity
+        const initHere = il === RISK_LEVELS[i] && isv === RISK_LEVELS[j]
+        const curLv = riskRowLevel(r.likelihood, r.severity)
+        const initLv = riskRowLevel(il, isv) || curLv
+        if (curHere) {
+          activeLabels.push(initLv && curLv && initLv !== curLv ? `风险 ${n}（原${initLv.replace('风险', '')}）` : `风险 ${n}`)
+        } else if (initHere && (r.mitigated === '1' || (curLv && (r.likelihood !== il || r.severity !== isv)))) {
+          movedFrom.push(r.mitigated === '1' ? `原风险 ${n}（已整改）` : `原风险 ${n}（已降级）`)
+        }
+      })
+      return { name: RISK_NAMES[RISK_MATRIX_IDX[i][j]], tone: RISK_MATRIX_IDX[i][j], activeLabels, movedFrom }
+    }),
+  })),
+)
+function saveInlineRisk() {
+  if (riskQuestion.value) saveInBackground(riskQuestion.value)
+}
+
 function applyDiagnosedProject(next: Project) {
   project.value = next
   const rq = (next.questions || []).find((x) => x.key === 'risk_rating')
@@ -1124,7 +1187,7 @@ const allReady = computed(() => !!project.value?.final.ok)
             </div>
             <div class="final-gate" data-testid="doc-final-gate">
               <template v-if="!project.final.ok">
-                <span>下载成稿还缺：<template v-if="project.final.missing.length">{{ project.final.missing.length }} 项信息</template><template v-if="project.final.forms.length">{{ project.final.missing.length ? '、' : '' }}官方原表 {{ project.final.forms.reduce((a, f) => a + f.missing, 0) }} 项</template><template v-if="project.final.papers.length">{{ project.final.missing.length || project.final.forms.length ? '、' : '' }}{{ project.final.papers.length }} 份待生成论述</template></span>
+                <span>下载成稿还缺：<template v-if="project.final.missing.length">{{ project.final.missing.length }} 项信息</template><template v-if="project.final.forms.length">{{ project.final.missing.length ? '、' : '' }}法定申报表 {{ project.final.forms.reduce((a, f) => a + f.missing, 0) }} 项</template><template v-if="project.final.papers.length">{{ project.final.missing.length || project.final.forms.length ? '、' : '' }}{{ project.final.papers.length }} 份待生成论述</template></span>
                 <button type="button" class="inline-link" data-testid="doc-final-toggle" @click="showGate = !showGate">{{ showGate ? '收起' : '查看待补项' }}</button>
               </template>
               <span v-else>本次应出的 {{ requiredDocs.length }} 份文件均已就绪，可以下载成稿。</span>
@@ -1143,7 +1206,7 @@ const allReady = computed(() => !!project.value?.final.ok)
                 <button v-for="m in g.items" :key="m.key" type="button" class="final-item" :title="`用于：${m.docs.join('、')}`" :data-testid="`final-q-${m.key}`" @click="gotoQuestion(m.key)">{{ m.label }}</button>
               </div>
               <div v-if="project.final.forms.length" class="final-group">
-                <b>官方原表</b>
+                <b>法定申报表</b>
                 <button v-for="f in project.final.forms" :key="f.code" type="button" class="final-item" :data-testid="`final-form-${f.code}`" @click="openOfficial(f.code)">{{ f.title }}（还缺 {{ f.missing }} 项）</button>
               </div>
               <div v-if="project.final.papers.length" class="final-group">
@@ -1207,6 +1270,38 @@ const allReady = computed(() => !!project.value?.final.ok)
           </section>
 
           <section class="summary" data-testid="doc-summary">
+            <div v-if="project.project_verdict" class="verdict-overview-card" data-testid="doc-verdict-overview">
+              <div class="vo-col">
+                <span class="vo-label">发出国法定出境路径</span>
+                <strong class="vo-val">
+                  {{ project.cn_route ? (project.cn_route.route === 'unknown' ? '出境路径待判定' : project.cn_route.text) : (project.project_verdict.route_text || `${project.route.source_country} → ${project.route.recipient_country}`) }}
+                </strong>
+                <span class="vo-sub">{{ project.route.source_country }} → {{ project.route.recipient_country }}</span>
+              </div>
+              <div class="vo-col">
+                <span class="vo-label">风险等级与压降进度</span>
+                <strong v-if="project.risk_evolution && project.risk_evolution.total > 0" class="vo-val">
+                  当前高 {{ project.risk_evolution.current_counts['高风险'] ?? 0 }} · 中 {{ project.risk_evolution.current_counts['中风险'] ?? 0 }} · 低 {{ project.risk_evolution.current_counts['低风险'] ?? 0 }}
+                </strong>
+                <strong v-else class="vo-val">待开展风险识别与定级</strong>
+                <span class="vo-sub">
+                  <template v-if="project.risk_evolution && project.risk_evolution.total > 0">
+                    初评高 {{ project.risk_evolution.init_counts['高风险'] ?? 0 }} / 中 {{ project.risk_evolution.init_counts['中风险'] ?? 0 }} / 低 {{ project.risk_evolution.init_counts['低风险'] ?? 0 }}
+                  </template>
+                  <template v-else>完成风险定级后实时联动各报告结论</template>
+                </span>
+              </div>
+              <div class="vo-col vo-col-verdict">
+                <div class="vo-verdict-head">
+                  <span class="vo-label">场景综合研判结论</span>
+                  <span class="verdict-pill" :class="`tone-${project.project_verdict.tone}`" data-testid="project-verdict-label">
+                    {{ project.project_verdict.label }}
+                  </span>
+                </div>
+                <p class="vo-verdict-text" data-testid="project-verdict-text">{{ project.project_verdict.text }}</p>
+              </div>
+            </div>
+
             <div class="summary-line"><b>本次应出文件信息完整度 {{ percent }}%</b></div>
             <el-progress :percentage="percent" :show-text="false" :stroke-width="8" />
             <p class="state-counts" data-testid="doc-state-counts"><template v-if="stateCounts.na">本次应出 {{ requiredDocs.length }} 份：</template>未开始 {{ stateCounts.not_started }} 份 · 填写中 {{ stateCounts.filling }} 份 · 待生成论述 {{ stateCounts.paper }} 份 · 已就绪 {{ stateCounts.ready }} 份<template v-if="stateCounts.na">（另有 {{ stateCounts.na }} 份按当前路径无需单独准备，已折叠收起）</template></p>
@@ -1253,7 +1348,53 @@ const allReady = computed(() => !!project.value?.final.ok)
               <span v-if="project.risk_evolution.downgraded_count > 0" class="evo-pill ok">已降级 {{ project.risk_evolution.downgraded_count }} 项</span>
               <span v-if="project.risk_evolution.excluded_count > 0" class="evo-pill ok">已完成整改 {{ project.risk_evolution.excluded_count }} 项</span>
               <span v-if="(project.risk_evolution.init_counts['高风险'] ?? 0) > 0 && (project.risk_evolution.current_counts['高风险'] ?? 0) === 0" class="evo-pill ok">高风险已清零</span>
-              <button type="button" class="inline-link evo-jump" data-testid="doc-risk-evolution-go" @click="gotoQuestion('risk_rating')">{{ editable ? '查看并调整风险' : '查看风险评估' }}</button>
+              <button v-if="editable && !locked && !showAll" type="button" class="inline-link evo-jump" data-testid="doc-toggle-inline-risk" @click="showMainRiskEditor = !showMainRiskEditor">{{ showMainRiskEditor ? '收起在线定级' : '在线调整风险定级' }}</button>
+              <button type="button" class="inline-link" :class="{ 'evo-jump': !(editable && !locked && !showAll) }" data-testid="doc-risk-evolution-go" @click="gotoQuestion('risk_rating')">{{ editable ? '定位至填报项' : '查看风险明细' }}</button>
+            </div>
+
+            <div v-if="parsedMainRisks.length > 0 || (showMainRiskEditor && editable && !locked && !showAll)" class="main-risk-panel" data-testid="doc-main-risk-panel">
+              <template v-if="showMainRiskEditor && editable && !locked && !showAll && riskQuestion">
+                <div class="mrp-head">
+                  <b>在线调整主要风险与可能性 × 严重程度定级</b>
+                  <span class="muted">修改风险档位或勾选已完成整改后，上方研判结论及下方 6 份评估报告结论将实时同步校准</span>
+                </div>
+                <RiskTable
+                  v-model="edits.risk_rating"
+                  :project-id="project.id"
+                  :risk-sync="project.risk_sync"
+                  :disabled="locked"
+                  @save="saveInlineRisk"
+                  @diagnosed="applyDiagnosedProject"
+                />
+              </template>
+              <div v-else-if="parsedMainRisks.length > 0" class="main-risk-matrix" data-testid="doc-main-risk-matrix">
+                <div class="mrp-head">
+                  <b>风险等级分布（可能性 × 严重程度）</b>
+                  <span class="muted">实框为当前有效风险，虚框标注已降级或已完成整改的初评位置</span>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="corner">可能性 \ 严重程度</th>
+                      <th>严重程度：低</th>
+                      <th>严重程度：中</th>
+                      <th>严重程度：高</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="g in mainRiskGrid" :key="g.label">
+                      <th>{{ g.label }}</th>
+                      <td v-for="(c, j) in g.cells" :key="j" :class="`rt-${c.tone}`">
+                        <small class="rt-grade">{{ c.name }}</small>
+                        <div v-if="c.activeLabels.length || c.movedFrom.length" class="rt-tags">
+                          <span v-for="a in c.activeLabels" :key="a" class="rt-pill active">{{ a }}</span>
+                          <span v-for="m in c.movedFrom" :key="m" class="rt-pill moved">{{ m }}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <p v-if="nearest && !locked" class="next-step" data-testid="doc-nearest">
               《{{ nearest.name }}》仅缺 {{ nearest.missing.length }} 项信息即可生成成稿。
@@ -1271,9 +1412,15 @@ const allReady = computed(() => !!project.value?.final.ok)
           </section>
 
           <section class="docs" data-testid="doc-list">
-            <div v-if="naDocs.length" class="docs-group-head" data-testid="doc-required-head">
+            <div class="docs-group-head" data-testid="doc-required-head">
               <b>本次应出文件（{{ requiredDocs.length }} 份）</b>
-              <span class="muted">已按数据流向与出境路径自动判定；完成本组文件即可下载成稿</span>
+              <span class="muted">{{ naDocs.length ? '已按数据流向与出境路径自动判定；完成本组文件即可下载成稿' : '分别列示每份文件的填写就绪状态与评估判定结论' }}</span>
+            </div>
+            <div class="docs-col-head" aria-hidden="true">
+              <span>文件名称与填报提示</span>
+              <span>填写状态</span>
+              <span>判定结论</span>
+              <span class="col-act">操作</span>
             </div>
             <div v-for="d in requiredDocs" :key="d.code" class="doc" :data-testid="`doc-${d.code}`">
               <div class="doc-main">
@@ -1282,13 +1429,13 @@ const allReady = computed(() => !!project.value?.final.ok)
                   <span v-if="d.edited" class="basis-pill edited" :data-testid="`edited-${d.code}`">已在线修订</span>
                 </div>
                 <div class="doc-state-row">
-                  <span v-if="project.applicability?.[d.code]?.manual_include" class="applies-short manual">已手动纳入</span>
+                  <span v-if="project.applicability?.[d.code]?.manual_include" class="applies-short manual">已纳入本次出件</span>
                   <button v-if="project.applicability?.[d.code]?.manual_include && editable && !locked" type="button" class="why-link" :disabled="busy === `inc-${d.code}`" :data-testid="`uninclude-${d.code}`" @click="toggleManualInclude(d, false)">恢复自动判断</button>
                   <template v-if="project.applicability?.[d.code]?.state === 'unknown' && project.applicability[d.code].missing_keys.length && appliesShort(d.code) !== '等出境路径'">
                     <span class="applies-short unknown">待核定是否需要</span>
                     <button v-if="!locked" type="button" class="inline-link" :data-testid="`applies-answer-${d.code}`" @click="answerKeys(project.applicability[d.code].missing_keys, `《${d.name}》是否需要`)">补充信息</button>
                   </template>
-                  <span v-if="officialOnly(d)" class="doc-state">申报表使用官方原表，逐张填写后导出</span>
+                  <span v-if="officialOnly(d)" class="doc-state">按发出国法定申报表逐张填写后导出</span>
                   <button v-else-if="d.missing.length && !locked" type="button" class="doc-state missing as-link" :title="d.missing.map((m) => m.label).join('、')" :data-testid="`fill-${d.code}`" @click="fillDoc(d.code)">还缺 {{ d.missing.length }} 项</button>
                   <span v-else-if="d.state === 'needs_paper' && d.paper?.state !== 'running'" class="doc-state">信息已齐，点击右侧生成论述</span>
                 </div>
@@ -1307,13 +1454,24 @@ const allReady = computed(() => !!project.value?.final.ok)
                     <div class="of-actions">
                       <el-button size="small" :disabled="locked && !f.instance_id" :data-testid="`official-${f.code}`" @click="openOfficial(f.code, f.instance_id)">{{ !editable ? (f.instance_id ? '查看表格' : '未填写') : (f.instance_id ? '继续填写' : '填写') }}</el-button>
                       <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
-                        <span><el-button size="small" :disabled="!downloadable" :loading="busy === `of-${f.code}`" :data-testid="`official-pdf-${f.code}`" @click="downloadOfficial(f)">{{ isDocxOfficialForm(f) ? '官方原表 Word' : '官方原表 PDF' }}</el-button></span>
+                        <span><el-button size="small" :disabled="!downloadable" :loading="busy === `of-${f.code}`" :data-testid="`official-pdf-${f.code}`" @click="downloadOfficial(f)">{{ isDocxOfficialForm(f) ? '下载申报表 Word' : '下载申报表 PDF' }}</el-button></span>
                       </el-tooltip>
                     </div>
                   </li>
                 </ul>
               </div>
               <div class="doc-status"><span class="st" :class="d.state" :data-testid="`state-${d.code}`">{{ stateText(d) }}</span><el-tooltip v-if="project.applicability?.[d.code]?.state === 'unknown'" :content="`${appliesShort(d.code)}：${project.applicability[d.code].why}`" placement="top"><span class="st-hint" tabindex="0" aria-label="还不能判断是否需要这份文件">!</span></el-tooltip></div>
+              <div class="doc-verdict">
+                <span
+                  v-if="d.verdict"
+                  class="verdict-pill"
+                  :class="`tone-${d.verdict.tone}`"
+                  :title="d.verdict.text"
+                  :data-testid="`verdict-${d.code}`"
+                >
+                  {{ d.verdict.label }}
+                </span>
+              </div>
               <div class="doc-actions">
                 <AdmissionLaunch v-if="d.code === 'admission' && editable" :task-id="project.id" :disabled="locked" label="去办理" />
                 <el-button v-if="d.narrative && d.state === 'needs_paper' && d.paper?.state !== 'running'" size="small" type="primary" plain :disabled="locked" @click="writePaper(d)">生成论述</el-button>
@@ -1363,13 +1521,14 @@ const allReady = computed(() => !!project.value?.final.ok)
                         <div class="of-actions">
                           <el-button size="small" :disabled="locked && !f.instance_id" :data-testid="`official-${f.code}`" @click="openOfficial(f.code, f.instance_id)">{{ !editable ? (f.instance_id ? '查看表格' : '未填写') : (f.instance_id ? '继续填写' : '填写') }}</el-button>
                           <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
-                            <span><el-button size="small" :disabled="!downloadable" :loading="busy === `of-${f.code}`" :data-testid="`official-pdf-${f.code}`" @click="downloadOfficial(f)">{{ isDocxOfficialForm(f) ? '官方原表 Word' : '官方原表 PDF' }}</el-button></span>
+                            <span><el-button size="small" :disabled="!downloadable" :loading="busy === `of-${f.code}`" :data-testid="`official-pdf-${f.code}`" @click="downloadOfficial(f)">{{ isDocxOfficialForm(f) ? '下载申报表 Word' : '下载申报表 PDF' }}</el-button></span>
                           </el-tooltip>
                         </div>
                       </li>
                     </ul>
                   </div>
                   <div class="doc-status"><span class="st quiet" :class="d.state" :data-testid="`state-${d.code}`">{{ stateText(d) }}</span></div>
+                  <div class="doc-verdict" />
                   <div class="doc-actions">
                     <el-button v-if="editable && !locked" size="small" plain :loading="busy === `inc-${d.code}`" :data-testid="`include-${d.code}`" @click="toggleManualInclude(d, true)">纳入本次出件</el-button>
                     <AdmissionLaunch v-if="d.code === 'admission' && editable" :task-id="project.id" :disabled="locked" label="去办理" />
@@ -1565,7 +1724,7 @@ const allReady = computed(() => !!project.value?.final.ok)
     <el-drawer v-model="previewVisible" :title="previewTitle" size="min(1040px, 94vw)" append-to-body destroy-on-close>
       <div v-loading="previewLoading" class="preview-body" data-testid="doc-preview-drawer">
         <div class="preview-meta">
-          <el-tag size="small" :type="previewKind === 'edited' ? 'warning' : previewKind === 'official_docx' ? 'success' : 'info'">{{ previewKind === 'edited' ? '在线修订版' : previewKind === 'official_docx' ? '官方原表填报预览' : '标准合规报告预览' }}</el-tag>
+          <el-tag size="small" :type="previewKind === 'edited' ? 'warning' : previewKind === 'official_docx' ? 'success' : 'info'">{{ previewKind === 'edited' ? '在线修订版' : previewKind === 'official_docx' ? '法定申报表填报预览' : '标准合规报告预览' }}</el-tag>
           <span class="muted">{{ previewSubtitle }}</span>
           <span v-if="editable && !locked && !previewIsEdpbEn && !previewAidKind" class="preview-meta-actions">
             <el-button size="small" :type="previewEditMode ? 'primary' : 'default'" plain data-testid="doc-preview-edit-toggle" @click="previewEditMode = !previewEditMode">{{ previewEditMode ? '退出修改' : '在线修改' }}</el-button>
@@ -1681,13 +1840,22 @@ const allReady = computed(() => !!project.value?.final.ok)
 .docs { border: 1px solid var(--cy-line); border-radius: 10px; overflow: hidden; }
 .docs-group-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; padding: 10px 18px; background: #f8fafc; border-bottom: 1px solid var(--cy-line); font-size: 13px; }
 .docs-group-head b { color: var(--cy-text-1); font-size: 14px; }
+.docs-col-head { display: grid; grid-template-columns: minmax(0, 1fr) 108px 136px minmax(200px, auto); column-gap: 16px; padding: 7px 18px; background: #f8fafc; border-bottom: 1px solid var(--cy-line); font-size: 13px; color: #64748b; }
+.docs-col-head .col-act { text-align: right; }
 .na-group-toggle { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 18px; border: 0; border-top: 1px solid var(--cy-line); background: #f8fafc; color: var(--cy-text-2); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }
 .na-group-toggle:hover { background: #f1f5f9; color: var(--cy-text-1); }
 .na-toggle-act { color: var(--el-color-primary); font-size: 13px; white-space: nowrap; flex-shrink: 0; }
 .na-docs-wrap { border-top: 1px solid var(--cy-line); }
-.doc { display: grid; grid-template-columns: minmax(0, 1fr) 112px minmax(200px, auto); column-gap: 20px; align-items: start; padding: 14px 18px; border-bottom: 1px solid var(--cy-line); }
-@container (max-width: 680px) {
-  .doc { grid-template-columns: minmax(0, 1fr) auto; row-gap: 10px; }
+.doc { display: grid; grid-template-columns: minmax(0, 1fr) 108px 136px minmax(200px, auto); column-gap: 16px; align-items: start; padding: 14px 18px; border-bottom: 1px solid var(--cy-line); }
+.doc-verdict { display: flex; align-items: center; padding-top: 2px; min-height: 24px; }
+.verdict-pill { display: inline-block; font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px; line-height: 20px; white-space: nowrap; }
+.verdict-pill.tone-done { background: #dcfce7; color: #166534; }
+.verdict-pill.tone-warn { background: #fef3c7; color: #92400e; }
+.verdict-pill.tone-danger { background: #fee2e2; color: #991b1b; }
+@container (max-width: 760px) {
+  .docs-col-head { display: none; }
+  .doc { grid-template-columns: minmax(0, 1fr) auto; row-gap: 8px; }
+  .doc-verdict { grid-column: 1 / -1; }
   .doc-actions { grid-column: 1 / -1; justify-content: flex-start; }
 }
 /* 二轮 规则 12：全站统一行——第一行名称紧跟状态标签；第二行起说明；操作固定在右侧一列、与第一行顶部对齐；宽窄屏结构不变 */
@@ -1849,4 +2017,32 @@ const allReady = computed(() => !!project.value?.final.ok)
 .evo-pill { padding: 1px 8px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; }
 .evo-pill.ok { background: #dcfce7; color: #166534; }
 .evo-jump { margin-left: auto; }
+.verdict-overview-card { display: grid; grid-template-columns: 1fr 1fr 1.45fr; gap: 12px; margin-bottom: 14px; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 10px; background: #f8fafc; }
+.vo-col { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-right: 12px; border-right: 1px dashed #cbd5e1; }
+.vo-col-verdict { border-right: 0; padding-right: 0; }
+.vo-label { font-size: 13px; color: #64748b; }
+.vo-val { font-size: 14px; font-weight: 600; color: #0f172a; line-height: 1.5; }
+.vo-sub { font-size: 13px; color: #475569; line-height: 1.5; }
+.vo-verdict-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.vo-verdict-text { margin: 2px 0 0; font-size: 13px; color: #1e293b; line-height: 1.6; }
+.main-risk-panel { margin-top: 10px; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; display: flex; flex-direction: column; gap: 10px; }
+.mrp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px 12px; flex-wrap: wrap; font-size: 13px; }
+.mrp-head b { font-size: 14px; color: #0f172a; }
+.main-risk-matrix table { border-collapse: separate; border-spacing: 4px; width: 100%; max-width: 720px; table-layout: fixed; font-size: 13px; }
+.main-risk-matrix th { font-weight: 600; color: #475569; text-align: left; font-size: 13px; padding: 4px 6px; white-space: nowrap; }
+.main-risk-matrix th.corner { width: 118px; color: #64748b; font-weight: 400; }
+.main-risk-matrix td { border-radius: 6px; padding: 6px 8px; vertical-align: top; min-height: 42px; }
+.main-risk-matrix td.rt-0 { background: #dcfce7; color: #166534; }
+.main-risk-matrix td.rt-1 { background: #fef3c7; color: #92400e; }
+.main-risk-matrix td.rt-2 { background: #fee2e2; color: #991b1b; }
+.rt-grade { display: block; font-size: 13px; opacity: 0.82; margin-bottom: 3px; }
+.rt-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.rt-pill { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 13px; line-height: 1.45; }
+.rt-pill.active { background: rgba(255, 255, 255, 0.9); color: #0f172a; font-weight: 600; border: 1px solid rgba(15, 23, 42, 0.14); }
+.rt-pill.moved { background: rgba(255, 255, 255, 0.55); color: #64748b; border: 1px dashed rgba(100, 116, 139, 0.45); }
+@container (max-width: 760px) {
+  .verdict-overview-card { grid-template-columns: 1fr; }
+  .vo-col { border-right: 0; padding-right: 0; border-bottom: 1px dashed #cbd5e1; padding-bottom: 8px; }
+  .vo-col-verdict { border-bottom: 0; padding-bottom: 0; }
+}
 </style>

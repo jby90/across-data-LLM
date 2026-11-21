@@ -427,7 +427,9 @@ def addressee(detail: dict) -> str:
     return engine.official_authority(detail)
 
 
-async def admission_blocks(session: AsyncSession, task, values: dict[str, str]) -> dict[str, list[dict]]:
+async def admission_blocks(
+    session: AsyncSession, task, values: dict[str, str], *, definition: dict | None = None
+) -> dict[str, list[dict]]:
     """05: the target country's admission items for this business, written like the admission
     application material — one shared way of saying it (app.admission.engine)."""
     from app.admission import engine
@@ -501,7 +503,29 @@ async def admission_blocks(session: AsyncSession, task, values: dict[str, str]) 
             label = re.sub(r"^《[^》]*》", "", c["source"])
             clauses.append({"type": "paragraph", "text": c["source"] + "：" + engine._cut(clause_gate.strip_own_label(label, c["zh"]), 700), "verbatim_quote": True})
             clauses.append({"type": "paragraph", "text": "原文：" + engine._cut(c["original"], 700), "original": True})
+    from app.analysis import verdict_rules
+
     target_zh = NAMES.get(target or "", "目标国家")
+    merged_adm_vals = {**answered(task), **{k: v for k, v in values.items() if v}}
+    if not merged_adm_vals.get("recipient_country") and target:
+        merged_adm_vals["recipient_country"] = target_zh
+    adm_verdict = verdict_rules.compute_doc_verdict(
+        "admission",
+        merged_adm_vals,
+        task_country_code=getattr(task, "country_code", None),
+        admission_count=len(entries),
+        definition=definition,
+    )
+    verdict_blocks = (
+        [
+            {
+                "type": "paragraph",
+                "text": f"属地准入综合判定结论（{adm_verdict['label']}）：{adm_verdict['text']}",
+            }
+        ]
+        if adm_verdict
+        else []
+    )
     lead_summary = (
         f"经检索核验{target_zh}现行有效的车辆、通信及数据保护法规库，结合本项目申报的业务功能与跨境传输方向，"
         f"共筛选出 {len(entries)} 项直接适用的法定准入事项"
@@ -517,6 +541,7 @@ async def admission_blocks(session: AsyncSession, task, values: dict[str, str]) 
         "materials": materials,
         "filing": [{"type": "list", "items": filing}],
         "route": route,
+        "verdict": verdict_blocks,
         "clauses": clauses,
     }
 
@@ -884,9 +909,16 @@ def safeguard_adequacy_blocks(task, code: str, values: dict[str, str], route: di
     ]
 
 
-def verdict_decision_blocks(task, code: str, values: dict[str, str], route: dict, missing_count: int = 0) -> list[dict]:
+def verdict_decision_blocks(
+    task,
+    code: str,
+    values: dict[str, str],
+    route: dict,
+    missing_count: int = 0,
+    definition: dict | None = None,
+) -> list[dict]:
     """Authoritative four-tier conclusive decision table and circuit-breaker conditions tailored by document type (DPIA / LIA / TIA / Risk Report)."""
-    from app.analysis import risk_items
+    from app.analysis import risk_items, verdict_rules
 
     facts = {**answered(task), **{k: v for k, v in values.items() if v}}
     source_code, recipient_code = doc_rules.ends(facts, getattr(task, "country_code", None))
@@ -1042,6 +1074,17 @@ def verdict_decision_blocks(task, code: str, values: dict[str, str], route: dict
         ["有条件通过（落实刚性前置条件后实施）", cond_mark, cond_list],
         ["无条件通过", uncond_mark, uncond_reason],
     ]
+    if definition and isinstance(definition.get("verdict_rules"), list):
+        v_info = verdict_rules.compute_doc_verdict(
+            code,
+            facts,
+            route,
+            task_country_code=getattr(task, "country_code", None),
+            missing_count=missing_count,
+            definition=definition,
+        )
+        if v_info:
+            rationale_para = f"综合判定结论（{v_info['label']}）：{v_info['text']}"
 
     return [
         {"type": "paragraph", "text": "结论性研判结果与放行条件核定表："},
@@ -1435,8 +1478,18 @@ async def tia_six_steps_blocks(session: AsyncSession, task, values: dict[str, st
     ]
 
 
-async def slots(session: AsyncSession, task, code: str, values: dict[str, str], *, missing_count: int = 0) -> dict[str, list[dict]]:
+async def slots(
+    session: AsyncSession,
+    task,
+    code: str,
+    values: dict[str, str],
+    *,
+    missing_count: int = 0,
+    definition: dict | None = None,
+) -> dict[str, list[dict]]:
     """The platform-written blocks this document's template places."""
+    from app.analysis import verdict_rules
+
     out: dict[str, list[dict]] = {}
     if code in ("risk_report", "remediation", "dpia", "lia", "tia"):
         merged_vals = {**answered(task), **{k: v for k, v in values.items() if v}}
@@ -1444,7 +1497,9 @@ async def slots(session: AsyncSession, task, code: str, values: dict[str, str], 
         out["route"] = [{"type": "paragraph", "text": "出境路径：" + r["text"]}] if r.get("text") else []
         out["necessity_comparison"] = necessity_alternatives_blocks(task, code, merged_vals)
         out["safeguard_effectiveness"] = safeguard_adequacy_blocks(task, code, merged_vals, r)
-        out["verdict_decision"] = verdict_decision_blocks(task, code, merged_vals, r, missing_count=missing_count)
+        out["verdict_decision"] = verdict_decision_blocks(
+            task, code, merged_vals, r, missing_count=missing_count, definition=definition
+        )
         if code == "dpia":
             out["dpia_ch0_overview"] = await dpia_overview_blocks(session, task, merged_vals, r)
             out["dpia_special_data_note"] = await dpia_special_data_note_blocks(session, task, merged_vals)
@@ -1464,7 +1519,26 @@ async def slots(session: AsyncSession, task, code: str, values: dict[str, str], 
             out["advice"] = advice_blocks(items)
             raw_risk = values.get("risk_rating") or answered(task).get("risk_rating") or ""
             out["risk_evolution"] = risk_items.evolution_blocks(raw_risk)
+            if code == "remediation":
+                rem_v = verdict_rules.compute_doc_verdict(
+                    "remediation",
+                    merged_vals,
+                    r,
+                    task_country_code=getattr(task, "country_code", None),
+                    missing_count=missing_count,
+                    definition=definition,
+                )
+                out["remediation_verdict"] = (
+                    [
+                        {
+                            "type": "paragraph",
+                            "text": f"整改闭环与放行条件综合判定结论（{rem_v['label']}）：{rem_v['text']}",
+                        }
+                    ]
+                    if rem_v
+                    else []
+                )
     if code == "admission":
-        a = await admission_blocks(session, task, values)
+        a = await admission_blocks(session, task, values, definition=definition)
         out.update({f"admission_{k}": v for k, v in a.items()})
     return out

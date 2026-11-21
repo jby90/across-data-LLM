@@ -4,6 +4,7 @@ export { startProgressStream, parseSseBlock, type ProgressEvent, type StreamStat
 export { STATUS_TONE, statusTone, statusClass, TONE_TAG_TYPE, type StatusTone } from './statusTone'
 export { WORDING, STATUS_WORDS, missingWording } from './wording'
 export { COUNTRY_NAMES } from './regulationDirectory'
+export { MAP_VIEWBOX, WORLD_COUNTRY_PATHS, WORLD_COUNTRY_HUBS, getCountryHub, buildRouteArcPath } from './worldMapData'
 
 export const ROLE_LABEL: Record<Role, string> = {
   platform_admin: '超级管理员',

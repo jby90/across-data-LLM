@@ -23,13 +23,17 @@ const auth = useAuth()
 const route = useRoute()
 const router = useRouter()
 const navOpen = ref(false)
-const groups = [
+// 超级管理员登录直接进入平台总览；运维管理员只维护基础数据，不看平台总览、企业与账号、审计记录、评估执行记录
+const canManage = computed(() => auth.user?.role === 'platform_admin' || auth.user?.role === 'ops_admin')
+const isSuper = computed(() => auth.user?.role === 'platform_admin')
+const deskName = computed(() => (isSuper.value ? '超级管理员工作台' : '运维管理员工作台'))
+const roleBadge = computed(() => (isSuper.value ? '超级管理员' : '运维管理员'))
+const groups = computed(() => [
   {
     label: '工作空间',
-    items: [
-      { path: '/', title: '工作概览', icon: 'grid' },
-      { path: '/cockpit', title: '合规态势看板', icon: 'gauge', super: true },
-    ],
+    items: isSuper.value
+      ? [{ path: '/', title: '平台总览', icon: 'gauge' }]
+      : [{ path: '/', title: '工作概览', icon: 'grid' }],
   },
   {
     label: '法规与知识',
@@ -59,14 +63,11 @@ const groups = [
     label: '帮助',
     items: [{ path: '/help', title: '使用帮助', icon: 'help' }],
   },
-]
-// 超级管理员看全部；运维管理员只维护基础数据，不看合规态势看板、企业与账号、审计记录、评估执行记录
-const canManage = computed(() => auth.user?.role === 'platform_admin' || auth.user?.role === 'ops_admin')
-const isSuper = computed(() => auth.user?.role === 'platform_admin')
-const deskName = computed(() => (isSuper.value ? '超级管理员工作台' : '运维管理员工作台'))
-const roleBadge = computed(() => (isSuper.value ? '超级管理员' : '运维管理员'))
+])
+const isNavItemActive = (itemPath: string) =>
+  route.path === itemPath || (itemPath === '/' && route.path === '/cockpit')
 const navigation = computed(() =>
-  groups
+  groups.value
     .map((group) => ({
       ...group,
       items: group.items
@@ -75,7 +76,7 @@ const navigation = computed(() =>
     .filter((group) => group.items.length),
 )
 const current = computed(() =>
-  navigation.value.flatMap((group) => group.items).find((item) => item.path === route.path),
+  navigation.value.flatMap((group) => group.items).find((item) => isNavItemActive(item.path)),
 )
 watch(
   () => route.path,
@@ -196,8 +197,8 @@ async function savePassword() {
             :key="item.path"
             :to="item.path"
             class="nav-link"
-            :class="{ 'is-active': route.path === item.path }"
-            :aria-current="route.path === item.path ? 'page' : undefined"
+            :class="{ 'is-active': isNavItemActive(item.path) }"
+            :aria-current="isNavItemActive(item.path) ? 'page' : undefined"
             ><AppIcon :name="item.icon" /><span>{{ item.title }}</span></RouterLink
           >
         </section>
@@ -215,15 +216,15 @@ async function savePassword() {
           >
             <AppIcon name="menu" /></button
           ><RouterLink
-            v-if="route.path !== '/'"
+            v-if="route.path !== '/' && route.path !== '/cockpit'"
             to="/"
             class="topbar-back"
-            aria-label="返回工作概览"
+            :aria-label="isSuper ? '返回平台总览' : '返回工作概览'"
             data-testid="back-to-overview"
-            ><AppIcon name="arrow-left" /><span class="topbar-back__full">返回工作概览</span><span class="topbar-back__short">概览</span></RouterLink
-          ><RouterLink v-if="route.path !== '/'" to="/" class="topbar-crumb-home">{{ deskName }}</RouterLink
+            ><AppIcon name="arrow-left" /><span class="topbar-back__full">{{ isSuper ? '返回平台总览' : '返回工作概览' }}</span><span class="topbar-back__short">总览</span></RouterLink
+          ><RouterLink v-if="route.path !== '/' && route.path !== '/cockpit'" to="/" class="topbar-crumb-home">{{ deskName }}</RouterLink
           ><span v-else>{{ deskName }}</span><span class="topbar-divider">/</span
-          ><strong>{{ current?.title || '工作概览' }}</strong>
+          ><strong>{{ current?.title || (isSuper ? '平台总览' : '工作概览') }}</strong>
         </div>
         <div class="topbar-account" v-if="auth.user">
           <span v-if="userName(auth.user) !== roleBadge" class="account-role-badge" data-testid="topbar-role-badge">{{ roleBadge }}</span

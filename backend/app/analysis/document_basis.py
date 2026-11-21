@@ -135,12 +135,12 @@ def _end_lines(code: str, country: str | None, role: str) -> list[str]:
     side = "发出端" if role == "source" else "接收端"
     if code in ("declaration", "risk_report") and country == CN and role == "source":
         template = "附件 3《数据出境安全评估申报表》" if code == "declaration" else "附件 4《数据出境风险自评估报告》"
-        return [f"{side}（{name}）：有官方原表——{_CN_GUIDE}{template}，本文件直接在该官方原件上填写（版式、栏目、说明原样）。"]
+        return [f"{side}（{name}）：适用法定申报表（{_CN_GUIDE}{template}），本文件直接按该官方制式版式填写并导出。"]
     if code == "declaration":
         forms = official_forms(country, role)
         if forms:
             return [
-                f"{side}（{name}）：有官方表格——{f['name_zh']}（{f['authority_zh']}，{f['version']}），申报表即该官方原表，在项目的申报表一栏填写并导出。"
+                f"{side}（{name}）：适用法定申报表《{f['name_zh']}》（{f['authority_zh']}，{f['version']}），在项目的申报表一栏填写并导出。"
                 for f in forms
             ]
     if code in ("declaration", "risk_report") and role == "recipient":

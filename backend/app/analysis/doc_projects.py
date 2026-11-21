@@ -702,6 +702,9 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
     docs_required_total = 0
     ready_projects = 0
     route_buckets: dict[str, dict] = {}
+    legal_buckets: dict[str, dict] = {}
+    map_routes: list[dict] = []
+    deadlines: list[dict] = []
     risk_agg = {
         "init_high": 0,
         "init_medium": 0,
@@ -714,6 +717,7 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
         "high_cleared": 0,
     }
     todos: list[dict] = []
+    from app.analysis import doc_rules, verdict_rules
 
     for task in rows:
         prog = await _fast_progress(session, task, templates, library)
@@ -726,6 +730,10 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
         facts = task.facts_json or {}
         src = str(facts.get(DOC_FACT_PREFIX + "source_country") or "").strip() or "未设发出方"
         rcp = str(facts.get(DOC_FACT_PREFIX + "recipient_country") or "").strip() or "未设接收方"
+        src_cc = country_of(src) or (task.country_code if src == "未设发出方" else "") or ""
+        rcp_cc = country_of(rcp) or ""
+        src_disp = LIBRARY_NAMES.get(src_cc, src) if src_cc else src
+        rcp_disp = LIBRARY_NAMES.get(rcp_cc, rcp) if rcp_cc else rcp
         route_key = f"{src} → {rcp}"
         bucket = route_buckets.setdefault(
             route_key,
@@ -737,8 +745,87 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
         bucket["docs_ready"] += prog["ready"]
         bucket["docs_total"] += prog["total"]
 
+        flat_vals = {
+            k.removeprefix(DOC_FACT_PREFIX): str(v).strip()
+            for k, v in facts.items()
+            if k.startswith(DOC_FACT_PREFIX) and isinstance(v, str)
+        }
+        r_info = await doc_rules.route(session, flat_vals, task.country_code)
+        r_kind = str(r_info.get("route") or "")
+        r_txt = str(r_info.get("text") or "")
+        if r_kind == "security_assessment" or "安全评估" in r_txt:
+            legal_name = "数据出境安全评估"
+        elif r_kind == "standard_contract" or "标准合同" in r_txt:
+            legal_name = "个人信息出境标准合同备案"
+        elif r_kind == "exempt" or "免予" in r_txt or "免于" in r_txt:
+            legal_name = "免予申报内控归档"
+        elif r_txt and "待判定" not in r_txt:
+            legal_name = "境外主管机构事先授权或报备"
+        else:
+            legal_name = "出境路径待核定"
+        lb = legal_buckets.setdefault(
+            legal_name,
+            {"label": legal_name, "count": 0, "ready": 0, "docs_ready": 0, "docs_total": 0},
+        )
+        lb["count"] += 1
+        if is_ready:
+            lb["ready"] += 1
+        lb["docs_ready"] += prog["ready"]
+        lb["docs_total"] += prog["total"]
+
+        if src_cc == "CN" and r_kind == "security_assessment":
+            val_info = cn_route.validity(*(facts.get(DOC_FACT_PREFIX + k, "") for k in VALIDITY_DATES))
+            if val_info.get("filing") and not val_info.get("issued_on"):
+                dl = int(val_info["filing"].get("days_left", 0))
+                deadlines.append(
+                    {
+                        "id": f"dl-sa-{task.id}",
+                        "title": f"{task.title} · 自评估申报窗口",
+                        "status": f"剩余 {dl} 天" if dl >= 0 else f"已超期 {abs(dl)} 天",
+                        "tone": "danger" if dl < 0 else ("warn" if dl <= 15 else "done"),
+                        "to": {"path": "/documents", "query": {"project": str(task.id)}},
+                    }
+                )
+            elif val_info.get("result"):
+                dl = int(val_info["result"].get("days_left", 0))
+                deadlines.append(
+                    {
+                        "id": f"dl-res-{task.id}",
+                        "title": f"{task.title} · 安全评估结果效期",
+                        "status": "即将到期" if 0 <= dl <= 180 else ("有效期内" if dl > 180 else "需重新申报"),
+                        "tone": "danger" if dl < 0 else ("warn" if dl <= 180 else "done"),
+                        "to": {"path": "/documents", "query": {"project": str(task.id)}},
+                    }
+                )
+
         risk_raw = str(facts.get(DOC_FACT_PREFIX + "risk_rating") or "")
         r_sum = risk_items.summary(risk_raw)
+        proj_v = verdict_rules.compute_doc_verdict(
+            "risk_report",
+            flat_vals,
+            r_info,
+            task_country_code=task.country_code,
+            missing_count=prog["missing"],
+        )
+        map_routes.append(
+            {
+                "project_id": str(task.id),
+                "title": task.title,
+                "source_code": src_cc,
+                "recipient_code": rcp_cc,
+                "source_name": src_disp,
+                "recipient_name": rcp_disp,
+                "legal_route": legal_name,
+                "ready": prog["ready"],
+                "total": prog["total"],
+                "missing": prog["missing"],
+                "high_risk": r_sum["current_counts"].get("高风险", 0),
+                "med_risk": r_sum["current_counts"].get("中风险", 0),
+                "low_risk": r_sum["current_counts"].get("低风险", 0),
+                "verdict_label": proj_v["label"] if proj_v else "评估中",
+                "verdict_tone": proj_v["tone"] if proj_v else "warn",
+            }
+        )
         risk_agg["init_high"] += r_sum["init_counts"].get("高风险", 0)
         risk_agg["init_medium"] += r_sum["init_counts"].get("中风险", 0)
         risk_agg["init_low"] += r_sum["init_counts"].get("低风险", 0)
@@ -882,6 +969,11 @@ async def compliance_overview(user: UserDep, session: SessionDep) -> dict:
         "route_distribution": sorted(
             route_buckets.values(), key=lambda r: (r["count"], r["docs_ready"]), reverse=True
         ),
+        "legal_route_distribution": sorted(
+            legal_buckets.values(), key=lambda r: (r["count"], r["docs_ready"]), reverse=True
+        ),
+        "map_routes": map_routes,
+        "deadlines": deadlines[:8],
         "risk_summary": risk_agg,
         "todos": todos[:8],
     }
@@ -2093,7 +2185,57 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
     route_issues = [i for i in issues if i["key"] in PROJECT_KEYS]
     final = final_status(docs, applicability, list(questions.values()))
     final["issues"] = doc_consistency.summary(issues)
+    from app.analysis import doc_rules, doc_sections, verdict_rules
+
+    merged_proj_vals = {
+        **{k: str(v) for k, v in answers.items() if str(v).strip()},
+        "source_country": source,
+        "recipient_country": recipient,
+        "vehicle_model": task.vehicle_model or "",
+        "scenario": str(facts.get(DOC_FACT_PREFIX + "scenario") or task.title or ""),
+        "company_name": str(facts.get(DOC_FACT_PREFIX + "company_name") or ""),
+    }
+    proj_route_info = await doc_rules.route(session, merged_proj_vals, task.country_code)
+    _, target_adm = doc_rules.ends(merged_proj_vals, task.country_code)
+    raw_adm = await doc_sections.admission_entries(session, task, target_adm)
+    adm_applicable = [
+        e
+        for e in doc_rules.inbound_only(
+            raw_adm, country_of(source), country_of(recipient), target_adm, merged_proj_vals
+        )
+        if not doc_rules.admission_gate(e)
+    ]
+    tpl_defs = {
+        code: (await D.latest_template(session, code))
+        for code in verdict_rules.VERDICT_DOC_CODES
+    }
+    for d in docs:
+        d_code = d["code"]
+        if d_code in verdict_rules.VERDICT_DOC_CODES:
+            d_miss = int(d.get("official_missing") or 0) if d.get("official_only") else len(d.get("missing") or [])
+            tpl_obj = tpl_defs.get(d_code)
+            dv = verdict_rules.compute_doc_verdict(
+                d_code,
+                merged_proj_vals,
+                proj_route_info,
+                task_country_code=task.country_code,
+                missing_count=d_miss,
+                admission_count=len(adm_applicable),
+                definition=tpl_obj.definition if tpl_obj else None,
+            )
+            d["verdict"] = {"label": dv["label"], "tone": dv["tone"], "tier": dv["tier"]} if dv else None
+        else:
+            d["verdict"] = None
+
     req_docs = [d for d in docs if applicability.get(d["code"], {}).get("state") != "na"] or docs
+    proj_overall = verdict_rules.compute_doc_verdict(
+        "risk_report",
+        merged_proj_vals,
+        proj_route_info,
+        task_country_code=task.country_code,
+        missing_count=len(final["missing"]) + len(final["forms"]),
+        definition=tpl_defs["risk_report"].definition if tpl_defs.get("risk_report") else None,
+    )
     third_country_checklists = project_delivery_aids.build_third_country_checklists(
         source,
         recipient,
@@ -2133,6 +2275,17 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
         "suggest_diagnosis": facts.get(DIAGNOSIS_KEY),
         "risk_evolution": risk_items.summary(answers.get("risk_rating", "")),
         "risk_sync": _build_risk_sync(facts, task.vehicle_model, answers.get("risk_rating", "")),
+        "project_verdict": (
+            {
+                "label": proj_overall["label"],
+                "tone": proj_overall["tone"],
+                "tier": proj_overall["tier"],
+                "text": proj_overall["text"],
+                "route_text": str(proj_route_info.get("text") or ""),
+            }
+            if proj_overall
+            else None
+        ),
         "route_suggestions": {k: suggestions[k] for k in ("company_name", "vehicle_model") if k in suggestions},
     }
     signoff_full = project_delivery_aids.build_signoff_checklist(result, answers)
