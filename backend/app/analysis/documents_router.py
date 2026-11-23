@@ -343,19 +343,44 @@ async def warm_basis(factory=None) -> None:
 
                 _OVERVIEW_CACHE["all"] = (_time.monotonic(), await _knowledge_overview(session))
                 codes = sorted(await library_countries(session))
+                from sqlalchemy import text as _sql_text
+
                 from app.analysis.workflow_engine import overseas_countries_map
 
                 overseas = set(await overseas_countries_map(session))
-                for code in codes:
-                    # 法规浏览列出全部文件（含关系较远的，按名称可搜到）：与它用同一组版本，命中同一份缓存
+                wp_codes = {
+                    r[0]
+                    for r in (
+                        await session.execute(_sql_text("SELECT DISTINCT country_code FROM country_whitepapers WHERE country_code IS NOT NULL"))
+                    ).all()
+                    if r[0]
+                }
+                kg_codes = {
+                    r[0]
+                    for r in (
+                        await session.execute(_sql_text("SELECT DISTINCT country_code FROM kg_nodes WHERE country_code IS NOT NULL"))
+                    ).all()
+                    if r[0]
+                }
+                task_codes = {
+                    r[0]
+                    for r in (
+                        await session.execute(_sql_text("SELECT DISTINCT country_code FROM analysis_tasks WHERE archived_at IS NULL AND country_code IS NOT NULL"))
+                    ).all()
+                    if r[0]
+                }
+                warm_codes = [c for c in codes if c in (wp_codes | kg_codes | task_codes | {"CN"})]
+                for code in warm_codes:
+                    # 仅对已有图谱、简报或在办项目的活跃法域启动预热；其余静态归档法域按需即查即缓存，避免冷启动占满小规格云主机 CPU 与内存
                     await relation_counts(session, [e.version.id for e in await library(session, code, include_peripheral=True)])
                     await relation_counts(session, [e.version.id for e in await library(session, code)])
-                    if code in overseas:  # 有国家简报的国家（中国等作为数据发出国入库，但没有简报页）
+                    if code in overseas and code in (wp_codes | kg_codes):
                         await _page_data(session, code)
                         await _topics_cached(session, code)
+                    if code in wp_codes:
                         await whitepaper_router.current_hash(session, code)  # 简报是否待更新
-                # 每国作为数据接收方、发出方的依据条文都先算好：任意流向（含用户新建的）打开项目、
-                # 查看更新通知时只是组合现成的结果
+                    await asyncio.sleep(0.01)
+                # 活跃法域作为数据接收方、发出方的依据条文预先算好；其余新增归档法域在首次创建评估时按需加载
                 from app.analysis import clause_gate as _cg
                 from app.analysis import doc_rules as _dr
                 from app.analysis import doc_sections as _ds
@@ -364,15 +389,16 @@ async def warm_basis(factory=None) -> None:
 
                 await _cg.load_title_names(session)
                 await _qb._cn_articles(session)
-                for code in codes:
+                for code in warm_codes:
                     probe = AnalysisTask(kind="documents", country_code=code, facts_json={})
                     for side in ("recipient", "source"):
                         await _citations(session, probe, side=side)
                     await _dr._latest_clauses(session, code)
                     await _dr.transfer_clause(session, code)
                     await _ds.receiving_law(session, code)
-                    if code != "CN":
+                    if code != "CN" and code in (wp_codes | kg_codes):
                         await _wp.pinned_topics(session, code)
+                    await asyncio.sleep(0.01)
     except Exception:  # noqa: BLE001 - 预热失败不影响使用，只是首次会慢
         log.warning("预热失败", exc_info=True)
 

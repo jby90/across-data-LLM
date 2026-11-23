@@ -134,6 +134,11 @@ def _rebuild_in_thread() -> str:
                     current = await mark(session)
             token = rebuilding.set(True)
             try:
+                with system_scope("view-rebuild-cockpit"):
+                    async with factory() as session:
+                        from app.iam import cockpit_router
+
+                        await cockpit_router._kb_posture(session)
                 await warm_basis(factory)
                 with system_scope("view-rebuild-admin"):
                     async with factory() as session:

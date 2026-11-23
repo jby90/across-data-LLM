@@ -197,10 +197,12 @@ def assess(
 
 
 _CARDS_CACHE: dict[tuple, list[dict]] = {}
+_EXEMPT_FRAG_CACHE: dict[tuple, bool] = {}
 
 
 def clear_cards_cache() -> None:
     _CARDS_CACHE.clear()
+    _EXEMPT_FRAG_CACHE.clear()
 
 
 async def build_cards(sf, country: str | None = None) -> list[dict]:
@@ -331,10 +333,20 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
             rows = by_ver.get(ver_id, [])
             inside = scoped(intake_sc, ver_id)
             flags = None if inside is None else [o in inside for _, _, o, _, _ in rows]
+            def _is_exempt(ver_u, ord_i: int, txt_s: str) -> bool:
+                k = (ver_u, ord_i)
+                hit_ex = _EXEMPT_FRAG_CACHE.get(k)
+                if hit_ex is not None:
+                    return hit_ex
+                val = is_short_fragment(txt_s) or is_numeric_only(txt_s)
+                if len(_EXEMPT_FRAG_CACHE) < 60000:
+                    _EXEMPT_FRAG_CACHE[k] = val
+                return val
+
             card = assess(
                 [
-                    ClauseSample(n, t, bool(c) or is_numeric_only(t) or is_short_fragment(t))
-                    for n, t, _, _, c in rows
+                    ClauseSample(n, t, bool(c) or _is_exempt(ver_id, o, t))
+                    for n, t, o, _, c in rows
                 ],
                 lang_val,
                 needs_translation=not lang_val.lower().startswith("zh"),
