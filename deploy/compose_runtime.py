@@ -15,6 +15,18 @@ def container_env(name):
     return dict(v.split("=", 1) for v in item["Config"]["Env"] if "=" in v)
 
 
+def _host_mem_mib() -> int:
+    meminfo = Path("/proc/meminfo")
+    if not meminfo.exists():
+        return 0
+    for line in meminfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                return int(parts[1]) // 1024
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     root = Path(__file__).resolve().parent
@@ -29,13 +41,29 @@ def main():
     db = container_env("cyshuhe-db-1")
     migration = container_env("cyshuhe-migrate-1")
     api = container_env("cyshuhe-api-1")
-    env = dict(os.environ)
+    caller_env = dict(os.environ)
+    env = dict(caller_env)
     env.update({key: value for key, value in api.items() if key.startswith("CYSH_")})
+    host_mib = _host_mem_mib()
+    if 0 < host_mib <= 2300:
+        low_ram_defaults = {
+            "CYSH_DB_MEM_LIMIT": "320m",
+            "CYSH_PG_SHARED_BUFFERS": "128MB",
+            "CYSH_PG_MAX_CONNECTIONS": "60",
+            "CYSH_API_MEM_LIMIT": "576m",
+            "CYSH_DB_POOL_SIZE": "8",
+            "CYSH_DB_MAX_OVERFLOW": "12",
+            "CYSH_WORKER_MEM_LIMIT": "352m",
+            "CYSH_WORKER_POOL_SIZE": "2",
+            "CYSH_WORKER_MAX_OVERFLOW": "2",
+        }
+        for k, v in low_ram_defaults.items():
+            env[k] = caller_env.get(k, v)
     env.update(
         POSTGRES_PASSWORD=db["POSTGRES_PASSWORD"],
         CYSH_RUNTIME_DB_PASSWORD=migration["CYSH_RUNTIME_DB_PASSWORD"],
         CYSH_JWT_SECRET=migration["CYSH_JWT_SECRET"],
-        CYSH_RELEASE=os.environ.get("CYSH_RELEASE", release.get("release_tag", "s12-stage")),
+        CYSH_RELEASE=caller_env.get("CYSH_RELEASE", release.get("release_tag", "s12-stage")),
     )
     command = ["docker", "compose", "-f", str(root / "docker-compose.yml")]
     if tls:

@@ -7,11 +7,14 @@ OCR 文本是机器识别结果,必然有错字、错号。因此:
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import logging
 import os
 import shutil
 import statistics
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +31,16 @@ log = logging.getLogger(__name__)
 LANG_MAP = {"en": "eng", "ar": "ara+eng", "fr": "fra+eng", "zh": "chi_sim+eng"}
 LOW_CONFIDENCE = 60.0
 MAX_OCR_PAGES = 40
+
+
+def release_native_memory() -> None:
+    """Collect Python cyclic garbage and return freed glibc heap arenas to the OS."""
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class OcrUnavailable(Exception):
@@ -217,36 +230,46 @@ class OcrEngine:
         langs = self.languages_for(language)
         pages: list[str] = []
         confs: list[float] = []
-        pil_images = []
         with _PDFIUM_LOCK:
             doc = pdfium.PdfDocument(content)
             try:
                 page_limit = len(doc) if max_pages is None else min(len(doc), max_pages)
-                for i in range(page_limit):
-                    page_obj = doc[i]
+            finally:
+                doc.close()
+        try:
+            for i in range(page_limit):
+                with _PDFIUM_LOCK:
+                    doc = pdfium.PdfDocument(content)
+                    page_obj = None
                     bitmap = None
                     try:
+                        page_obj = doc[i]
                         bitmap = page_obj.render(scale=self._dpi / 72)
-                        pil_images.append(bitmap.to_pil().convert("L"))
+                        image = bitmap.to_pil().convert("L")
                     finally:
                         if bitmap is not None:
                             bitmap.close()
-                        page_obj.close()
-            finally:
-                doc.close()
-        for image in pil_images:
-            text = pytesseract.image_to_string(image, lang=langs, config=self._config())
-            data = pytesseract.image_to_data(
-                image,
-                lang=langs,
-                config=self._config(),
-                output_type=pytesseract.Output.DICT,
-            )
-            confs.extend(
-                float(c)
-                for c, w in zip(data["conf"], data["text"], strict=False)
-                if str(w).strip() and float(c) >= 0
-            )
-            pages.append("\n".join(ln.rstrip() for ln in text.splitlines() if ln.strip()))
+                        if page_obj is not None:
+                            page_obj.close()
+                        doc.close()
+                try:
+                    text = pytesseract.image_to_string(image, lang=langs, config=self._config())
+                    data = pytesseract.image_to_data(
+                        image,
+                        lang=langs,
+                        config=self._config(),
+                        output_type=pytesseract.Output.DICT,
+                    )
+                finally:
+                    image.close()
+                    del image
+                confs.extend(
+                    float(c)
+                    for c, w in zip(data["conf"], data["text"], strict=False)
+                    if str(w).strip() and float(c) >= 0
+                )
+                pages.append("\n".join(ln.rstrip() for ln in text.splitlines() if ln.strip()))
+        finally:
+            release_native_memory()
         mean = statistics.fmean(confs) if confs else 0.0
         return OcrResult(pages=pages, mean_confidence=round(mean, 1), languages=langs)

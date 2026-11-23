@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.ingestion.archive import ArchiveStore
 from app.ingestion.fetcher import PoliteFetcher
-from app.ingestion.ocr import OcrEngine
+from app.ingestion.ocr import OcrEngine, release_native_memory
 from app.ingestion.pipeline import ingest_site
 from app.sources.models import RunStatus, SourceSite, TermsStatus
 
@@ -97,6 +97,8 @@ async def run_due_once(
             await ingest_site(sf, make_fetcher(), archive, site_id, trigger=trigger, ocr=ocr)
         except Exception:  # noqa: BLE001 - 单个站点异常不能让调度循环退出
             log.exception("站点运行异常 site=%s", site_id)
+        finally:
+            release_native_memory()
         runs += 1
         async with sf() as s:
             site = await s.get(SourceSite, site_id)

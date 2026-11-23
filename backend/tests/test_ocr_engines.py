@@ -233,3 +233,48 @@ def test_two_recognitions_never_run_at_the_same_time(monkeypatch, tmp_path):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert peak[0] == 1  # 四份同时提交，识别始终一份一份来
+
+
+def test_tesseract_streams_one_page_at_a_time_without_holding_all_bitmaps(monkeypatch):
+    """回归：多页扫描件必须逐页渲染、识别后立刻释放位图，不得把整份 PDF 全部页同时驻留内存。"""
+    import pytesseract
+
+    live_images: list[object] = []
+    peak_live = [0]
+
+    orig_convert = None
+
+    def wrap_image_to_string(img, **kwargs):
+        assert getattr(img, "im", None) is not None
+        return "Article 1\nValid text"
+
+    def wrap_image_to_data(img, **kwargs):
+        return {"conf": ["92", "90"], "text": ["Article", "1"]}
+
+    from PIL import Image
+
+    orig_convert = Image.Image.convert
+    orig_close = Image.Image.close
+
+    def tracked_convert(self, *a, **kw):
+        out = orig_convert(self, *a, **kw)
+        live_images.append(out)
+        peak_live[0] = max(peak_live[0], len(live_images))
+        return out
+
+    def tracked_close(self):
+        if self in live_images:
+            live_images.remove(self)
+        return orig_close(self)
+
+    monkeypatch.setattr(Image.Image, "convert", tracked_convert)
+    monkeypatch.setattr(Image.Image, "close", tracked_close)
+    monkeypatch.setattr(pytesseract, "image_to_string", wrap_image_to_string)
+    monkeypatch.setattr(pytesseract, "image_to_data", wrap_image_to_data)
+
+    e = OcrEngine("tesseract", None, 150, None)
+    e._checked = True
+    res = e._run_tesseract(blank_pdf(8), "en")
+    assert len(res.pages) == 8
+    assert peak_live[0] == 1  # 8 页 PDF 任一时刻内存里最多只有 1 页灰度图
+    assert len(live_images) == 0
