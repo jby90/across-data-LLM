@@ -183,7 +183,7 @@ _STANDALONE_CURRENCY = re.compile(
 )
 
 
-_CONTACT = re.compile(r"\S*@\S+|(?:https?://|www\.)\S+", re.IGNORECASE)
+_CONTACT = re.compile(r"[^\s@]+@\S+|(?:https?://|www\.)\S+", re.IGNORECASE)
 _LEADER_DOTS = re.compile(r"\.{8,}|…{3,}|。{8,}")  # 目录里页码前的点线
 _REVISION_ROW = re.compile(
     r"^\s*\d+(?:\.\d+)*\s+(?:January|February|March|April|May|June|July|August|September|October|"
@@ -217,6 +217,10 @@ MAX_CONTENTS_GAP_WORDS = 30  # 两个目录项之间（以及首尾）最多容�
 LONG_CONTENTS_GAP_WORDS = 100
 
 
+def _has_leader(s: str) -> bool:
+    return "..." in s or "…" in s or "。。。" in s
+
+
 def _is_contents(text: str) -> bool:
     """A table of contents, judged line by line: an entry is “title … page” on one line (or a
     numbered title ending in dot leaders whose page went to the next fragment, or “… 1 à 20 79”).
@@ -224,15 +228,20 @@ def _is_contents(text: str) -> bool:
     are only wrapped titles; a stretch of running text — a table of contents followed by the body,
     or a form or table inside the law with dot leaders to fill in (“Poids : ……… T”) — makes it law
     to be translated."""
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not text or (not _has_leader(text) and not _RANGE_PAGE.search(text)):
+        return False
+    lines = [ln for ln in text.splitlines() if ln.strip()]
     worded = sum(1 for ln in lines if _WORD3.search(ln))  # 页眉水印拆出来的零碎字母行不算
     # 带页码的目录项是确凿的；只以点线收尾的行，在没有任何页码的多行文字里多半是表单的填空
-    paged = any(_CONTENTS_ENTRY.search(ln) or _RANGE_PAGE.search(ln) for ln in lines)
+    paged = any(
+        (_has_leader(ln) and _CONTENTS_ENTRY.search(ln)) or _RANGE_PAGE.search(ln) for ln in lines
+    )
     weak_ok = paged or worded <= 1
     entries, gap, widest = 0, 0, 0
     for ln in lines:
-        strong = _CONTENTS_ENTRY.search(ln) or _RANGE_PAGE.search(ln)
-        weak = _NUMBERED_TITLE.match(ln) or _TRAILING_LEADER.match(ln)
+        has_ld = _has_leader(ln)
+        strong = (has_ld and _CONTENTS_ENTRY.search(ln)) or _RANGE_PAGE.search(ln)
+        weak = has_ld and (_NUMBERED_TITLE.match(ln) or _TRAILING_LEADER.match(ln))
         if strong or (weak and weak_ok):
             entries += 1
             widest, gap = max(widest, gap), 0
@@ -254,6 +263,9 @@ def _is_front_matter(text: str) -> bool:
     return _is_contents(text) or (bool(_REVISION_ROW.match(flat)) and len(flat) < 220)
 
 
+_PROSE_WORD9 = re.compile(r"(?<![@:/.\w])[^\W\d_]{9,}(?![\w.@])")
+
+
 def is_numeric_only(text: str) -> bool:
     """True when a fragment has nothing to translate: numbers and symbols only, a table-of-contents
     line, or a revision-history row of the document itself (see below for the first kind).
@@ -265,6 +277,8 @@ def is_numeric_only(text: str) -> bool:
     """
     if _is_front_matter(text):
         return True
+    if text and len(_PROSE_WORD9.findall(text)) >= 2:
+        return False
     # 邮箱、网址不是要翻译的词（“43 -----@tra.gov.eg”这样的联系方式碎片）
     rest = _STANDALONE_CURRENCY.sub(" ", _CONTACT.sub(" ", normalize(text)))
     if not any(ch.isalnum() for ch in rest):

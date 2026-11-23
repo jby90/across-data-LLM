@@ -645,12 +645,12 @@ const portalTrialCards = [
                 <div class="map-stage">
                   <svg :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="本单位跨境数据流向图">
                     <g stroke="#131e33" stroke-width="1">
-                      <line x1="0" y1="100" x2="840" y2="100" />
-                      <line x1="0" y1="200" x2="840" y2="200" />
-                      <line x1="0" y1="300" x2="840" y2="300" />
-                      <line x1="210" y1="0" x2="210" y2="400" />
-                      <line x1="420" y1="0" x2="420" y2="400" />
-                      <line x1="630" y1="0" x2="630" y2="400" />
+                      <line x1="0" y1="110" x2="960" y2="110" />
+                      <line x1="0" y1="220" x2="960" y2="220" />
+                      <line x1="0" y1="330" x2="960" y2="330" />
+                      <line x1="240" y1="0" x2="240" y2="440" />
+                      <line x1="480" y1="0" x2="480" y2="440" />
+                      <line x1="720" y1="0" x2="720" y2="440" />
                     </g>
 
                     <g class="land-bg">

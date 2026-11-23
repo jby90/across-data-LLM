@@ -27,8 +27,32 @@ from app.ingestion.page_quality import document_quality
 
 log = logging.getLogger(__name__)
 
-# 文档语言 -> Tesseract 语言包。阿拉伯文/法文文件里常夹英文,带上 eng 提升混排识别。
-LANG_MAP = {"en": "eng", "ar": "ara+eng", "fr": "fra+eng", "zh": "chi_sim+eng"}
+# 文档语言 -> Tesseract 语言包。非拉丁或混排文件常夹英文,带上 eng 提升混排识别。
+LANG_MAP = {
+    "en": "eng",
+    "ar": "ara+eng",
+    "fr": "fra+eng",
+    "zh": "chi_sim+eng",
+    "ru": "rus+eng",
+    "kk": "kaz+rus+eng",
+    "ky": "kir+rus+eng",
+    "vi": "vie+eng",
+    "th": "tha+eng",
+    "ms": "msa+eng",
+    "id": "ind+eng",
+    "de": "deu+eng",
+    "es": "spa+eng",
+    "pt": "por+eng",
+    "it": "ita+eng",
+    "nl": "nld+eng",
+    "pl": "pol+eng",
+    "sv": "swe+eng",
+    "tr": "tur+eng",
+    "ja": "jpn+eng",
+    "ko": "kor+eng",
+    "he": "heb+eng",
+    "bn": "ben+eng",
+}
 LOW_CONFIDENCE = 60.0
 MAX_OCR_PAGES = 40
 

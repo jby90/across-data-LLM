@@ -942,6 +942,13 @@ def main() -> int:
     i = sub.add_parser("import-phase1", help="从一期迁移已有原文与元数据")
     i.add_argument("--data-dir", required=True, help="一期 docs/phase2/data 目录")
     i.add_argument("--country", required=True)
+    pm = sub.add_parser(
+        "import-phase1-mysql",
+        help="从一期服务器全量镜像备份（mysql_backup.sql + all_documents_backup.tar.gz）幂等吸纳多国法规",
+    )
+    pm.add_argument("--backup-root", required=True, help="包含 mysql_backup.sql 与 all_documents_backup.tar.gz 的目录")
+    pm.add_argument("--ocr-cache-dir", help="预核验逐页识别缓存 JSON 目录")
+    pm.add_argument("--supplement-manifest", help="附加官方直采补录清单 manifest.json 路径")
     m = sub.add_parser("import-file", help="导入从官方站点下载的单个 PDF，走同一套解析与识别流程")
     m.add_argument("--country", required=True)
     m.add_argument("--file", required=True)
@@ -1146,6 +1153,40 @@ def main() -> int:
             print(row)
     elif args.command == "import-phase1":
         asyncio.run(run_import_phase1(args.data_dir, args.country))
+    elif args.command == "import-phase1-mysql":
+        from app.ingestion.archive import ArchiveStore
+        from app.ingestion.phase1_mysql_import import import_phase1_mysql_backup
+
+        res = asyncio.run(
+            import_phase1_mysql_backup(
+                Path(args.backup_root),
+                get_sessionmaker(),
+                ArchiveStore(get_settings().archive_dir),
+                ocr_cache_dir=Path(args.ocr_cache_dir) if args.ocr_cache_dir else None,
+                supplement_manifest=(
+                    Path(args.supplement_manifest) if args.supplement_manifest else None
+                ),
+                fallback_ocr=_ocr_engine(),
+            )
+        )
+        print(
+            "一期镜像吸纳结果:",
+            json.dumps(
+                {
+                    "countries": sorted(res.countries_covered),
+                    "countries_count": len(res.countries_covered),
+                    "sites_created": res.sites_created,
+                    "documents_created": res.documents_created,
+                    "versions_created": res.versions_created,
+                    "skipped_protected": res.skipped_protected,
+                    "skipped_existing_hash": res.skipped_existing_hash,
+                    "states": dict(res.states),
+                    "errors": res.errors,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
     elif args.command == "import-file":
         from datetime import date
 

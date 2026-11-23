@@ -19,6 +19,7 @@ from app.ingestion.clauses import is_article_heading
 from app.ingestion.egov_xml import EgovError, egov_lines, is_egov_xml
 from app.ingestion.ocr_layout import find_gutter
 from app.ingestion.pdf_columns import _segments, column_text
+from app.ingestion.rtf_text import RtfError, is_rtf, rtf_paragraphs
 from app.ingestion.source_layout import (
     is_english_page,
     is_reference_page,
@@ -59,6 +60,8 @@ def detect_kind(content: bytes, mime: str) -> str:
     head = content[:1024].lstrip()
     if head.startswith(b"%PDF"):
         return "pdf"
+    if is_rtf(content):
+        return "rtf"
     if is_docx(content) or is_doc(content):
         return "word"
     if is_egov_xml(content):
@@ -82,8 +85,24 @@ def _decode(content: bytes) -> str:
     raise ParseError("无法识别文本编码(需要 UTF-8)")
 
 
+_PUA_BULLETS = str.maketrans(
+    {
+        "\uf0b7": "•",
+        "\uf0a7": "•",
+        "\uf0d8": "•",
+        "\uf0fc": "✓",
+        "\uf076": "•",
+        "\uf0be": "•",
+        "\uf06c": "•",
+        "\uf0a8": "☐",
+        "\uf0fe": "☑",
+    }
+)
+
+
 def _normalise_pdf_text(text: str) -> str:
-    """统一换行,去掉空行(PDFium 在部分文件里每行后会多出空行,空行不可靠)。"""
+    """统一换行,去掉空行,将常见私有区项目符号映射为标准 Unicode 符号。"""
+    text = text.translate(_PUA_BULLETS)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     return "\n".join(line.rstrip() for line in lines if line.strip())
 
@@ -452,11 +471,18 @@ def text_layer_garbled(pages: list[str], language: str) -> str | None:
     letters = [c for c in text if c.isalpha()]
     if len(letters) < 100:
         return None
+    broken_glyphs = sum(1 for c in text if c == "\ufffd" or "\ue000" <= c <= "\uf8ff")
+    if broken_glyphs >= 8 and broken_glyphs / len(letters) > 0.005:
+        return f"文字层含未映射缺字或私有编码字符({broken_glyphs} 个),疑似字体编码缺失"
     lang = language.split("-")[0].lower()
     if lang == "ar":
         ratio = sum(1 for c in letters if _is_arabic(c)) / len(letters)
         if ratio < 0.6:
             return f"阿拉伯文文件的文字层里阿拉伯字母只占 {ratio:.0%},疑似乱码"
+    elif lang == "bn":
+        ratio = sum(1 for c in letters if "\u0980" <= c <= "\u09ff") / len(letters)
+        if ratio < 0.5:
+            return f"孟加拉文文件的文字层里孟加拉字母只占 {ratio:.0%},疑似旧版非标准字体乱码"
     elif lang in _STOPWORDS:
         latin = sum(1 for c in letters if unicodedata.name(c, "").startswith("LATIN")) / len(
             letters
@@ -468,6 +494,9 @@ def text_layer_garbled(pages: list[str], language: str) -> str | None:
             hit = sum(1 for w in words if w in _STOPWORDS[lang]) / len(words)
             if hit < 0.04:
                 return f"常用词命中率仅 {hit:.1%},疑似乱码"
+        corrupted_tokens = len(re.findall(r"[A-Za-z]+[€\[\]{};~|]+[A-Za-z]+", text))
+        if corrupted_tokens >= 5 and corrupted_tokens / max(len(words), 1) > 0.0005:
+            return f"文字层含旧版识别错乱词({corrupted_tokens} 处),需重新图像识别"
     return None
 
 
@@ -487,5 +516,10 @@ def parse_document(content: bytes, mime: str) -> ParsedDocument:
         try:
             return ParsedDocument(kind, [chr(10).join(word_paragraphs(content))])
         except WordError as exc:
+            raise ParseError(str(exc)) from exc
+    if kind == "rtf":
+        try:
+            return ParsedDocument(kind, [chr(10).join(rtf_paragraphs(content))])
+        except RtfError as exc:
             raise ParseError(str(exc)) from exc
     return ParsedDocument(kind, [_decode(content)])

@@ -149,12 +149,32 @@ const mapArcs = computed(() => {
   return out
 })
 
-const mapHubMarkers = computed(() =>
-  sovereignCountries.value
+const ANCHOR_LABEL_CODES = new Set([
+  'CN', 'SG', 'EU', 'EG', 'SA', 'JP', 'CA', 'MX', 'BR', 'AR', 'AU', 'ZA', 'RU', 'IN',
+])
+
+const mapHubMarkers = computed(() => {
+  const dense = sovereignCountries.value.length > 12
+  const routeCodes = new Set<string>()
+  for (const rt of data.value?.routes || []) {
+    if (rt.source_code) routeCodes.add(rt.source_code)
+    if (rt.recipient_code) routeCodes.add(rt.recipient_code)
+  }
+  const placedLabels: Array<{ x: number; y: number }> = []
+  return sovereignCountries.value
     .map((c) => {
       const hub = getCountryHub(c.country_code)
       if (!hub) return null
       const lbl = getCountryLabelOffset(c.country_code, hub)
+      const isSelected = selectedGeoCode.value === c.country_code
+      let showLabel = !dense || isSelected || ANCHOR_LABEL_CODES.has(c.country_code) || routeCodes.has(c.country_code)
+      if (dense && showLabel && !isSelected) {
+        const collides = placedLabels.some(
+          (p) => Math.abs(p.x - lbl.x) < 76 && Math.abs(p.y - lbl.y) < 16,
+        )
+        if (collides) showLabel = false
+      }
+      if (showLabel) placedLabels.push({ x: lbl.x, y: lbl.y })
       return {
         code: c.country_code,
         name: c.country_name_zh,
@@ -164,10 +184,11 @@ const mapHubMarkers = computed(() =>
         lx: lbl.x,
         ly: lbl.y,
         anchor: lbl.anchor,
+        showLabel,
       }
     })
-    .filter((x): x is NonNullable<typeof x> => x !== null),
-)
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+})
 
 const selectedCountry = computed(() => {
   if (selectedGeoCode.value === 'ALL') return null
@@ -429,12 +450,12 @@ onUnmounted(() => {
 
           <svg class="geo-svg" :viewBox="MAP_VIEWBOX" role="img" aria-label="全球重点法域法规覆盖与跨境流向地图">
             <g stroke="#131e33" stroke-width="1">
-              <line x1="0" y1="100" x2="840" y2="100" />
-              <line x1="0" y1="200" x2="840" y2="200" />
-              <line x1="0" y1="300" x2="840" y2="300" />
-              <line x1="210" y1="0" x2="210" y2="400" />
-              <line x1="420" y1="0" x2="420" y2="400" />
-              <line x1="630" y1="0" x2="630" y2="400" />
+              <line x1="0" y1="110" x2="960" y2="110" />
+              <line x1="0" y1="220" x2="960" y2="220" />
+              <line x1="0" y1="330" x2="960" y2="330" />
+              <line x1="240" y1="0" x2="240" y2="440" />
+              <line x1="480" y1="0" x2="480" y2="440" />
+              <line x1="720" y1="0" x2="720" y2="440" />
             </g>
 
             <path
@@ -451,7 +472,9 @@ onUnmounted(() => {
               :class="{ active: selectedGeoCode === item.code }"
               :d="item.d"
               @click="selectedGeoCode = selectedGeoCode === item.code ? 'ALL' : item.code"
-            />
+            >
+              <title>{{ item.country.country_name_zh }}（{{ item.country.laws_count }} 部法规 · {{ item.country.clauses_count }} 条条文）</title>
+            </path>
 
             <path
               v-for="arc in mapArcs"
@@ -467,15 +490,17 @@ onUnmounted(() => {
               class="hub-group"
               @click="selectedGeoCode = selectedGeoCode === m.code ? 'ALL' : m.code"
             >
+              <title>{{ m.name }}（{{ m.laws }} 部现行法规）</title>
               <circle
                 :cx="m.cx"
                 :cy="m.cy"
-                :r="selectedGeoCode === m.code ? 6 : 4.8"
+                :r="selectedGeoCode === m.code ? 6 : 4.4"
                 :fill="selectedGeoCode === m.code ? '#10b981' : '#38bdf8'"
                 stroke="#ffffff"
-                stroke-width="1.5"
+                stroke-width="1.3"
               />
               <text
+                v-if="m.showLabel"
                 class="map-lbl"
                 :x="m.lx"
                 :y="m.ly"
@@ -511,7 +536,7 @@ onUnmounted(() => {
               </div>
               <div class="map-detail-metrics">
                 <span>在册现行法规 <strong>{{ selectedCountry.laws_count }} 部 / {{ selectedCountry.clauses_count }} 条</strong></span>
-                <span>译文状态 <strong>{{ selectedCountry.is_zh_native ? '中文原文直接可读' : `${selectedCountry.translation_pct ?? 100}%` }}</strong></span>
+                <span>译文状态 <strong>{{ selectedCountry.is_zh_native ? '中文原文直接可读' : (selectedCountry.translated_clauses_count === 0 && selectedCountry.foreign_clauses_count > 0 ? '原文已归档（待精译）' : `${selectedCountry.translation_pct ?? 100}%`) }}</strong></span>
                 <span>知识图谱要素 <strong>{{ selectedCountry.kg_nodes_count }} 个</strong></span>
                 <span>准入与申报表 <strong>{{ selectedCountry.admission_entries_count }} 项 / {{ selectedCountry.official_forms_count }} 套</strong></span>
                 <button type="button" class="dk-inline-reset" @click="go({ path: '/documents', query: { country: selectedCountry.country_code } })">

@@ -55,6 +55,7 @@ interface Regulation {
   version_no: number
   legal_status: string
   clauses_count: number
+  translated_clauses_count?: number
   relations_count?: number
   primary?: boolean
 }
@@ -409,7 +410,7 @@ function columnsOnly(c: Clause): boolean {
 }
 function rowsOf(c: Clause): [string, string][] {
   const body = bodyOf(c)
-  if (originalIsZh.value) return [[body, '']]
+  if (singleColumnOriginal.value) return [[body, '']]
   const stripped = body.length < c.original_text.length ? (c.heading || '').trim() : ''
   return alignBilingualParagraphs(body, c.translated_text || '', stripped)
 }
@@ -451,8 +452,14 @@ const filteredTopics = computed(() =>
   ),
 )
 const pageClauses = computed(() => detail.value?.clauses || [])
-// 原文就是中文的法规（中国法规）不需要中文对照栏
+// 原文就是中文的法规（中国法规）或尚未排期生成中文译文的外文归档法规，采用通栏原文阅读，避免右侧连续空对照格
 const originalIsZh = computed(() => (detail.value?.regulation.language || '').toLowerCase().startsWith('zh'))
+const docHasTranslation = computed(() => {
+  if (originalIsZh.value) return false
+  const cnt = detail.value?.regulation.translated_clauses_count ?? 0
+  return cnt > 0 || pageClauses.value.some((c) => Boolean(c.translated_text))
+})
+const singleColumnOriginal = computed(() => originalIsZh.value || !docHasTranslation.value)
 
 interface Seg {
   text: string
@@ -977,7 +984,14 @@ onMounted(async () => {
                     @input="searchClauses"
                   />
                 </div>
-                <div v-if="!originalIsZh" class="cols-head" data-testid="kb-cols-head"><span>原文</span><span>中文对照（参考译文，以官方原文为准）</span></div>
+                <p
+                  v-if="!originalIsZh && !docHasTranslation && pageClauses.length"
+                  class="orig-only-note"
+                  data-testid="kb-orig-only-note"
+                >
+                  本法规已收录官方原文并完成分条解析，中文参考译文待排期生成；当前可直接全文检索与阅读官方原文。
+                </p>
+                <div v-if="!singleColumnOriginal" class="cols-head" data-testid="kb-cols-head"><span>原文</span><span>中文对照（参考译文，以官方原文为准）</span></div>
                 <article
                   v-for="c in pageClauses"
                   :key="c.clause_id"
@@ -993,12 +1007,12 @@ onMounted(async () => {
                   <div
                     v-else
                     class="parallel-rows"
-                    :class="{ folded: c.original_text.length > LONG && !expanded.has(c.clause_id), single: originalIsZh }"
+                    :class="{ folded: c.original_text.length > LONG && !expanded.has(c.clause_id), single: singleColumnOriginal }"
                     data-testid="kb-aligned"
                   >
                     <template v-for="(row, k) in renderedClauseMap.get(c.clause_id)?.rows || []" :key="k">
                       <div class="p-orig" dir="auto"><span class="legal-text"><template v-for="(seg, si) in row.orig" :key="si"><span v-if="seg.termKey" class="term term-mark" role="button" tabindex="0" :data-term-key="seg.termKey">{{ seg.text }}</span><template v-else>{{ seg.text }}</template></template></span></div>
-                      <div v-if="!originalIsZh" class="p-zh"><span v-if="row.hasZh" class="legal-text"><template v-for="(seg, si) in row.zh" :key="si"><span v-if="seg.termKey" class="term term-mark" role="button" tabindex="0" :data-term-key="seg.termKey">{{ seg.text }}</span><template v-else>{{ seg.text }}</template></template></span><span v-else class="muted">{{ c.scope_note ? '未翻译' : '暂无中文对照' }}</span></div>
+                      <div v-if="!singleColumnOriginal" class="p-zh"><span v-if="row.hasZh" class="legal-text"><template v-for="(seg, si) in row.zh" :key="si"><span v-if="seg.termKey" class="term term-mark" role="button" tabindex="0" :data-term-key="seg.termKey">{{ seg.text }}</span><template v-else>{{ seg.text }}</template></template></span><span v-else class="muted">{{ c.scope_note ? '未翻译' : '暂无中文对照' }}</span></div>
                     </template>
                   </div>
                   <el-button
@@ -1462,6 +1476,16 @@ onMounted(async () => {
 }
 .relation-none {
   margin: 12px 0 0;
+}
+.orig-only-note {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.6;
 }
 .parallel-rows {
   display: grid;

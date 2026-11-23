@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from app.ingestion.clauses import article_number
+from app.ingestion.clauses import article_numbers_covered
 
 MIN_READABLE = 0.90  # 正文字符中属于该语言文字的比例
 MIN_NUMBER_CONTINUITY = 0.90  # 条号 1..最大号 中实际出现的比例
@@ -20,12 +20,27 @@ MIN_NUMBER_CONTINUITY = 0.90  # 条号 1..最大号 中实际出现的比例
 _NUMBERING_NOT_EXPECTED = ("AMENDMENT", "GUIDANCE")
 MIN_TRANSLATED = 0.95  # 需翻译条款中已有合格译文的比例
 
+_CYRILLIC = re.compile(r"[\u0400-\u052F]")
 _SCRIPTS = {
     "ar": re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]"),
     "zh": re.compile(r"[\u4e00-\u9fff]"),
+    "ja": re.compile(r"[\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF66-\uFF9F]"),
+    "ko": re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F\u4E00-\u9FFF\uF900-\uFAFF]"),
+    "th": re.compile(r"[\u0E00-\u0E7F]"),
+    "he": re.compile(r"[\u0590-\u05FF]"),
+    "bn": re.compile(r"[\u0980-\u09FF]"),
+    "ru": _CYRILLIC,
+    "kk": _CYRILLIC,
+    "ky": _CYRILLIC,
+    "uk": _CYRILLIC,
+    "be": _CYRILLIC,
+    "bg": _CYRILLIC,
+    "sr": _CYRILLIC,
+    "mk": _CYRILLIC,
 }
-_LATIN = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]")
+_LATIN = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ\u0100-\u024F\u1E00-\u1EFF]")
 _LETTER = re.compile(r"[^\W\d_]")
+_NON_LETTER = re.compile(r"[\W\d_]+")
 _BROKEN = re.compile(r"[\uFFFD\uE000-\uF8FF\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
@@ -52,6 +67,7 @@ class QualityCard:
 
 
 _FOREIGN_WORD = re.compile(r"[A-Za-z]{3,}")
+_FOREIGN_SHORT_OK = re.compile(r"\b(?:of|in|to|by|or|on|at|as|an|is|be|No)\b")
 _LEGIT_LATIN = re.compile(r"[A-Z]?[a-z]+|[A-Z]{2,6}|(?:[A-Z][a-z]+){2,3}")  # 末一种：CamScanner 这类品牌名
 _LATIN_TOKEN = re.compile(r"[A-Za-z0-9]+")
 _LATIN_WORD_OK = re.compile(r"[A-Z]?[a-z]+|[A-Z]{1,12}|(?:[A-Z][a-z]+){2,3}|\d+[a-z]{0,2}|[A-Z]\d+|\d+")
@@ -62,11 +78,13 @@ def _foreign_line(line: str, script) -> bool:
     (“Customs Systems & Procedures Sector”, “ALEXANDRIA PORT, GATE 14, A3 BUILDING, 4th FLOOR”) or a
     bare number like “D.2.1”. It is content, not a misreading, so it is left out of the measure.
     Garbage (“toXIM WICYOEO”) is not: it needs ordinary words with lower-case letters to pass."""
-    if any(script.match(ch) for ch in line):
+    if script.search(line):
         return False
     tokens = _LATIN_TOKEN.findall(line)
-    letters = sum(1 for ch in line if ch.isascii() and ch.isalpha())
+    letters = len(re.findall(r"[A-Za-z]", line))
     if letters <= 2:
+        return True
+    if len(tokens) == 1 and re.fullmatch(r"[A-Z]?[a-z]{3,}", tokens[0]):
         return True
     return len(tokens) >= 2 and all(_LATIN_WORD_OK.fullmatch(t) for t in tokens) and any(re.search(r"[a-z]", t) for t in tokens)
 
@@ -95,9 +113,10 @@ def _readable_ratio(texts: list[str], language: str) -> float | None:
             scored = _FOREIGN_WORD.sub(
                 lambda m: "" if _LEGIT_LATIN.fullmatch(m.group(0)) else m.group(0), scored
             )
-        found = _LETTER.findall(scored)
-        letters += len(found)
-        good += sum(1 for ch in found if script.match(ch))
+            scored = _FOREIGN_SHORT_OK.sub("", scored)
+        alpha_only = _NON_LETTER.sub("", scored)
+        letters += len(alpha_only)
+        good += len(script.findall(alpha_only))
         broken += len(_BROKEN.findall(text))
     if letters == 0:
         return None
@@ -145,10 +164,20 @@ def assess(
         bad = sum(1 for c in clauses if (r := _readable_ratio([c.text], language)) is not None and r < MIN_READABLE)
         problems.append(f"有 {bad} 段文字可能识别错了")
 
-    numbers = [n for c in clauses if (n := article_number(c.clause_number)) is not None]
+    numbers = [n for c in clauses for n in article_numbers_covered(c.clause_number)]
+    decimal_clauses = sum(
+        1
+        for c in clauses
+        if c.clause_number and re.match(r"^\d+\.\d+", c.clause_number.strip())
+    )
     continuity = None
     duplicates = 0.0
-    if len(numbers) >= 5 and instrument_kind not in _NUMBERING_NOT_EXPECTED:
+    # 章节小数制法典（如 1.1..20.20）不用单层整数 1..N 衡量条号连续率
+    if (
+        len(numbers) >= 5
+        and decimal_clauses < len(numbers) * 2
+        and instrument_kind not in _NUMBERING_NOT_EXPECTED
+    ):
         continuity = len(set(numbers)) / max(numbers)
         duplicates = (len(numbers) - len(set(numbers))) / len(numbers)
         if continuity < MIN_NUMBER_CONTINUITY:
@@ -233,76 +262,123 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
         return []
 
     ver_ids = [v.id for _, v in doc_vers]
-    has_tr = (
-        select(func.count(ClauseTranslation.id))
-        .where(
-            ClauseTranslation.clause_id == Clause.id,
-            ClauseTranslation.is_current.is_(True),
-            ClauseTranslation.quality_check_passed.is_(True),
-            ClauseTranslation.review_status.in_(
-                ("machine_translated", "pending_review", "approved")
-            ),
-        )
-        .correlate(Clause)
-        .scalar_subquery()
-        == 1
+    qualified_ids = set(
+        (
+            await s.scalars(
+                select(ClauseTranslation.clause_id)
+                .where(
+                    ClauseTranslation.is_current.is_(True),
+                    ClauseTranslation.quality_check_passed.is_(True),
+                    ClauseTranslation.review_status.in_(
+                        ("machine_translated", "pending_review", "approved")
+                    ),
+                )
+                .group_by(ClauseTranslation.clause_id)
+                .having(func.count(ClauseTranslation.id) == 1)
+            )
+        ).all()
     )
     all_clause_rows = (
         await s.execute(
             select(
+                Clause.id,
                 Clause.version_id,
                 Clause.clause_number,
                 Clause.original_text,
                 Clause.ordinal,
                 Clause.page_start,
-                has_tr,
             )
             .where(Clause.version_id.in_(ver_ids))
             .order_by(Clause.version_id, Clause.ordinal)
         )
     ).all()
     by_ver: dict = {}
-    for vid, n, t, o, pg, c in all_clause_rows:
-        by_ver.setdefault(vid, []).append((n, t, o, pg, bool(c)))
+    for cid, vid, n, t, o, pg in all_clause_rows:
+        by_ver.setdefault(vid, []).append((n, t, o, pg, cid in qualified_ids))
 
-    out = []
-    for doc, version in doc_vers:
-        rows = by_ver.get(version.id, [])
-        inside = scoped(doc.intake_scope, version.id)
-        flags = None if inside is None else [o in inside for _, _, o, _, _ in rows]
-        card = assess(
-            [
-                ClauseSample(n, t, bool(c) or is_numeric_only(t) or is_short_fragment(t))
-                for n, t, _, _, c in rows
-            ],
+    doc_snapshots = [
+        (
+            doc.id,
+            doc.country_code,
+            doc.title,
             doc.language,
-            needs_translation=not doc.language.lower().startswith("zh"),
-            instrument_kind=doc.instrument_kind,
-            in_scope=flags,
+            doc.instrument_kind,
+            doc.intake_scope,
+            version.id,
+            version.text_source,
+            version.review_status,
+            version.check_note,
+            version.legal_status,
         )
-        if flags is not None:
-            done = sum(1 for (_, _, _, _, c), keep in zip(rows, flags, strict=True) if keep and c)
-            card.scope_note += f"，已有中文 {done} 条"
-        bad_pages = (
-            [pg for _, t, _, pg, _ in rows if pg and (r := _readable_ratio([t], doc.language)) is not None and r < MIN_READABLE]
-            if card.readable is not None and card.readable < MIN_READABLE
-            else []
-        )
-        todo_items = todo(card, bad_pages, version.text_source == "ocr")
-        # 扫描件还没核对完：和法规文档页说法一致，算“还要处理”
-        if version.text_source == "ocr" and version.review_status != "approved" and not any(t["action"] == "review" for t in todo_items):
-            todo_items.insert(0, {"text": version.check_note or "扫描件还没对照原文核对", "action": "review", "label": "去核对"})
-        out.append(
-            {
-                "document_id": str(doc.id),
-                "todo": todo_items,
-                "country": doc.country_code,
-                "title": doc.title,
-                "language": doc.language,
-                "legal_status": version.legal_status,
-                "card": card,
-            }
-        )
+        for doc, version in doc_vers
+    ]
+
+    def _compute_cards_sync() -> list[dict]:
+        built_out = []
+        for (
+            doc_id,
+            cc_code,
+            title_val,
+            lang_val,
+            inst_kind,
+            intake_sc,
+            ver_id,
+            txt_src,
+            rev_st,
+            chk_note,
+            leg_st,
+        ) in doc_snapshots:
+            rows = by_ver.get(ver_id, [])
+            inside = scoped(intake_sc, ver_id)
+            flags = None if inside is None else [o in inside for _, _, o, _, _ in rows]
+            card = assess(
+                [
+                    ClauseSample(n, t, bool(c) or is_numeric_only(t) or is_short_fragment(t))
+                    for n, t, _, _, c in rows
+                ],
+                lang_val,
+                needs_translation=not lang_val.lower().startswith("zh"),
+                instrument_kind=inst_kind,
+                in_scope=flags,
+            )
+            if flags is not None:
+                done = sum(1 for (_, _, _, _, c), keep in zip(rows, flags, strict=True) if keep and c)
+                card.scope_note += f"，已有中文 {done} 条"
+            bad_pages = (
+                [
+                    pg
+                    for _, t, _, pg, _ in rows
+                    if pg and (r := _readable_ratio([t], lang_val)) is not None and r < MIN_READABLE
+                ]
+                if card.readable is not None and card.readable < MIN_READABLE
+                else []
+            )
+            todo_items = todo(card, bad_pages, txt_src == "ocr")
+            # 扫描件还没核对完：和法规文档页说法一致，算“还要处理”
+            if (
+                txt_src == "ocr"
+                and rev_st != "approved"
+                and not any(t["action"] == "review" for t in todo_items)
+            ):
+                todo_items.insert(
+                    0, {"text": chk_note or "扫描件还没对照原文核对", "action": "review", "label": "去核对"}
+                )
+            built_out.append(
+                {
+                    "document_id": str(doc_id),
+                    "todo": todo_items,
+                    "country": cc_code,
+                    "title": title_val,
+                    "language": lang_val,
+                    "legal_status": leg_st,
+                    "card": card,
+                }
+            )
+        return built_out
+
+    import asyncio
+
+    out = await asyncio.to_thread(_compute_cards_sync)
     if len(_CARDS_CACHE) > 16:
         _CARDS_CACHE.clear()
     _CARDS_CACHE[stamp] = copy.deepcopy(out)

@@ -337,15 +337,23 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
             adm_entries_by_cc[e.country_code] = adm_entries_by_cc.get(e.country_code, 0) + 1
 
     quality_unpassed = 0
+    translation_pending_docs = 0
     try:
         from app.ingestion.quality_card import cards_in
 
         q_cards = await cards_in(session)
-        quality_unpassed = sum(
-            1 for r in q_cards if not (r["card"].passed and not r.get("todo"))
-        )
+        for r in q_cards:
+            todos = r.get("todo") or []
+            has_parse_issue = any(t.get("action") != "translate" for t in todos) or (
+                not r["card"].passed and not todos
+            )
+            if has_parse_issue:
+                quality_unpassed += 1
+            elif any(t.get("action") == "translate" for t in todos):
+                translation_pending_docs += 1
     except Exception:  # noqa: BLE001
         quality_unpassed = 0
+        translation_pending_docs = 0
 
     built = {
         "docs_by_cc": docs_by_cc,
@@ -363,6 +371,7 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
         "whitepapers_outdated": whitepapers_outdated,
         "adm_entries_by_cc": adm_entries_by_cc,
         "quality_unpassed": quality_unpassed,
+        "translation_pending_docs": translation_pending_docs,
     }
     _KB_POSTURE_CACHE["posture"] = (kb_mark, built)
     return built
@@ -776,6 +785,7 @@ async def cockpit_overview(
             "attention_sites_total": attention_sites_total,
             "pending_updates": pending_updates,
             "quality_unpassed": quality_unpassed,
+            "translation_pending_docs": kb.get("translation_pending_docs", 0),
             "whitepapers_outdated": whitepapers_outdated,
             "audit_events_7d": audit_7d,
         },
