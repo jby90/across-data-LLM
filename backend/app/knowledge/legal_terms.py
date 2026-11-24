@@ -197,11 +197,15 @@ def is_stopword_term(source_term: str | None, target_zh: str | None = None) -> b
     """Reject English function words / prepositions, footnote fragments, and single-char noise."""
     src = " ".join((source_term or "").strip().split())
     tgt = (target_zh or "").strip()
-    if not src:
+    if not src or len(src) > 65:
         return True
     if src.casefold() in EN_STOPWORDS:
         return True
     if len(src) == 1 and src.isascii():
+        return True
+    if re.match(r"^(?:\([0-9A-Za-z]+\)|\d+[.)])\s+", src):
+        return True
+    if re.search(r"\bCompilation\s+(?:No\.?|date)\b", src, re.I):
         return True
     if re.match(r"^(?:of|in|for|to|from|by|with|under|into)\s+(?:a|an|the)\b", src, re.I):
         return True

@@ -498,7 +498,12 @@ async def _adequacy(session: AsyncSession, source: str, recipient: str) -> dict 
     return None
 
 
-_DATA_LAW = re.compile(r"个人数据|个人信息|数据保护|personal data|données à caractère personnel|البيانات الشخصية", re.IGNORECASE)
+_DATA_LAW = re.compile(
+    r"个人数据|个人信息|数据保护|数据隐私|隐私保护|隐私法|信息隐私|"
+    r"personal data|personal information|data protection|data privacy|privacy act|protection of privacy|"
+    r"données à caractère personnel|protección de datos|proteção de dados|البيانات الشخصية",
+    re.IGNORECASE,
+)
 _SUBSIDIARY = re.compile(r"条例|法令|决定|决议|指南|指引|通函|regulation|décret|guideline|circular", re.IGNORECASE)
 _CONDITIONS = [
     (re.compile(r"明确同意|同意"), "取得数据主体明确同意"),
@@ -688,28 +693,73 @@ async def main_data_law(session: AsyncSession, country: str | None) -> str:
     rows = (
         await session.execute(
             sql(
-                f"""select coalesce(d.title_zh, d.title), count(k.id), d.document_type
+                f"""select coalesce(d.title_zh, d.title), count(k.id), d.document_type,
+                           coalesce(d.title, ''),
+                           sum(case when coalesce(k.original_text, '') ~* 'personal data|datos personales|dados pessoais|données (à caractère )?personnelles|персональн\\w+ данн|البيانات الشخصية' then 1 else 0 end)
                    from documents d join document_versions v on v.document_id=d.id and v.state='parsed'
                    join clauses k on k.version_id=v.id
                    where d.country_code=:c and d.relevance='relevant'
                      {_SQL_ELIGIBLE_DOC_VER_CLAUSE}
-                   group by 1, 3"""
+                   group by 1, 3, 4"""
             ),
             {"c": country},
         )
     ).all()
-    best = [
-        (t, n, dt)
-        for t, n, dt in rows
-        if _DATA_LAW.search(t or "")
-        and not re.search(
-            r"条例|法令|决定|决议|指南|规章|修订|办法|规定|公告|通知|勘误|豁免令|命令|出境|跨境|regulation|notification|order",
-            re.sub(r"修订版|现行合订本", "", t or ""),
-            re.I,
+    if not rows:
+        return ""
+
+    _non_statute_re = re.compile(
+        r"指南|指引|规章|办法|公告|通知|通函|勘误|豁免令|命令|申请表|声明表|核准|认证程序|实施细则|实施条例|调查规则|若干条款|出境|跨境|"
+        r"guideline|notification|circular|implementing rules|form\b",
+        re.I,
+    )
+    _subnational_or_narrow_re = re.compile(
+        r"宪法修正案|现代化的法案|消费者数据权利|反垃圾邮件|无线电|机动车|电信法|电信（重组）|金融中心|公平审判|"
+        r"阿尔伯塔|BC省|首都领地|塔斯马尼亚|昆士兰|北领地|2014年隐私与数据保护法|1998年隐私与个人信息保护法",
+        re.I,
+    )
+    _decree_or_reg_re = re.compile(r"条例|法令|决定|决议|regulation|order|decree", re.I)
+    _cyber_fallback_re = re.compile(r"网络安全|网络信息安全|电子犯罪|信息犯罪|数字法典|信息和通信技术|电子交易", re.I)
+
+    candidates: list[tuple[tuple, str]] = []
+    for t, n, dt, orig_t, pd_hits in rows:
+        combined = f"{t or ''} {orig_t or ''}"
+        cleaned_t = re.sub(r"修订版|现行合订本", "", t or "")
+        if _non_statute_re.search(cleaned_t):
+            continue
+        is_data_title = bool(_DATA_LAW.search(combined))
+        pd_ratio = (int(pd_hits or 0) / max(1, int(n or 1)))
+        is_data_body = dt == "LAW" and int(pd_hits or 0) >= 8 and pd_ratio >= 0.25
+        is_cyber_law = dt == "LAW" and bool(_cyber_fallback_re.search(cleaned_t))
+        if not (is_data_title or is_data_body or is_cyber_law):
+            continue
+
+        is_narrow = bool(_subnational_or_narrow_re.search(cleaned_t))
+        is_decree = bool(_decree_or_reg_re.search(cleaned_t))
+        if is_data_title and dt == "LAW" and not is_decree and not is_narrow:
+            tier = 0
+        elif is_data_title and not is_narrow:
+            tier = 1
+        elif is_data_body and not is_narrow:
+            tier = 2
+        elif is_data_title:
+            tier = 3
+        else:
+            tier = 4
+        sort_key = (
+            tier,
+            dt != "LAW",
+            is_narrow,
+            bool(re.fullmatch(r"隐私法", (t or "").strip())),
+            -int(n or 0),
+            not bool(re.search(r"第\s*\d+\s*号|\d{4}年", t or "")),
         )
-    ]
-    best.sort(key=lambda x: (x[2] != "LAW", not re.search(r"第\s*\d+\s*号", x[0] or ""), -x[1]))  # 正式法律与带编号名称优先
-    return law_name(best[0][0], country_code=country) if best else ""
+        candidates.append((sort_key, t))
+
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: x[0])
+    return law_name(candidates[0][1], country_code=country)
 
 
 # 中国出境的主依据（用户 11.11 定）：个人信息保护法第三十八、三十九条，加上所走路径的办法

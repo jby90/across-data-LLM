@@ -1998,34 +1998,47 @@ async def extract_knowledge_for_country(
     result["model_usage"] = usage | {
         "calls_without_reported_usage": usage["requests"] - usage["responses_with_usage"]
     }
+    def _clean_jsonb(val):
+        if isinstance(val, str):
+            return re.sub(r"[\x00\ud800-\udfff]", "", val)
+        if isinstance(val, list):
+            return [_clean_jsonb(x) for x in val]
+        if isinstance(val, dict):
+            return {_clean_jsonb(k): _clean_jsonb(v) for k, v in val.items()}
+        return val
+
     for cache in result.pop("_clause_cache_records", []):
+        clean_cache = _clean_jsonb(cache)
         session.add(
             KnowledgeAuditRecord(
                 target_type="clauses",
-                target_id=uuid.UUID(cache["clause_id"]),
+                target_id=uuid.UUID(clean_cache["clause_id"]),
                 action="kg_clause_result",
-                payload=cache,
-                content_hash=payload_hash(cache),
+                payload=clean_cache,
+                content_hash=payload_hash(clean_cache),
             )
         )
     for record in result.pop("_candidate_evaluations", []):
+        clean_rec = _clean_jsonb(record)
         session.add(
             KnowledgeAuditRecord(
                 target_type="clauses",
-                target_id=uuid.UUID(record["clause_id"]),
+                target_id=uuid.UUID(clean_rec["clause_id"]),
                 action="kg_candidate_evaluation",
-                payload=record,
-                content_hash=payload_hash(record),
+                payload=clean_rec,
+                content_hash=payload_hash(clean_rec),
             )
         )
+    result = _clean_jsonb(result)
     result["batch_id"] = str(uuid.uuid4())
+    clean_country_payload = _clean_jsonb({"country_code": cc, **result})
     session.add(
         KnowledgeAuditRecord(
             target_type="kg_country",
             target_id=uuid.uuid5(uuid.NAMESPACE_URL, "cyshuhe:kg:" + cc),
             action="graph_rebuild_result",
-            payload={"country_code": cc, **result},
-            content_hash=payload_hash({"country_code": cc, **result}),
+            payload=clean_country_payload,
+            content_hash=payload_hash(clean_country_payload),
         )
     )
     await session.commit()

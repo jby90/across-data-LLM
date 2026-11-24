@@ -572,14 +572,15 @@ def verify_translation(
             trans_folded = " ".join(trans_clean.casefold().split())
             src_folded = " ".join(h["source_term"].casefold().split())
             canon_folded = " ".join((h.get("canonical_source") or h["source_term"]).casefold().split())
-            if (h.get("target_zh") or "").isascii():
+            target_unrendered = not any("\u4e00" <= ch <= "\u9fff" for ch in (h.get("target_zh") or ""))
+            if target_unrendered:
                 ok = bool(trans_clean) and (src_folded in trans_folded or canon_folded in trans_folded)
             elif src_folded not in trans_folded and canon_folded not in trans_folded:
                 ok = False
         item = dict(h, matched_in_translation=ok)
         updated_hits.append(item)
         if not ok:
-            if h.get("preserve_original") and (h.get("target_zh") or "").isascii():
+            if h.get("preserve_original") and not any("\u4e00" <= ch <= "\u9fff" for ch in (h.get("target_zh") or "")):
                 issues.append(
                     f"术语须保留原词: 译为中文时须紧跟括号写出原词 '{h['target_zh']}'（如 '（{h['target_zh']}）'）"
                 )
@@ -729,7 +730,7 @@ def _build_translation_prompts(
                 f"；出处: {h.get('source_reference', '')}"
             )
             if h.get("preserve_original"):
-                if (h.get("target_zh") or "").isascii():
+                if not any("\u4e00" <= ch <= "\u9fff" for ch in (h.get("target_zh") or "")):
                     sys_lines.append(
                         f"该词在本法规中有专门定义，译为中文时须在紧随其后的括号内原样保留外文原词“{h['target_zh']}”"
                         f"（如“影响（{h['target_zh']}）”），不得省略原词“{h['target_zh']}”，也不得不译中文直接裸写外文。"
@@ -764,7 +765,7 @@ def _build_translation_prompts(
     if glossary_hits:
         must_zh = ", ".join(
             f"中文译名（{h['target_zh']}）"
-            if h.get("preserve_original") and (h.get("target_zh") or "").isascii()
+            if h.get("preserve_original") and not any("\u4e00" <= ch <= "\u9fff" for ch in (h.get("target_zh") or ""))
             else f"'{h['target_zh']}'"
             for h in glossary_hits
         )

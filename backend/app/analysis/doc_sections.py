@@ -167,6 +167,17 @@ def _extract_due_from_advice(adv: str) -> str:
     return res
 
 
+_NON_DPA_NODE_RE = re.compile(
+    r"信息系统|法律数据库|法律法规数据库|规范性法律文件|统一法律|中央法律|法规门户|门户网站|公报|统计局|统计所|"
+    r"灾难恢复中心|金融中心|法律和司法委员会|欧盟委员会|议会|常设委员会|惩戒委员会|咨询委员会|"
+    r"^(?:任何|款所述|本款|上述|前款|保护委员会$|数据保护监管机构$|认证委员会$)"
+)
+_DPA_PRIORITY_RE = re.compile(
+    r"个人数据|个人信息|数据保护|数据隐私|隐私保护|国家隐私|信息与自由|信息专员|信息监管局|"
+    r"PDPC|INPDP|CNDP|CNIL|BfDI|ICO|EDPB|Garante|AEPD|UODO|IMY|APD|PPC|PIPC|ANPD|SDAIA|KVKK|NDPC|OPC|PPA|AAIP"
+)
+
+
 async def main_regulator(session: AsyncSession, country: str | None) -> str:
     """The supervisory body the country's laws name most often (its one proper name)."""
     if not country:
@@ -174,15 +185,15 @@ async def main_regulator(session: AsyncSession, country: str | None) -> str:
     from app.knowledge import whitepaper_graph as W
 
     nodes = await W._regulators(session, country)
-    nodes = [n for n in nodes if re.search(r"数据|信息", n.name_zh or "") and not re.search(r"统计局|统计所", n.name_zh or "")]
+    nodes = [
+        n
+        for n in nodes
+        if re.search(r"数据|信息|隐私", n.name_zh or "")
+        and not _NON_DPA_NODE_RE.search((n.name_zh or "").strip())
+    ]
     nodes.sort(
         key=lambda n: (
-            0
-            if re.search(
-                r"个人数据|个人信息|数据保护|信息与自由|隐私保护|PDPC|INPDP|CNDP|CNIL|BfDI|ICO|EDPB|Garante|AEPD|UODO|IMY|APD|PPC|PIPC|ANPD|SDAIA|KVKK|NDPC",
-                n.name_zh or "",
-            )
-            else 1,
+            0 if _DPA_PRIORITY_RE.search(n.name_zh or "") else 1,
             -W._MENTIONS.get(n.id, 0),
         )
     )
@@ -277,6 +288,28 @@ _EU_SUPERVISORS: dict[str, tuple[str, str]] = {
 _EU_EEA_CODES = set(_EU_SUPERVISORS) | {"PL", "PT", "CZ", "HU", "NO"}
 
 
+_STATUTORY_SUPERVISORS: dict[str, str] = {
+    "AR": "阿根廷公共信息获取局（AAIP）",
+    "AU": "澳大利亚信息专员公署（OAIC）",
+    "BD": "孟加拉国国家网络安全局（NCSA）及电信监管委员会（BTRC）",
+    "CA": "加拿大联邦隐私专员公署（OPC）及省级信息与隐私监管机关",
+    "CO": "哥伦比亚工商监管局（SIC）个人数据保护署",
+    "ID": "印度尼西亚通信与数字部个人数据保护监管机关",
+    "IL": "以色列隐私保护局（PPA）",
+    "KG": "吉尔吉斯斯坦内阁下属个人数据保护署及数字发展部",
+    "KR": "韩国个人信息保护委员会（PIPC）",
+    "KW": "科威特通信与信息技术监管局（CITRA）",
+    "KZ": "哈萨克斯坦数字发展、创新和航空航天工业部信息安全委员会",
+    "MX": "墨西哥联邦个人数据保护主管机关（反腐败与良政秘书处 / 原 INAI）",
+    "OM": "阿曼交通、通信和信息技术部（MTCIT）",
+    "PE": "秘鲁国家个人数据保护局（ANPD）",
+    "PK": "巴基斯坦联邦政府指定电子与数据执法机关及电信管理局（PTA）",
+    "QA": "卡塔尔国家网络安全局（NCSA）国家数据隐私合规办公室",
+    "SA": "沙特数据与人工智能局（SDAIA）",
+    "VN": "越南公安部网络安全与高科技犯罪防范局（A05）",
+}
+
+
 async def receiving_law(session: AsyncSession, country: str | None, clauses: list | None = None) -> list[list[str]]:
     """The four things a transfer impact assessment states about the receiving country, from the
     library: its data protection law, its supervisory body, the law on public authorities' access
@@ -321,7 +354,7 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
                 continue
             if re.search(r"惩戒委员会|承租人|出租人|发动机功率|空载重量|无权要求赔偿", zh or ""):
                 continue
-            if not number or clause_gate.why_unusable(zh, title, original) or doc_rules._OUTBOUND.search(zh or ""):
+            if not number or clause_gate.why_unusable(zh, title, original) or doc_rules._OUTBOUND.search(zh or "") or doc_rules.not_a_basis({"quote_zh": zh}):
                 continue
             m = pat.search(zh or "")
             if m:
@@ -339,19 +372,23 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
     access_txt = first(_ACCESS)
     remedy_txt = first(_REMEDY_EXT) or first(_REMEDY)
 
-    if not body:  # 图谱里没有监管机构节点：取条文里最常点名的机构
+    if not body:  # 图谱里没有监管机构节点：取条文里最常点名的专门数据/隐私/网安监管机构
         counts: dict[str, int] = {}
         for _, _, zh, _, _, _, _ in rows:
             for m in re.findall(
-                r"国家[一-鿿]{2,8}部门|(?:国家|联邦)?[一-鿿]{2,16}(?:委员会|中心|管理局|监管局|保护局|专员公署|专员)",
+                r"(?:国家|联邦)?(?:个人数据|个人信息|数据保护|数据隐私|信息保护|隐私保护|国家隐私|信息监管|网络安全|通信与信息技术)(?:[一-鿿]{0,8})(?:委员会|中心|管理局|监管局|保护局局长|保护局|办公室|专员公署|专员|署|局)",
                 zh or "",
             ):
-                cleaned_m = re.sub(r"^(?:是指|系指|指|由|向|报|经|归|及|与|或|该|本)+", "", m).strip()
-                if len(cleaned_m) >= 4:
+                cleaned_m = re.sub(r"^(?:是指|系指|指|由|向|报|经|归|及|与|或|该|本|任何|款所述|上述)+", "", m).strip()
+                if len(cleaned_m) >= 5 and not _NON_DPA_NODE_RE.search(cleaned_m):
                     counts[cleaned_m] = counts.get(cleaned_m, 0) + 1
         body = max(counts, key=counts.get) if counts else ""
 
-    if country in _EU_EEA_CODES and (not rows or not access_txt or not remedy_txt or not body):
+    if country in _STATUTORY_SUPERVISORS and (not body or not _DPA_PRIORITY_RE.search(body)):
+        body = _STATUTORY_SUPERVISORS[country]
+
+    safe_law = (law or "").replace("《", "〈").replace("》", "〉")
+    if country in _EU_EEA_CODES:
         eu_law, eu_body = _EU_SUPERVISORS.get(
             country,
             (
@@ -359,11 +396,12 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
                 f"{NAMES.get(country, country)}国家数据保护独立监管机关（受欧洲数据保护委员会 EDPB 协同监督）",
             ),
         )
-        if law and "GDPR" not in law and "通用数据保护条例" not in law:
-            law_disp = f"{eu_law}（本国在库立法：《{law}》）"
+        if safe_law and "GDPR" not in safe_law and "通用数据保护条例" not in safe_law:
+            law_disp = f"{eu_law}（本国在库立法：《{safe_law}》）"
         else:
-            law_disp = f"《{law}》" if law else eu_law
-        body = body or eu_body
+            law_disp = f"《{safe_law}》" if safe_law else eu_law
+        if country in _EU_SUPERVISORS or not body or not _DPA_PRIORITY_RE.search(body):
+            body = eu_body
         if not access_txt:
             access_txt = (
                 "《欧盟通用数据保护条例》（GDPR）第 6 条第 1 款 (c)/(e) 项、第 23 条及第 48 条："
@@ -406,7 +444,7 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
                 }
             )
     else:
-        law_disp = f"《{law}》" if law else DRAFT_BLANK
+        law_disp = f"《{safe_law}》" if safe_law else DRAFT_BLANK
 
     result_rows = [
         ["数据保护法律", law_disp],

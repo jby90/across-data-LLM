@@ -185,3 +185,38 @@ def test_clause_gate_blocks_untranslated_foreign_scripts_outside_parentheses():
 
     bad_untranslated_ko = "数据控制者应当遵守 개인정보 보호법 제28조의8 에 따른 국외 이전 요건规定。"
     assert clause_gate.why_unusable(bad_untranslated_ko, "韩国个人信息保护法", "...") == "夹着大段未译的外文"
+
+
+def test_non_ascii_preserve_original_terms_and_stopword_headers():
+    from app.knowledge import legal_terms, translator
+
+    assert legal_terms.is_stopword_term("(3) If the Commissioner is satisfied")
+    assert legal_terms.is_stopword_term("Compilation No. 103 Compilation date")
+    assert not legal_terms.is_stopword_term("personal data", "个人数据")
+
+    passed, issues, _ = translator.verify_translation(
+        "يجب على المرسل إليه حفظ السجلات لمدة 5 سنوات.",
+        "收件人（المرسل إليه）应当将相关记录保存 5 年。",
+        [
+            {
+                "concept_code": "addressee",
+                "source_term": "المرسل إليه",
+                "target_zh": "المرسل إليه",
+                "preserve_original": True,
+            }
+        ],
+    )
+    assert passed, f"Unexpected issues for Arabic preserve_original term: {issues}"
+
+
+def test_receiving_law_regulator_filter_and_privacy_data_law_patterns():
+    assert doc_rules._DATA_LAW.search("1981年隐私保护法 (5741-1981)")
+    assert doc_rules._DATA_LAW.search("2012年数据隐私法（第10173号共和国法案）")
+    assert doc_rules._DATA_LAW.search("1988年隐私法")
+    assert doc_sections._NON_DPA_NODE_RE.search("阿根廷司法部国家立法信息系统 InfoLEG")
+    assert doc_sections._NON_DPA_NODE_RE.search("以色列司法部隐私保护局官方法规门户")
+    assert doc_sections._NON_DPA_NODE_RE.search("任何专员")
+    assert doc_sections._NON_DPA_NODE_RE.search("款所述委员会")
+    assert not doc_sections._NON_DPA_NODE_RE.search("以色列隐私保护局（PPA）")
+    assert doc_sections._STATUTORY_SUPERVISORS["IL"] == "以色列隐私保护局（PPA）"
+    assert doc_sections._EU_SUPERVISORS["PL"][1] == "波兰个人数据保护局局长（UODO）"
