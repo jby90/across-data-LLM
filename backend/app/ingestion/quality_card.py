@@ -247,7 +247,19 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
         .subquery()
     )
     query = (
-        select(Document, DocumentVersion)
+        select(
+            Document.id,
+            Document.country_code,
+            Document.title,
+            Document.language,
+            Document.instrument_kind,
+            Document.intake_scope,
+            DocumentVersion.id,
+            DocumentVersion.text_source,
+            DocumentVersion.review_status,
+            DocumentVersion.check_note,
+            DocumentVersion.legal_status,
+        )
         .join(DocumentVersion, DocumentVersion.document_id == Document.id)
         .join(
             latest,
@@ -259,11 +271,11 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
     )
     if country:
         query = query.where(Document.country_code == country.upper())
-    doc_vers = (await s.execute(query)).all()
-    if not doc_vers:
+    doc_snapshots = list((await s.execute(query)).all())
+    if not doc_snapshots:
         return []
 
-    ver_ids = [v.id for _, v in doc_vers]
+    ver_ids = [row[6] for row in doc_snapshots]
     qualified_ids = set(
         (
             await s.scalars(
@@ -297,23 +309,7 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
     by_ver: dict = {}
     for cid, vid, n, t, o, pg in all_clause_rows:
         by_ver.setdefault(vid, []).append((n, t, o, pg, cid in qualified_ids))
-
-    doc_snapshots = [
-        (
-            doc.id,
-            doc.country_code,
-            doc.title,
-            doc.language,
-            doc.instrument_kind,
-            doc.intake_scope,
-            version.id,
-            version.text_source,
-            version.review_status,
-            version.check_note,
-            version.legal_status,
-        )
-        for doc, version in doc_vers
-    ]
+    del all_clause_rows, qualified_ids
 
     def _compute_cards_sync() -> list[dict]:
         built_out = []
@@ -391,7 +387,11 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
     import asyncio
 
     out = await asyncio.to_thread(_compute_cards_sync)
-    if len(_CARDS_CACHE) > 16:
+    by_ver.clear()
+    doc_snapshots.clear()
+    for k in [k for k in _CARDS_CACHE if k[0] == cc_key]:
+        _CARDS_CACHE.pop(k, None)
+    if len(_CARDS_CACHE) > 6:
         _CARDS_CACHE.clear()
     _CARDS_CACHE[stamp] = copy.deepcopy(out)
     return out

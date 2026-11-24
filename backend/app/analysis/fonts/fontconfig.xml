@@ -5,8 +5,23 @@
   <dir>/usr/local/share/fonts/cyshuhe</dir>
   <dir prefix="relative">inter</dir>
   <dir prefix="relative">notosanssc</dir>
+  <dir prefix="relative">notosanskr</dir>
+  <dir prefix="relative">notosansthai</dir>
+  <dir prefix="relative">notosansbengali</dir>
+  <dir prefix="relative">notosanshebrew</dir>
   <dir prefix="relative">notonaskharabic</dir>
   <dir>/usr/share/fonts</dir>
+  <alias>
+    <family>Microsoft YaHei</family>
+    <prefer>
+      <family>Noto Sans SC</family>
+      <family>Noto Sans KR</family>
+      <family>Noto Sans Thai</family>
+      <family>Noto Sans Bengali</family>
+      <family>Noto Sans Hebrew</family>
+      <family>Noto Naskh Arabic</family>
+    </prefer>
+  </alias>
   <alias>
     <family>Times New Roman</family>
     <prefer><family>Liberation Serif</family></prefer>

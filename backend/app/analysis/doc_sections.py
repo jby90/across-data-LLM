@@ -177,7 +177,12 @@ async def main_regulator(session: AsyncSession, country: str | None) -> str:
     nodes = [n for n in nodes if re.search(r"数据|信息", n.name_zh or "") and not re.search(r"统计局|统计所", n.name_zh or "")]
     nodes.sort(
         key=lambda n: (
-            0 if re.search(r"个人数据|个人信息|数据保护|PDPC|INPDP|CNDP", n.name_zh or "") else 1,
+            0
+            if re.search(
+                r"个人数据|个人信息|数据保护|信息与自由|隐私保护|PDPC|INPDP|CNDP|CNIL|BfDI|ICO|EDPB|Garante|AEPD|UODO|IMY|APD|PPC|PIPC|ANPD|SDAIA|KVKK|NDPC",
+                n.name_zh or "",
+            )
+            else 1,
             -W._MENTIONS.get(n.id, 0),
         )
     )
@@ -264,6 +269,7 @@ _EU_SUPERVISORS: dict[str, tuple[str, str]] = {
     "ES": ("欧盟《通用数据保护条例》（GDPR，Regulation (EU) 2016/679）及西班牙《个人数据保护与数字权利保障组织法》", "西班牙数据保护局（AEPD）"),
     "SE": ("欧盟《通用数据保护条例》（GDPR，Regulation (EU) 2016/679）", "瑞典隐私保护局（IMY）"),
     "BE": ("欧盟《通用数据保护条例》（GDPR，Regulation (EU) 2016/679）", "比利时数据保护局（APD/GBA）"),
+    "PL": ("欧盟《通用数据保护条例》（GDPR，Regulation (EU) 2016/679）及波兰《个人数据保护法》", "波兰个人数据保护局局长（UODO）"),
     "AT": ("欧盟《通用数据保护条例》（GDPR，Regulation (EU) 2016/679）", "奥地利数据保护局（DSB）"),
     "IE": ("欧盟《通用数据保护条例》（GDPR，Regulation (EU) 2016/679）", "爱尔兰数据保护委员会（DPC）"),
     "EU": ("欧盟《通用数据保护条例》（GDPR，Regulation (EU) 2016/679）", "欧洲数据保护委员会（EDPB）及成员国独立监管机关"),
@@ -336,11 +342,16 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
     if not body:  # 图谱里没有监管机构节点：取条文里最常点名的机构
         counts: dict[str, int] = {}
         for _, _, zh, _, _, _, _ in rows:
-            for m in re.findall(r"国家[一-鿿]{2,6}部门|[一-鿿]{2,10}(?:委员会|中心|管理局|监管局)", zh or ""):
-                counts[m] = counts.get(m, 0) + 1
+            for m in re.findall(
+                r"国家[一-鿿]{2,8}部门|(?:国家|联邦)?[一-鿿]{2,16}(?:委员会|中心|管理局|监管局|保护局|专员公署|专员)",
+                zh or "",
+            ):
+                cleaned_m = re.sub(r"^(?:是指|系指|指|由|向|报|经|归|及|与|或|该|本)+", "", m).strip()
+                if len(cleaned_m) >= 4:
+                    counts[cleaned_m] = counts.get(cleaned_m, 0) + 1
         body = max(counts, key=counts.get) if counts else ""
 
-    if not rows and country in _EU_EEA_CODES:
+    if country in _EU_EEA_CODES and (not rows or not access_txt or not remedy_txt or not body):
         eu_law, eu_body = _EU_SUPERVISORS.get(
             country,
             (
@@ -348,19 +359,18 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
                 f"{NAMES.get(country, country)}国家数据保护独立监管机关（受欧洲数据保护委员会 EDPB 协同监督）",
             ),
         )
-        law_disp = eu_law
-        body = eu_body
-        access_txt = (
-            "《欧盟通用数据保护条例》（GDPR）第 6 条第 1 款 (c)/(e) 项、第 23 条及第 48 条："
-            "公权力机关调取个人数据须具备欧盟或成员国成文法明确授权，严格受民主社会必要性与比例原则约束；"
-            "非经司法协助条约等国际协定，第三国法院裁决或行政调取指令在欧盟境内不具有直接强制执行力。"
-        )
-        remedy_txt = (
-            f"《欧盟通用数据保护条例》（GDPR）第 77 条至第 79 条及第 82 条："
-            f"数据主体有权向{eu_body}提起行政投诉，有权针对监管决定或数据控制者、处理者的侵权处理行为向成员国管辖法院提起有效司法救济，并依法请求物质或精神损害赔偿。"
-        )
-        table_cited.extend(
-            [
+        if law and "GDPR" not in law and "通用数据保护条例" not in law:
+            law_disp = f"{eu_law}（本国在库立法：《{law}》）"
+        else:
+            law_disp = f"《{law}》" if law else eu_law
+        body = body or eu_body
+        if not access_txt:
+            access_txt = (
+                "《欧盟通用数据保护条例》（GDPR）第 6 条第 1 款 (c)/(e) 项、第 23 条及第 48 条："
+                "公权力机关调取个人数据须具备欧盟或成员国成文法明确授权，严格受民主社会必要性与比例原则约束；"
+                "非经司法协助条约等国际协定，第三国法院裁决或行政调取指令在欧盟境内不具有直接强制执行力。"
+            )
+            table_cited.append(
                 {
                     "clause_id": "",
                     "citation_tag": f"GDPR-Art23-48-{country}",
@@ -373,7 +383,14 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
                     "dimension_code": "D3",
                     "side": "recipient",
                     "core": True,
-                },
+                }
+            )
+        if not remedy_txt:
+            remedy_txt = (
+                f"《欧盟通用数据保护条例》（GDPR）第 77 条至第 79 条及第 82 条："
+                f"数据主体有权向{body}提起行政投诉，有权针对监管决定或数据控制者、处理者的侵权处理行为向成员国管辖法院提起有效司法救济，并依法请求物质或精神损害赔偿。"
+            )
+            table_cited.append(
                 {
                     "clause_id": "",
                     "citation_tag": f"GDPR-Art77-79-82-{country}",
@@ -386,9 +403,8 @@ async def receiving_law(session: AsyncSession, country: str | None, clauses: lis
                     "dimension_code": "D3",
                     "side": "recipient",
                     "core": True,
-                },
-            ]
-        )
+                }
+            )
     else:
         law_disp = f"《{law}》" if law else DRAFT_BLANK
 

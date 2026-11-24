@@ -357,7 +357,7 @@ def _build_overflow_annex_pdf(
 
     lang = str(form.get("language") or "fr").lower()
     country = str(form.get("country") or "").upper()
-    use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB"))
+    use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB", "DZ"))
     use_zh_annex = lang == "zh" or cjk_filled
     if use_zh_annex:
         code_ver = f"{form.get('code', '')} ({form.get('version', '')})".strip()
@@ -411,7 +411,7 @@ def _build_overflow_annex_pdf(
                 {"type": "table", "head": ["Ref. / 附页索引", "Field / 原表栏目", "Full Declared Content / 完整申报内容"], "widths": [14, 28, 58], "rows": annex_rows},
             ]
         return _render_pdf(Rendered(blocks=blocks), title, foreign=False)
-    use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB"))
+    use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB", "DZ"))
     if use_fr:
         title = f"Annexe complémentaire — {code_ver}"
         blocks = [
@@ -502,9 +502,15 @@ def render(
     if fixed:
         import re as _re
 
-        country_dial = {"TN": "216", "MA": "212", "EG": "20", "SG": "65", "LB": "961"}.get(
-            str(form.get("country") or "").upper(), ""
-        )
+        country_dial = {
+            "TN": "216", "MA": "212", "EG": "20", "SG": "65", "LB": "961", "CN": "86",
+            "DE": "49", "FR": "33", "IT": "39", "ES": "34", "NL": "31", "BE": "32", "SE": "46", "PL": "48",
+            "GB": "44", "RU": "7", "TR": "90", "JP": "81", "KR": "82", "TH": "66", "MY": "60", "ID": "62",
+            "VN": "84", "PH": "63", "IN": "91", "PK": "92", "BD": "880", "KZ": "7", "KG": "996",
+            "AE": "971", "SA": "966", "QA": "974", "KW": "965", "OM": "968", "IL": "972", "DZ": "213",
+            "ZA": "27", "NG": "234", "US": "1", "CA": "1", "MX": "52", "BR": "55", "AR": "54",
+            "CL": "56", "CO": "57", "PE": "51", "AU": "61", "NZ": "64",
+        }.get(str(form.get("country") or "").upper(), "")
         for f_box in fixed:
             if f_box.cells and f_box.key in texts and len(texts[f_box.key]) > f_box.cells:
                 raw_t = texts[f_box.key].strip()
@@ -538,7 +544,7 @@ def render(
                 continue
             idx = len(annex_rows) + 1
             use_fr_col = str(lang).lower() == "fr" or (
-                str(lang).lower() == "ar" and str(form.get("country") or "").upper() in ("TN", "MA", "LB")
+                str(lang).lower() == "ar" and str(form.get("country") or "").upper() in ("TN", "MA", "LB", "DZ")
             )
             ref_tag = (
                 f"（详见附页 #{idx}）"

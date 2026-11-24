@@ -33,10 +33,9 @@ RUN if [ "${UV_OFFLINE:-0}" = "1" ] || [ "${UV_OFFLINE:-false}" = "true" ]; then
 # Pyphen's code is tri-licensed; this distribution elects MPL-1.1. Its unused
 # dictionaries have separate licenses and are deliberately not distributed.
 RUN .venv/bin/python -c "import pathlib,pyphen,shutil; p=pathlib.Path(pyphen.__file__).parent/'dictionaries'; shutil.rmtree(p); p.mkdir()"
-# 从随包已校验 OFL-1.1 可变字体生成静态 Regular(400) 与 Bold(700) 供容器内 LibreOffice 渲染官方中文表格,不改动原包文件哈希
-COPY app/analysis/fonts/build_static_faces.py /tmp/cysh-fontbuild/build_static_faces.py
-COPY app/analysis/fonts/notosanssc /tmp/cysh-fontbuild/notosanssc
-RUN .venv/bin/python /tmp/cysh-fontbuild/build_static_faces.py /tmp/cysh-fontbuild/notosanssc /opt/cyshuhe-fonts
+# 从随包已校验 OFL-1.1 可变字体生成静态 Regular(400) 与 Bold(700) 供容器内 LibreOffice 渲染多语种公文与官方表格,不改动原包文件哈希
+COPY app/analysis/fonts /tmp/cysh-fontbuild/fonts
+RUN .venv/bin/python /tmp/cysh-fontbuild/fonts/build_static_faces.py /tmp/cysh-fontbuild/fonts /opt/cyshuhe-fonts
 
 FROM native AS base
 WORKDIR /app

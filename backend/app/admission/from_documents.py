@@ -22,16 +22,36 @@ from app.admission.generator import extract_entry
 from app.admission.models import AdmissionEntry, AdmissionStep
 from app.ingestion.models import Clause, Document, DocumentVersion
 
-# 各语种里“须经批准/认可/登记/许可”的说法（法、英、阿）
+# 各语种里“须经批准/认可/登记/许可”的说法（英、法、阿、德、西、葡、俄、土、瑞、日、韩、泰、越、印尼/马来）
 ADMISSION_WORDS = re.compile(
     r"homolog|réception (par type|à titre isolé|des véhicules)|agrément|certificat de conformit|"
     r"type[- ]approval|equipment registration|register(ed)? with|immatricul|registration of (a |the )?(motor )?vehicle|"
+    r"certification of radio|conformity assessment|declaration of conformity|authorisation of .{0,25}vehicle|"
+    r"Typgenehmigung|Betriebserlaubnis|Genehmigung|Zulassung|Konformitätsbewertung|"
+    r"typgodkännande|tillstånd för försöksverksamhet|"
+    r"homologaci[óo]n|homologa[çc][ãa]o|certificaci[óo]n|certifica[çc][ãa]o|"
+    r"одобрени[ея]\s+типа|сертификаци[яи]|государственн\w+\s+регистраци|"
+    r"tip\s+onay[ıi]|uygunluk\s+değerlendirmesi|"
+    r"型式指定|特定自動運行.{0,10}許可|技術基準適合証明|工事設計認証|"
+    r"형식승인|적합성평가|적합인증|운행허가|임시운행허가|"
+    r"รับรองมาตรฐาน|ใบอนุญาต|ขึ้นทะเบียน|"
+    r"chứng nhận hợp quy|cấp phép|tiếp nhận công bố hợp quy|"
+    r"sertifikasi\s+alat|persetujuan\s+tipe|perakuan\s+pematuhan|"
     r"اعتماد الطراز|المصادقة على|موافقة النوع|تسجيل المركبة|تسجيل السيارة|تسجيل الآلية|الموافقة المسبقة",
     re.IGNORECASE,
 )
 # 驾驶执照、罚款这类不是车辆或设备准入
-NOT_ADMISSION = re.compile(r"permis de conduire|driving licen|رخصة السوق|رخصة القيادة|amende|غرامة", re.IGNORECASE)
-DUTY_WORDS = re.compile(r"\b(must|shall|doit|doivent|est soumis|sont soumis|required|requis|obligatoire)\b|يجب|يتعين|يلزم|لا يجوز", re.IGNORECASE)
+NOT_ADMISSION = re.compile(
+    r"permis de conduire|driving licen|Fahrerlaubnis|Führerschein|körkort|رخصة السوق|رخصة القيادة|amende|غرامة|Bußgeld",
+    re.IGNORECASE,
+)
+DUTY_WORDS = re.compile(
+    r"\b(must|shall|doit|doivent|est soumis|sont soumis|required|requis|obligatoire|"
+    r"muss|müssen|bedarf|bedürfen|darf nur|ska|får endast|debe|deben|deverá|deverão|wajib|hendaklah|phải)\b|"
+    r"должен|обязан|подлежит|zorunludur|tabidir|なければならない|受けなければならない|하여야\s*한다|받아야\s*한다|ต้อง|"
+    r"يجب|يتعين|يلزم|لا يجوز",
+    re.IGNORECASE,
+)
 
 
 def _key_sentence(text: str) -> str:

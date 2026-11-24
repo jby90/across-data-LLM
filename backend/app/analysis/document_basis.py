@@ -39,7 +39,19 @@ _FIXED: dict[str, list[str]] = {
     ],
 }
 
-_ASEAN = {"SG": "数据进入新加坡的，可另行使用东盟示范合同条款（ASEAN MCC）作为传输工具。"}
+_ASEAN_MSG = "数据跨境传输涉及东盟成员国的，可参考采用东盟示范合同条款（ASEAN MCC）作为合规传输工具。"
+_ASEAN = {
+    "SG": "数据进入新加坡的，可另行使用东盟示范合同条款（ASEAN MCC）作为传输工具。",
+    "MY": _ASEAN_MSG,
+    "ID": _ASEAN_MSG,
+    "TH": _ASEAN_MSG,
+    "VN": _ASEAN_MSG,
+    "PH": _ASEAN_MSG,
+    "BN": _ASEAN_MSG,
+    "KH": _ASEAN_MSG,
+    "LA": _ASEAN_MSG,
+    "MM": _ASEAN_MSG,
+}
 
 
 CN = "CN"

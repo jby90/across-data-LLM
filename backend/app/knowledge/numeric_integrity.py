@@ -11,9 +11,13 @@ NUMERIC = re.compile(rf"(?<!\d){NUMBER}(?:\s*%)?(?!\d)")
 
 def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "")
-    # Arabic sources place the percentage sign before the number. Preserve the
-    # percentage identity, rather than misreading it as a bare numeric amount.
-    text = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬", "01234567890123456789.,"))
+    # Arabic, Persian, Bengali, and Thai decimal digits map deterministically to ASCII 0-9.
+    text = text.translate(
+        str.maketrans(
+            "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹০১২৩৪৫৬৭৮৯๐๑๒๓๔๕๖๗๘๙٫٬",
+            "0123456789012345678901234567890123456789.,",
+        )
+    )
     text = re.sub(rf"٪\s*({NUMBER})", r"\1%", text)
     text = text.replace("٪", "%")
     text = re.sub(rf"百分之\s*({NUMBER})", r"\1%", text)
@@ -50,6 +54,40 @@ CURRENCIES = {
     "TND": r"TND|突尼斯第纳尔",
     "MAD": r"MAD|摩洛哥迪拉姆",
     "LBP": r"LBP|黎巴嫩镑",
+    "CNY": r"CNY|RMB|人民币",
+    "JPY": r"JPY|日元|日圆",
+    "KRW": r"₩|KRW|韩元|韩圆",
+    "THB": r"฿|THB|泰铢",
+    "MYR": r"MYR|马来西亚林吉特|林吉特",
+    "IDR": r"IDR|印度尼西亚盾|印尼盾|印尼卢比",
+    "VND": r"₫|VND|越南盾",
+    "PHP": r"₱|PHP|菲律宾比索",
+    "AED": r"AED|阿联酋迪拉姆",
+    "SAR": r"SAR|沙特里亚尔",
+    "QAR": r"QAR|卡塔尔里亚尔",
+    "KWD": r"KWD|科威特第纳尔",
+    "OMR": r"OMR|阿曼里亚尔",
+    "DZD": r"DZD|阿尔及利亚第纳尔",
+    "RUB": r"₽|RUB|俄罗斯卢布|卢布",
+    "KZT": r"₸|KZT|哈萨克斯坦坚戈|坚戈",
+    "KGS": r"KGS|吉尔吉斯斯坦索姆|索姆",
+    "TRY": r"₺|TRY|土耳其里拉",
+    "ILS": r"₪|ILS|以色列新谢克尔|新谢克尔|谢克尔",
+    "INR": r"₹|INR|印度卢比",
+    "PKR": r"PKR|巴基斯坦卢比",
+    "BDT": r"৳|BDT|孟加拉塔卡|塔卡",
+    "AUD": r"A\$|AUD|澳大利亚元|澳元",
+    "CAD": r"C\$|CAD|加拿大元|加元",
+    "BRL": r"R\$|BRL|巴西雷亚尔|雷亚尔",
+    "MXN": r"Mex\$|MXN|墨西哥比索",
+    "ARS": r"ARS|阿根廷比索",
+    "CLP": r"CLP|智利比索",
+    "COP": r"COP|哥伦比亚比索",
+    "PEN": r"S/\.|PEN|秘鲁索尔|索尔",
+    "ZAR": r"ZAR|南非兰特|兰特",
+    "NGN": r"₦|NGN|尼日利亚奈拉|奈拉",
+    "PLN": r"zł|PLN|波兰兹罗提|兹罗提",
+    "SEK": r"SEK|瑞典克朗",
     "DOLLAR_UNSPECIFIED": r"(?<![A-Za-z])\$|dollars?",
 }
 

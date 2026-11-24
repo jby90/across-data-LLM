@@ -650,6 +650,14 @@ _EXCLUSIVE_LAW_SIGNS = (
     ("TN", re.compile(r"2004\s*年第\s*63\s*号")),
     ("LB", re.compile(r"2018\s*年第\s*81\s*号")),
     ("SG", re.compile(r"2012\s*年个人数据保护法")),
+    ("EU", re.compile(r"2016/679|\bGDPR\b")),
+    ("BR", re.compile(r"13[.,]709\s*号|\bLGPD\b")),
+    ("TR", re.compile(r"6698\s*号|\bKVKK\b")),
+    ("RU", re.compile(r"152-FZ|152-ФЗ", re.I)),
+    ("ZA", re.compile(r"\bPOPIA\b")),
+    ("CA", re.compile(r"\bPIPEDA\b")),
+    ("MY", re.compile(r"709\s*号法")),
+    ("TH", re.compile(r"佛历\s*2562|B\.?E\.?\s*2562", re.I)),
 )
 _CHINA_BIAS = re.compile(r"向中国|回传中国|传回中国|发往中国|传至中国|中国总部")
 _BOLD_LEAD = re.compile(r"^\s*\*\*[^*]{1,24}\*\*\s*[：:]\s*")

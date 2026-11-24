@@ -1947,6 +1947,8 @@ async def extract_knowledge_for_country(
     translate_sample_per_doc: int = 0,
     max_clauses_per_doc: int | None = None,
     concurrency: int = 8,
+    *,
+    cache_only: bool = False,
 ) -> dict:
     """Stage a replacement atomically. No failed/partial model batch can retire the old graph."""
     from sqlalchemy import text
@@ -1967,7 +1969,12 @@ async def extract_knowledge_for_country(
     clock = time.perf_counter()
     try:
         result = await _extract_knowledge_for_country_impl(
-            session, cc, translate_sample_per_doc, max_clauses_per_doc, concurrency
+            session,
+            cc,
+            translate_sample_per_doc,
+            max_clauses_per_doc,
+            concurrency,
+            cache_only=cache_only,
         )
         if result.get("status") == "failed":
             await transaction.rollback()
@@ -2031,6 +2038,8 @@ async def _extract_knowledge_for_country_impl(
     translate_sample_per_doc: int = 6,
     max_clauses_per_doc: int | None = None,
     concurrency: int = 8,
+    *,
+    cache_only: bool = False,
 ) -> dict[str, int]:
     """对指定国家已解析的官方法规执行 S2 六要素+十二关系知识图谱抽取:
     1. 旧 kg-rule-extractor-v1 边全部标为 superseded;
@@ -2125,7 +2134,10 @@ async def _extract_knowledge_for_country_impl(
             continue
 
         prior_scope = (doc.relevance, doc.relevance_note, doc.relevance_source)
-        rel_status, rel_note = await classify_document_relevance(doc, clauses[:3])
+        if cache_only and doc.relevance in ("relevant", "related", "irrelevant"):
+            rel_status, rel_note = doc.relevance, doc.relevance_note or ""
+        else:
+            rel_status, rel_note = await classify_document_relevance(doc, clauses[:3])
         if prior_scope != (doc.relevance, doc.relevance_note, doc.relevance_source):
             from app.knowledge.history import propose
 
@@ -2321,6 +2333,7 @@ async def _extract_knowledge_for_country_impl(
     cached, cache_records, completed, cache_hits = {}, [], 0, 0
     cached_prompt_versions = {}
     if keys:
+        clause_hash_by_id = {clause.id: clause.text_hash for _d, clause, _r, _i, _p in extraction_tasks}
         for record in (
             await session.scalars(
                 select(KnowledgeAuditRecord)
@@ -2332,6 +2345,12 @@ async def _extract_knowledge_for_country_impl(
             )
         ).all():
             version = allowed_keys[record.target_id].get(record.payload.get("cache_key"))
+            if (
+                not version
+                and cache_only
+                and record.payload.get("source_hash") in (None, clause_hash_by_id.get(record.target_id))
+            ):
+                version = record.payload.get("extractor_prompt") or EXTRACTOR_PROMPT_VERSION
             if version and payload_hash(record.payload) == record.content_hash:
                 cached.setdefault(record.target_id, (record.payload, version))
 
@@ -2437,6 +2456,18 @@ async def _extract_knowledge_for_country_impl(
                     )
                 except (ValueError, KeyError, ValidationError):
                     pass  # Recompute invalid caches; never downgrade the verification gate.
+
+            if cache_only:
+                completed += 1
+                return (
+                    doc,
+                    clause,
+                    reg_node,
+                    inst_node,
+                    "cached-only",
+                    ClauseExtractionPayload(entities=[], relations=[]),
+                    [],
+                )
 
             # Long source clauses stay intact. Every chunk is evaluated against its real source ID.
             entities, relations, models = [], [], []

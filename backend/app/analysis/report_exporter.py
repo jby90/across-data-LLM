@@ -45,7 +45,7 @@ def export_filename(task, rv, ext, dimension=None):
     日期取报告生成日（北京时间），同一份报告多次下载文件名不变，不同日期的报告一眼能分开。"""
     from app.analysis.consulting import TOPIC_NAMES
 
-    country = _safe_part(COUNTRY_LABEL.get(task.country_code, task.country_code).split(" ")[0])
+    country = _safe_part(_country_label_for(task.country_code).split(" ")[0])
     created = getattr(rv, "created_at", None) or getattr(task, "created_at", None)
     day = (created or datetime.now(UTC)).astimezone(CST).strftime("%Y%m%d")
     if ext == "zip":
@@ -192,7 +192,61 @@ COUNTRY_LABEL = {
     "TN": "突尼斯 (Tunisia)",
     "MA": "摩洛哥 (Morocco)",
     "LB": "黎巴嫩 (Lebanon)",
+    "CN": "中国 (China)",
+    "EU": "欧盟 (European Union)",
+    "DE": "德国 (Germany)",
+    "FR": "法国 (France)",
+    "IT": "意大利 (Italy)",
+    "ES": "西班牙 (Spain)",
+    "NL": "荷兰 (Netherlands)",
+    "BE": "比利时 (Belgium)",
+    "SE": "瑞典 (Sweden)",
+    "PL": "波兰 (Poland)",
+    "GB": "英国 (United Kingdom)",
+    "RU": "俄罗斯 (Russia)",
+    "TR": "土耳其 (Türkiye)",
+    "JP": "日本 (Japan)",
+    "KR": "韩国 (Korea)",
+    "TH": "泰国 (Thailand)",
+    "MY": "马来西亚 (Malaysia)",
+    "ID": "印度尼西亚 (Indonesia)",
+    "VN": "越南 (Vietnam)",
+    "PH": "菲律宾 (Philippines)",
+    "IN": "印度 (India)",
+    "PK": "巴基斯坦 (Pakistan)",
+    "BD": "孟加拉国 (Bangladesh)",
+    "KZ": "哈萨克斯坦 (Kazakhstan)",
+    "KG": "吉尔吉斯斯坦 (Kyrgyzstan)",
+    "AE": "阿联酋 (UAE)",
+    "SA": "沙特阿拉伯 (Saudi Arabia)",
+    "QA": "卡塔尔 (Qatar)",
+    "KW": "科威特 (Kuwait)",
+    "OM": "阿曼 (Oman)",
+    "IL": "以色列 (Israel)",
+    "DZ": "阿尔及利亚 (Algeria)",
+    "ZA": "南非 (South Africa)",
+    "NG": "尼日利亚 (Nigeria)",
+    "US": "美国 (United States)",
+    "CA": "加拿大 (Canada)",
+    "MX": "墨西哥 (Mexico)",
+    "BR": "巴西 (Brazil)",
+    "AR": "阿根廷 (Argentina)",
+    "CL": "智利 (Chile)",
+    "CO": "哥伦比亚 (Colombia)",
+    "PE": "秘鲁 (Peru)",
+    "AU": "澳大利亚 (Australia)",
+    "NZ": "新西兰 (New Zealand)",
 }
+
+
+def _country_label_for(code: str | None) -> str:
+    c = (code or "").strip().upper()
+    if c in COUNTRY_LABEL:
+        return COUNTRY_LABEL[c]
+    from app.analysis.document_basis import NAMES
+
+    zh = NAMES.get(c)
+    return f"{zh} ({c})" if zh and zh != c else (code or "")
 
 PARTIAL_NOTICE = (
     "【部分样稿】部分维度缺少可通过原文核验的依据,已逐维标注缺口;"

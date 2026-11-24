@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import CountryFlag from './CountryFlag.vue'
 import { directoryTopics, documentPage, type DirectoryCountry, type TopicDocument } from '@cyshuhe/shared/src/regulationDirectory'
 
 const props = defineProps<{
@@ -69,6 +70,7 @@ watch([() => props.selectedId, levels], ([id]) => {
       <button class="directory-folder country-folder" :aria-expanded="expandedCountry === c.code"
         :disabled="loading" @click="toggleCountry(c.code)">
         <span class="folder-arrow" aria-hidden="true">{{ expandedCountry === c.code ? '▾' : '▸' }}</span>
+        <CountryFlag :code="c.code" size="sm" />
         <span>{{ c.name }}</span><span class="folder-count">{{ c.count }} 份</span>
       </button>
       <div v-if="expandedCountry === c.code && country === c.code" class="directory-levels">

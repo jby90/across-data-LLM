@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { localTime, officialTextLabel } from '@cyshuhe/shared'
 import { articleLabel } from '@cyshuhe/shared/src/articleLabel'
+import CountryFlag from '../components/CountryFlag.vue'
 import RegulationDirectory from '../components/RegulationDirectory.vue'
 import { alignBilingualParagraphs, reflow } from '@cyshuhe/shared/src/reflow'
 import { splitLegalText, type LegalTerm } from '@cyshuhe/shared/src/legalText'
@@ -817,15 +818,25 @@ onMounted(async () => {
           v-model="country"
           filterable
           aria-label="选择国家"
-          style="width: 180px"
+          style="width: 204px"
           placeholder="切换国家"
           @change="chooseCountry"
-          ><el-option
+        >
+          <template #prefix>
+            <CountryFlag :code="country" size="sm" />
+          </template>
+          <el-option
             v-for="c in countries"
             :key="c.country_code"
             :value="c.country_code"
             :label="c.country_name_zh"
-        /></el-select>
+          >
+            <span class="kb-opt-country">
+              <CountryFlag :code="c.country_code" size="sm" />
+              <span>{{ c.country_name_zh }}</span>
+            </span>
+          </el-option>
+        </el-select>
       </div>
     </header>
     <el-tabs v-model="tab" :key="country ? (country === 'CN' ? 'kb-cn' : 'kb-country') : 'kb-overview'" class="kb-tabs">
@@ -852,7 +863,7 @@ onMounted(async () => {
             <div class="country-grid" data-testid="kb-country-cards">
               <button v-for="c in countries" :key="c.country_code" type="button" class="country-tile" :data-testid="`kb-country-${c.country_code}`" @click="chooseCountry(c.country_code)">
                 <div class="tile-head">
-                  <strong>{{ c.country_name_zh }}</strong>
+                  <strong class="tile-country-name"><CountryFlag :code="c.country_code" /><span>{{ c.country_name_zh }}</span></strong>
                   <span class="tile-badge">{{ c.country_code === 'CN' ? '出境源头法规' : '法规与合规简报' }}</span>
                 </div>
                 <span class="tile-count">{{ c.documents_count ? `${c.documents_count} 份核心常用法规 · 阅读条文` : '暂未收录现行法规条文' }}</span>
@@ -1565,6 +1576,8 @@ onMounted(async () => {
 .country-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .country-tile { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 20px 24px; border: 1px solid var(--cy-line); border-radius: 12px; background: #fff; font: inherit; text-align: left; cursor: pointer; transition: border-color 0.16s, box-shadow 0.16s; }
 .tile-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; }
+.tile-country-name { display: inline-flex; align-items: center; gap: 8px; }
+.kb-opt-country { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
 .country-tile strong { font-size: 18px; color: var(--cy-text-1); }
 .tile-badge { font-size: 13px; color: #475569; background: #f1f5f9; border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
 .country-tile .tile-count { font-size: 14px; color: var(--cy-text-2); }

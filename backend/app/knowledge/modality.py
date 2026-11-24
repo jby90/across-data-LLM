@@ -73,9 +73,15 @@ def _lang(text: str) -> str:
     if not letters:
         return "other"
     if sum(1 for c in letters if "一" <= c <= "鿿") / len(letters) > 0.3:
-        return "other"  # 中文原文不在检查范围
+        return "other"  # 中文/日文汉字原文不在英法阿词表检查范围（交由第二阶段语义核验）
     if sum(1 for c in letters if _AR.match(c)) / len(letters) > 0.3:
         return "ar"
+    # 非拉丁字母体系（泰文、韩文、西里尔文、孟加拉文、希伯来文、日文假名等）不套用英语词表
+    ascii_latin = sum(
+        1 for c in letters if ("A" <= c <= "Z") or ("a" <= c <= "z") or ("\u00c0" <= c <= "\u024f")
+    )
+    if ascii_latin / len(letters) < 0.7:
+        return "other"
     # 法语特有的功能词；短句（如 “On ne peut préalablement renoncer au droit d’accès.”）也要能认出来
     fr = len(
         re.findall(
@@ -84,21 +90,40 @@ def _lang(text: str) -> str:
             re.IGNORECASE,
         )
     )
-    # 英文文件里零星的法语词（地址、专名）不能让整条被当成法语：法语功能词要比英语的多
-    en = len(
+    # 德/西/葡/意/荷/瑞/波/土/越/印尼语高频虚词高于英语特征词时，交由第二阶段语义核验
+    other_latin = len(
         re.findall(
-            r"\b(?:the|of|and|to|in|is|are|shall|must|be|for|with|that|this|by|or|not|should|may)\b",
+            r"\b(?:der|die|das|und|nicht|oder|für|mit|von|auf|ist|sind|"
+            r"el|los|las|del|una|para|por|con|como|más|esta|este|será|"
+            r"não|dos|das|pelos|pelas|pelo|pela|aos|ou|também|poderá|deverá|"
+            r"della|delle|degli|nel|nella|sono|può|essere|"
+            r"het|een|van|voor|met|niet|worden|"
+            r"och|att|det|som|för|med|inte|ska|"
+            r"oraz|jest|nie|przez|tego|który|"
+            r"bir|için|olan|olarak|veya|göre|"
+            r"yang|dan|atau|untuk|dalam|dengan|tidak|pada|"
+            r"của|và|các|được|trong|không|theo)\b",
             text,
             re.IGNORECASE,
         )
     )
-    return (
-        "fr"
-        if fr >= 2
-        and fr > en
-        and re.search(r"[àâçéèêëîïôùûü]|\b(?:ne|des|du|au|aux|les)\b", text, re.IGNORECASE)
-        else "en"
+    en = len(
+        re.findall(
+            r"\b(?:the|of|and|shall|must|with|that|this|from|which|not|should|may|any|under|where|such)\b",
+            text,
+            re.IGNORECASE,
+        )
     )
+    if (
+        fr >= 2
+        and fr > en
+        and fr >= other_latin
+        and re.search(r"[àâçéèêëîïôùûü]|\b(?:ne|des|du|au|aux|les)\b", text, re.IGNORECASE)
+    ):
+        return "fr"
+    if en >= 2 and en > fr and en > other_latin:
+        return "en"
+    return "other"
 
 
 def modality_issues(original: str, translated: str) -> list[str]:

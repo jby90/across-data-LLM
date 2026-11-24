@@ -76,6 +76,34 @@ async def known_hash(session: AsyncSession, code: str) -> str | None:
     return _hash_cache.get(code) or None
 
 
+async def country_lib_stamp(session: AsyncSession, code: str) -> str:
+    """Cheap per-country SQL fingerprint of documents, versions, clauses, translations, and KG edges."""
+    from sqlalchemy import text
+
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT
+                  (SELECT md5(coalesce(string_agg(d.id::text || d.relevance || coalesce(d.business_weight,'') || coalesce(d.intake_scope::text,''), ',' ORDER BY d.id), ''))
+                   FROM documents d WHERE d.country_code = :c),
+                  (SELECT md5(coalesce(string_agg(dv.id::text || dv.version_no::text || dv.state || coalesce(dv.legal_status,'') || coalesce(dv.review_status,''), ',' ORDER BY dv.id), ''))
+                   FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.country_code = :c),
+                  (SELECT count(c.id)::text || ':' || md5(coalesce(string_agg(c.text_hash, ',' ORDER BY c.id), ''))
+                   FROM clauses c JOIN document_versions dv ON dv.id = c.version_id JOIN documents d ON d.id = dv.document_id WHERE d.country_code = :c),
+                  (SELECT count(ct.id)::text || ':' || md5(coalesce(string_agg(ct.id::text || ct.review_status || md5(ct.translated_text), ',' ORDER BY ct.id), ''))
+                   FROM clause_translations ct JOIN clauses c ON c.id = ct.clause_id JOIN document_versions dv ON dv.id = c.version_id JOIN documents d ON d.id = dv.document_id
+                   WHERE d.country_code = :c AND ct.is_current = true AND ct.quality_check_passed = true),
+                  (SELECT count(e.id)::text || ':' || md5(coalesce(string_agg(e.id::text || e.review_status || coalesce(e.verify_state,''), ',' ORDER BY e.id), ''))
+                   FROM kg_edges e WHERE e.country_code = :c)
+                """
+            ),
+            {"c": code},
+        )
+    ).one()
+    return "|".join(str(x) for x in row)
+
+
 async def current_hash(session: AsyncSession, code: str) -> str:
     """The fingerprint of the clauses a briefing would be written from now (heavy: eight searches);
     kept until the library changes, so “待更新” is shown without making anyone wait."""
@@ -84,6 +112,12 @@ async def current_hash(session: AsyncSession, code: str) -> str:
     hit = _hash_cache.get(code)
     if use_cached(hit):
         return hit
+    latest_wp = await wp.latest(session, code)
+    if latest_wp is not None and latest_wp.source_hash and isinstance(latest_wp.report, dict):
+        saved_stamp = latest_wp.report.get("lib_stamp")
+        if saved_stamp and saved_stamp == await country_lib_stamp(session, code):
+            _hash_cache[code] = latest_wp.source_hash
+            return latest_wp.source_hash
     _hash_cache[code] = wp.source_hash(await wp.gather(session, code))
     return _hash_cache[code]
 

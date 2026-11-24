@@ -147,12 +147,61 @@ _SCENE_ONLY = re.compile(r"视频记录|扣押|数字证据|协会、工会|健�
 _NO_PI_EXEMPT = re.compile(r"不(含|包含|涉及)个人信息|未包含个人信息|不包含[^。；]{0,8}个人信息[^。；]{0,10}(免|无需|不需)")
 _NO_PERSONAL = re.compile(r"不(涉及|含|包含|处理|传输)(任何)?个人(数据|信息)|无个人(数据|信息)|没有个人(数据|信息)|^\s*(0|零)\s*(人|个)?\s*$")
 
-# 各国名称在条文里的写法（中文、法文、英文、阿拉伯文）：判断接收国是否在充分保护名单里
+# 各国名称在条文里的写法（中文、法文、英文、阿拉伯文及主要当地语种）：判断接收国是否在充分保护名单里
 _NAME_FORMS = {
     "CN": ("中国", "中华人民共和国", "Chine", "China", "الصين"),
-    "EG": ("埃及", "Égypte", "Egypt", "مصر"), "MA": ("摩洛哥", "Maroc", "Morocco", "المغرب"),
-    "TN": ("突尼斯", "Tunisie", "Tunisia", "تونس"), "LB": ("黎巴嫩", "Liban", "Lebanon", "لبنان"),
+    "EG": ("埃及", "Égypte", "Egypt", "مصر"),
+    "MA": ("摩洛哥", "Maroc", "Morocco", "المغرب"),
+    "TN": ("突尼斯", "Tunisie", "Tunisia", "تونس"),
+    "LB": ("黎巴嫩", "Liban", "Lebanon", "لبنان"),
     "SG": ("新加坡", "Singapour", "Singapore", "سنغافورة"),
+    "EU": ("欧盟", "欧洲联盟", "Union européenne", "European Union", "الاتحاد الأوروبي"),
+    "DE": ("德国", "Allemagne", "Germany", "Deutschland", "ألمانيا"),
+    "FR": ("法国", "France", "فرنسا"),
+    "IT": ("意大利", "Italie", "Italy", "Italia", "إيطاليا"),
+    "ES": ("西班牙", "Espagne", "Spain", "España", "إسبانيا"),
+    "NL": ("荷兰", "Pays-Bas", "Netherlands", "Nederland", "هولندا"),
+    "BE": ("比利时", "Belgique", "Belgium", "België", "بلجيكا"),
+    "SE": ("瑞典", "Suède", "Sweden", "Sverige", "السويد"),
+    "PL": ("波兰", "Pologne", "Poland", "Polska", "بولندا"),
+    "AT": ("奥地利", "Autriche", "Austria", "Österreich"),
+    "IE": ("爱尔兰", "Irlande", "Ireland"),
+    "GB": ("英国", "Royaume-Uni", "United Kingdom", "Britain", "المملكة المتحدة"),
+    "CH": ("瑞士", "Suisse", "Switzerland", "Schweiz", "سويسرا"),
+    "NO": ("挪威", "Norvège", "Norway"),
+    "RU": ("俄罗斯", "Russie", "Russia", "Российская Федерация", "روسيا"),
+    "TR": ("土耳其", "Turquie", "Turkey", "Türkiye", "تركيا"),
+    "JP": ("日本", "Japon", "Japan", "اليابان"),
+    "KR": ("韩国", "大韩民国", "Corée du Sud", "Republic of Korea", "South Korea", "대한민국", "كوريا"),
+    "TH": ("泰国", "Thaïlande", "Thailand", "ประเทศไทย"),
+    "MY": ("马来西亚", "Malaisie", "Malaysia"),
+    "ID": ("印度尼西亚", "印尼", "Indonésie", "Indonesia"),
+    "VN": ("越南", "Viêt Nam", "Vietnam", "Việt Nam"),
+    "PH": ("菲律宾", "Philippines"),
+    "IN": ("印度", "Inde", "India", "الهند"),
+    "PK": ("巴基斯坦", "Pakistan", "باكستان"),
+    "BD": ("孟加拉国", "Bangladesh"),
+    "KZ": ("哈萨克斯坦", "Kazakhstan"),
+    "KG": ("吉尔吉斯斯坦", "Kirghizistan", "Kyrgyzstan"),
+    "AE": ("阿联酋", "阿拉伯联合酋长国", "Émirats arabes unis", "United Arab Emirates", "الإمارات"),
+    "SA": ("沙特阿拉伯", "沙特", "Arabie saoudite", "Saudi Arabia", "المملكة العربية السعودية", "السعودية"),
+    "QA": ("卡塔尔", "Qatar", "قطر"),
+    "KW": ("科威特", "Koweït", "Kuwait", "الكويت"),
+    "OM": ("阿曼", "Oman", "عمان"),
+    "IL": ("以色列", "Israël", "Israel"),
+    "DZ": ("阿尔及利亚", "Algérie", "Algeria", "الجزائر"),
+    "ZA": ("南非", "Afrique du Sud", "South Africa"),
+    "NG": ("尼日利亚", "Nigéria", "Nigeria"),
+    "US": ("美国", "États-Unis", "United States", "USA", "الولايات المتحدة"),
+    "CA": ("加拿大", "Canada", "كندا"),
+    "MX": ("墨西哥", "Mexique", "Mexico", "México"),
+    "BR": ("巴西", "Brésil", "Brazil", "Brasil"),
+    "AR": ("阿根廷", "Argentine", "Argentina"),
+    "CL": ("智利", "Chili", "Chile"),
+    "CO": ("哥伦比亚", "Colombie", "Colombia"),
+    "PE": ("秘鲁", "Pérou", "Peru", "Perú"),
+    "AU": ("澳大利亚", "Australie", "Australia"),
+    "NZ": ("新西兰", "Nouvelle-Zélande", "New Zealand"),
 }
 _LIST_CLAUSE = re.compile(r"(下列|以下)(国家|国)[^。]{0,60}(充分|适当)[^。]{0,40}保护|充分保护[^。]{0,10}(国家)?名单")
 
@@ -429,6 +478,8 @@ async def _latest_clauses(session: AsyncSession, country: str, any_relevance: bo
     out = [r for r in rows if r[0] not in gone]
     s_cache[key] = out
     if keeper_active or rebuilding.get():
+        while len(_LATEST_CLAUSES_CACHE) >= 10 and key not in _LATEST_CLAUSES_CACHE:
+            _LATEST_CLAUSES_CACHE.pop(next(iter(_LATEST_CLAUSES_CACHE)), None)
         _LATEST_CLAUSES_CACHE[key] = out
     return out
 

@@ -209,6 +209,8 @@ async def _citations(
 
     if rebuilding.get():  # 后台重建在自己的线程里跑，不碰服务进程里的锁
         out = await _citations_search(session, task, country, side)
+        while len(_COUNTRY_BASIS) >= 16 and cache_key not in _COUNTRY_BASIS:
+            _COUNTRY_BASIS.pop(next(iter(_COUNTRY_BASIS)), None)
         _COUNTRY_BASIS[cache_key] = (time.monotonic(), out)
         return [dict(c) for c in out]
     async with _BASIS_LOCKS.setdefault(cache_key, asyncio.Lock()):
@@ -216,6 +218,8 @@ async def _citations(
         if use_cached(hit):
             return [dict(c) for c in hit[1]]
         out = await _citations_search(session, task, country, side)
+        while len(_COUNTRY_BASIS) >= 16 and cache_key not in _COUNTRY_BASIS:
+            _COUNTRY_BASIS.pop(next(iter(_COUNTRY_BASIS)), None)
         _COUNTRY_BASIS[cache_key] = (time.monotonic(), out)
         return [dict(c) for c in out]
 
@@ -369,18 +373,28 @@ async def warm_basis(factory=None) -> None:
                     ).all()
                     if r[0]
                 }
-                warm_codes = [c for c in codes if c in (wp_codes | kg_codes | task_codes | {"CN"})]
-                for code in warm_codes:
-                    # 仅对已有图谱、简报或在办项目的活跃法域启动预热；其余静态归档法域按需即查即缓存，避免冷启动占满小规格云主机 CPU 与内存
+                # 1) 简报指纹轻量预计算（全量简报国家，确保驾驶舱待更新数瞬时同步且低内存）
+                from app.knowledge import whitepaper_graph as _wg
+
+                for wp_code in sorted(wp_codes):
+                    if wp_code not in ("CN", "ZZ", "INTL"):
+                        await whitepaper_router.current_hash(session, wp_code)
+                        _wg._CLAUSES.clear()
+                        _wg._MENTIONS.clear()
+                        _wg._PRIMARY_CLAUSE.clear()
+                        _wg._KEYS.pop(wp_code, None)
+                    session.expunge_all()
+                    await asyncio.sleep(0.01)
+                # 2) 重度条文与合规依据仅对当前有在办项目的热点法域（上限 8 国）启动预热；其余法域按需即查并受 LRU 有界缓存保护
+                hot_codes = [c for c in codes if c in (task_codes | {"CN"})][:8]
+                for code in hot_codes:
                     await relation_counts(session, [e.version.id for e in await library(session, code, include_peripheral=True)])
                     await relation_counts(session, [e.version.id for e in await library(session, code)])
                     if code in overseas and code in (wp_codes | kg_codes):
                         await _page_data(session, code)
                         await _topics_cached(session, code)
-                    if code in wp_codes:
-                        await whitepaper_router.current_hash(session, code)  # 简报是否待更新
+                    session.expunge_all()
                     await asyncio.sleep(0.01)
-                # 活跃法域作为数据接收方、发出方的依据条文预先算好；其余新增归档法域在首次创建评估时按需加载
                 from app.analysis import clause_gate as _cg
                 from app.analysis import doc_rules as _dr
                 from app.analysis import doc_sections as _ds
@@ -389,7 +403,8 @@ async def warm_basis(factory=None) -> None:
 
                 await _cg.load_title_names(session)
                 await _qb._cn_articles(session)
-                for code in warm_codes:
+                session.expunge_all()
+                for code in hot_codes:
                     probe = AnalysisTask(kind="documents", country_code=code, facts_json={})
                     for side in ("recipient", "source"):
                         await _citations(session, probe, side=side)
@@ -398,6 +413,8 @@ async def warm_basis(factory=None) -> None:
                     await _ds.receiving_law(session, code)
                     if code != "CN" and code in (wp_codes | kg_codes):
                         await _wp.pinned_topics(session, code)
+                    session.info.clear()
+                    session.expunge_all()
                     await asyncio.sleep(0.01)
     except Exception:  # noqa: BLE001 - 预热失败不影响使用，只是首次会慢
         log.warning("预热失败", exc_info=True)
@@ -428,6 +445,8 @@ async def _both_ends(
 
     if rebuilding.get():  # 同上：重建线程不碰服务进程里的锁
         out = await _both_ends_uncached(session, task, values)
+        while len(_BASIS_CACHE) >= 16 and key not in _BASIS_CACHE:
+            _BASIS_CACHE.pop(next(iter(_BASIS_CACHE)), None)
         _BASIS_CACHE[key] = (time.monotonic(), out)
         return list(out)
     lock = _BASIS_LOCKS.setdefault(key, asyncio.Lock())
@@ -436,6 +455,8 @@ async def _both_ends(
         if use_cached(hit):
             return list(hit[1])
         out = await _both_ends_uncached(session, task, values)
+        while len(_BASIS_CACHE) >= 16 and key not in _BASIS_CACHE:
+            _BASIS_CACHE.pop(next(iter(_BASIS_CACHE)), None)
         _BASIS_CACHE[key] = (time.monotonic(), out)
         return list(out)
 
@@ -531,7 +552,17 @@ async def _inputs(session: AsyncSession, task: AnalysisTask, code: str):
         if source and recipient and source != "CN" and recipient != "CN" and source != recipient:
             src_nm = NAMES.get(source, source)
             rcp_nm = NAMES.get(recipient, recipient)
-            if target == source and recipient not in ("SG", "MA", "EG", "TN", "LB", "CN"):
+            from app.admission.models import AdmissionEntry
+            from app.admission.router import SHOWN
+
+            rcp_has_adm = bool(
+                await session.scalar(
+                    select(AdmissionEntry.id)
+                    .where(AdmissionEntry.country_code == recipient, AdmissionEntry.review_status.in_(SHOWN), AdmissionEntry.merged_into.is_(None))
+                    .limit(1)
+                )
+            )
+            if target == source and not rcp_has_adm:
                 eu_note = "欧盟 GDPR 及" if recipient in {"EU", "FR", "DE", "IT", "ES", "NL", "BE", "SE", "PL", "AT", "IE", "PT", "CZ", "HU", "NO"} else ""
                 values["country_name"] = f"{src_nm}（实车运营与出境审批法域）及{rcp_nm}（接收侧适用{eu_note}属地合规要求）"
             else:

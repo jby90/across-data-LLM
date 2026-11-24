@@ -19,6 +19,9 @@ from __future__ import annotations
 import re
 
 _ARABIC = re.compile(r"[؀-ۿݐ-ݿ]")
+_OTHER_FOREIGN_SCRIPT = re.compile(
+    r"[\u0400-\u04ff\u0590-\u05ff\u0980-\u09ff\u0e00-\u0e7f\u3040-\u309f\uac00-\ud7af]"
+)
 _LATIN_WORD = re.compile(r"(?<![A-Za-z])[a-z]{4,}(?![A-Za-z])")
 _UNCLEAR = re.compile(r"OCR(?![-–][ABab]\b)|识别不清|原文不清|字迹不清|（不清）|\(illegible\)|�")
 _PHONE = re.compile(r"\+\s?\d{2,3}\s?-?\s?\d{6,}|(?<!\d)1[3-9]\d{9}(?!\d)|(电话|手机|Tel|Mobile)[ \t]*[:：]?[ \t]*(?=(?:[ \t\-()]*\d){7,})\+?\d[\d \t\-()]{6,}", re.IGNORECASE)
@@ -124,7 +127,11 @@ def why_unusable(zh: str | None, title: str | None = "", original: str | None = 
         return "识别不清"
     bare = re.sub(r"[（(][^（）()]{0,120}[）)]", "", t)  # 括注的原文术语不算
     letters = len(re.findall(r"[一-鿿]", bare))
-    if len(_ARABIC.findall(bare)) > 12 or len(re.findall(r"[A-Za-z]", bare)) > max(80, letters):
+    if (
+        len(_ARABIC.findall(bare)) > 12
+        or len(_OTHER_FOREIGN_SCRIPT.findall(bare)) > 12
+        or len(re.findall(r"[A-Za-z]", bare)) > max(80, letters)
+    ):
         return "夹着大段未译的外文"
     if len(_LATIN_WORD.findall(bare)) >= 3 or len(re.findall(r"(?<![A-Za-z])(of|the|and|to)(?![A-Za-z])", bare)) >= 3:
         return "夹着未译的外文词"

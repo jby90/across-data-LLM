@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import ctypes
 import hashlib
 import hmac
 import json
@@ -16,10 +17,20 @@ from argon2.exceptions import InvalidHashError, VerificationError
 from app.core.config import get_settings
 
 _hasher = PasswordHasher()
-# 限制并发 Argon2id 哈希线程数（每次分配 64 MiB 内存块），防止多客户端突发并发登录导致小内存主机抖动
-_ARGON2_SEM = threading.BoundedSemaphore(2)
+# 限制并发 Argon2id 哈希线程数（单次 64 MiB），防止突发登录导致小内存云主机 OOM
+_ARGON2_SEM = threading.BoundedSemaphore(1)
 _ALGORITHM = "HS256"
 _ISSUER = "cyshuhe"
+
+
+def trim_native_heap() -> None:
+    """Release freed glibc arena pages back to the Linux kernel on low-memory hosts."""
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 # 令牌受众:用户端与管理端令牌互不通用
 AUD_USER = "user"
@@ -28,7 +39,10 @@ AUD_ADMIN = "admin"
 
 def hash_password(password: str) -> str:
     with _ARGON2_SEM:
-        return _hasher.hash(password)
+        try:
+            return _hasher.hash(password)
+        finally:
+            trim_native_heap()
 
 
 async def hash_password_async(password: str) -> str:
@@ -41,6 +55,8 @@ def verify_password(password: str, password_hash: str) -> bool:
             return _hasher.verify(password_hash, password)
         except (VerificationError, InvalidHashError):
             return False
+        finally:
+            trim_native_heap()
 
 
 async def verify_password_async(password: str, password_hash: str) -> bool:

@@ -21,8 +21,30 @@ _PUB_RE = re.compile(r"\b(?:Minist[eè]re|Public|Gouvernement|Agence Nationale|O
 
 # 表格语言里的国家名称
 _NAMES = {
-    "fr": {"CN": "Chine", "MA": "Maroc", "EG": "Égypte", "TN": "Tunisie", "LB": "Liban", "SG": "Singapour", "FR": "France", "DE": "Allemagne", "ES": "Espagne", "IT": "Italie", "US": "États-Unis", "GB": "Royaume-Uni", "AE": "Émirats arabes unis", "SA": "Arabie saoudite", "JP": "Japon", "KR": "Corée du Sud"},
-    "en": {"CN": "China", "MA": "Morocco", "EG": "Egypt", "TN": "Tunisia", "LB": "Lebanon", "SG": "Singapore", "FR": "France", "DE": "Germany", "ES": "Spain", "IT": "Italy", "US": "United States", "GB": "United Kingdom", "AE": "United Arab Emirates", "SA": "Saudi Arabia", "JP": "Japan", "KR": "Republic of Korea"},
+    "fr": {
+        "CN": "Chine", "MA": "Maroc", "EG": "Égypte", "TN": "Tunisie", "LB": "Liban", "SG": "Singapour",
+        "EU": "Union européenne", "FR": "France", "DE": "Allemagne", "ES": "Espagne", "IT": "Italie",
+        "NL": "Pays-Bas", "BE": "Belgique", "SE": "Suède", "PL": "Pologne", "GB": "Royaume-Uni",
+        "RU": "Russie", "TR": "Turquie", "JP": "Japon", "KR": "Corée du Sud", "TH": "Thaïlande",
+        "MY": "Malaisie", "ID": "Indonésie", "VN": "Viêt Nam", "PH": "Philippines", "IN": "Inde",
+        "PK": "Pakistan", "BD": "Bangladesh", "KZ": "Kazakhstan", "KG": "Kirghizistan",
+        "AE": "Émirats arabes unis", "SA": "Arabie saoudite", "QA": "Qatar", "KW": "Koweït",
+        "OM": "Oman", "IL": "Israël", "DZ": "Algérie", "ZA": "Afrique du Sud", "NG": "Nigéria",
+        "US": "États-Unis", "CA": "Canada", "MX": "Mexique", "BR": "Brésil", "AR": "Argentine",
+        "CL": "Chili", "CO": "Colombie", "PE": "Pérou", "AU": "Australie", "NZ": "Nouvelle-Zélande",
+    },
+    "en": {
+        "CN": "China", "MA": "Morocco", "EG": "Egypt", "TN": "Tunisia", "LB": "Lebanon", "SG": "Singapore",
+        "EU": "European Union", "FR": "France", "DE": "Germany", "ES": "Spain", "IT": "Italy",
+        "NL": "Netherlands", "BE": "Belgium", "SE": "Sweden", "PL": "Poland", "GB": "United Kingdom",
+        "RU": "Russia", "TR": "Türkiye", "JP": "Japan", "KR": "Republic of Korea", "TH": "Thailand",
+        "MY": "Malaysia", "ID": "Indonesia", "VN": "Vietnam", "PH": "Philippines", "IN": "India",
+        "PK": "Pakistan", "BD": "Bangladesh", "KZ": "Kazakhstan", "KG": "Kyrgyzstan",
+        "AE": "United Arab Emirates", "SA": "Saudi Arabia", "QA": "Qatar", "KW": "Kuwait",
+        "OM": "Oman", "IL": "Israel", "DZ": "Algeria", "ZA": "South Africa", "NG": "Nigeria",
+        "US": "United States", "CA": "Canada", "MX": "Mexico", "BR": "Brazil", "AR": "Argentina",
+        "CL": "Chile", "CO": "Colombia", "PE": "Peru", "AU": "Australia", "NZ": "New Zealand",
+    },
 }
 # 设有数据保护监管机构的国家（其个人数据保护法设立了监管机构）
 _AUTHORITY = {"CN", "MA", "EG", "TN", "SG", "FR", "DE", "ES", "IT", "NL", "BE", "SE", "PL", "AT", "IE", "PT", "CZ", "HU", "GB", "CH", "NO", "JP", "KR", "TH", "MY", "ID", "VN", "PH", "IN", "TR", "AE", "SA", "QA", "IL", "JO", "DZ", "ZA", "NG", "KE", "BR", "AR", "CL", "PE", "CO", "MX", "CA", "AU", "NZ", "HK", "MO"}

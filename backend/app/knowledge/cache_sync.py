@@ -38,6 +38,12 @@ def use_cached(hit) -> bool:
     return bool(hit) and keeper_active and not rebuilding.get()
 
 
+def cockpit_router_warmed() -> bool:
+    from app.iam import cockpit_router
+
+    return bool(cockpit_router._KB_POSTURE_CACHE)
+
+
 def clear_user_caches() -> None:
     """Drop every cached view (tests start from a clean state with this)."""
     from app.admission import router as adm_router
@@ -134,14 +140,23 @@ def _rebuild_in_thread() -> str:
                     current = await mark(session)
             token = rebuilding.set(True)
             try:
-                with system_scope("view-rebuild-cockpit"):
-                    async with factory() as session:
-                        from app.iam import cockpit_router
+                # 先在启动 3 秒内建好驾驶舱首屏缓存（此时 known_hash 不阻塞），随后后台算完简报指纹再刷新一次
+                if not cockpit_router_warmed():
+                    with system_scope("view-rebuild-cockpit-fast"):
+                        async with factory() as session:
+                            from app.iam import cockpit_router
 
-                        await cockpit_router._kb_posture(session)
+                            rebuilding.reset(token)
+                            try:
+                                await cockpit_router._kb_posture(session)
+                            finally:
+                                token = rebuilding.set(True)
+                            session.expunge_all()
                 await warm_basis(factory)
                 with system_scope("view-rebuild-admin"):
                     async with factory() as session:
+                        from sqlalchemy import text as sa_text
+
                         from app.analysis.benchmarks import run_retrieval_benchmarks
                         from app.analysis.evaluation import latest_evaluation
                         from app.iam import cockpit_router
@@ -149,17 +164,39 @@ def _rebuild_in_thread() -> str:
                         from app.knowledge import router as k_router
 
                         await run_retrieval_benchmarks(session)
+                        session.expunge_all()
                         await latest_evaluation(session)
+                        session.expunge_all()
                         await scan(session)
-                        for _cc in ("SG", "EG", "TN", "MA", "LB", "CN"):
+                        session.expunge_all()
+
+                        hot_kg_rows = (
+                            await session.execute(
+                                sa_text(
+                                    "select distinct country_code from analysis_tasks "
+                                    "where archived_at is null and country_code is not null limit 8"
+                                )
+                            )
+                        ).scalars().all()
+                        for _cc in sorted({*(c.upper() for c in hot_kg_rows if c), "CN"})[:8]:
                             _gp = await k_router._build_graph_payload(session, _cc, only_approved=False)
+                            while len(k_router._GRAPH_JSON_CACHE) >= 16 and (_cc, False) not in k_router._GRAPH_JSON_CACHE:
+                                k_router._GRAPH_JSON_CACHE.pop(next(iter(k_router._GRAPH_JSON_CACHE)), None)
                             k_router._GRAPH_JSON_CACHE[(_cc, False)] = _gp.model_dump_json()
+                            session.expunge_all()
                         await cockpit_router._kb_posture(session)
+                        session.expunge_all()
             finally:
                 rebuilding.reset(token)
             return current
         finally:
             await engine.dispose()
+            import gc
+
+            from app.core.security import trim_native_heap
+
+            gc.collect()
+            trim_native_heap()
 
     return asyncio.run(run())
 

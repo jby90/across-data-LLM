@@ -86,8 +86,8 @@ _WS_RE = re.compile(r"\s+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？；;])\s+")
 
 _EASTERN_ARABIC_MAP = str.maketrans(
-    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹％",
-    "01234567890123456789%",
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹০১২৩৪৫৬৭৮৯๐๑๒๓๔๕๖๗๘๙％",
+    "0123456789012345678901234567890123456789%",
 )
 
 # 进程级并发信号量(按需绑定当前事件循环)
@@ -190,7 +190,10 @@ def _protect_numeric_literals(text: str) -> tuple[str, dict[str, str]]:
         return marker
 
     currency_amount = re.compile(
-        r"(?<![A-Za-z])(?:US\$|S\$|SGD|USD|EUR|GBP|MAD|EGP|TND|LBP|\$|€|£)"
+        r"(?<![A-Za-z])(?:US\$|S\$|A\$|C\$|R\$|Mex\$|S/\.|"
+        r"SGD|USD|EUR|GBP|MAD|EGP|TND|LBP|CNY|RMB|JPY|KRW|THB|MYR|IDR|VND|PHP|"
+        r"AED|SAR|QAR|KWD|OMR|DZD|RUB|KZT|KGS|TRY|ILS|INR|PKR|BDT|AUD|CAD|BRL|"
+        r"MXN|ARS|CLP|COP|PEN|ZAR|NGN|PLN|SEK|\$|€|£|₩|฿|₫|₱|₽|₸|₺|₪|₹|৳|₦)"
         r"\s*\d+(?:,\d{3})*(?:\.\d+)?",
         re.IGNORECASE,
     )
@@ -689,7 +692,7 @@ def _build_translation_prompts(
             "严禁输出“无法执行翻译”“待翻译原文仅包含”“版面行号”“受保护内容”等元解释。"
             "若原文含 <Placeholder>，统一译为“（官方原件留空待填）”，不得输出 <Placeholder> 或 <占位符>。"
         ),
-        "6. 【币种与单位】：保留原文货币符号/代码，$ 不得自行改成美元、新元或欧元。"
+        "6. 【币种与单位】：保留原文货币符号/代码（如原文含 AED、SAR、QAR、KWD、OMR、DZD、INR、PKR、PHP、MXN、ARS、COP、CLP、AUD、CAD、BRL、KRW、JPY、THB、MYR、IDR、VND、RUB、TRY、ZAR、NGN、PLN、SEK 等，须原样保留代码或使用带国别的全称如“阿联酋迪拉姆（AED）”“沙特里亚尔（SAR）”“印度卢比（INR）”“菲律宾比索（PHP）”），$ 不得自行改成美元、新元或欧元。"
         "不得把金额改写为万元/百万；百分比保留 %，日期月份和引用条号必须精确对应原文。",
         "7. __CYSH_PRIVATE_ 开头的占位符必须原样逐一保留，禁止翻译、改写或猜测其内容。",
         "8. __CYSH_LITERAL_ 是受保护的原文数字或金额，必须逐一原样输出，"
@@ -706,7 +709,7 @@ def _build_translation_prompts(
         "不得添加处理工作、支付或收取等原文没有的文字。"
         "数字表格如无法同时满足中文占比和忠实性，仍只给忠实译文，由系统判定失败，禁止扩写凑字。",
         "13. 【中文法规体例】：按中国法律法规的行文习惯表达，读起来像中文法规，而不是逐词直译。"
-        "（1）编、章、节标题写成“第一章 总则”“第三节 车辆的技术条件”：序号与标题之间空一格，不加冒号、破折号；"
+        "（1）编、章、节标题写成“第一章 总则”“第三节 车辆的技术条件”：序号与标题之间空一格，不加冒号、破折号；若条文开头、中间或末尾带有编/章/节标题（如 Chapter / Chapitre / Capítulo / Seção / Título / Abschnitt / الباب / الفصل），必须逐一完整译出并保留在原位，严禁将其当作页眉遗漏；"
         "标题用中文法规常见的名词性短语意译，如 De la conduite des véhicules et des animaux 译“车辆及畜力车的驾驶规则”，"
         "不要直译成“车辆和动物的驾驶”；Dispositions générales / أحكام عامة 译“总则”或“一般规定”。"
         "（2）条号写“第47条”“第47条第2款”，不加括号；东阿拉伯数字（٠١٢٣٤٥٦٧٨٩）一律改写为阿拉伯数字（0123456789）；注意区分法典修订版年份“2020 Ed.”或“2020 Rev. Ed.”（应译为“2020年修订版”，严禁误写为“第2020条 Ed.”）。"

@@ -4,6 +4,7 @@ export { startProgressStream, parseSseBlock, type ProgressEvent, type StreamStat
 export { STATUS_TONE, statusTone, statusClass, TONE_TAG_TYPE, type StatusTone } from './statusTone'
 export { WORDING, STATUS_WORDS, missingWording } from './wording'
 export { COUNTRY_NAMES } from './regulationDirectory'
+export { countryFlagShapes, type FlagShape } from './countryFlags'
 export { MAP_VIEWBOX, WORLD_COUNTRY_PATHS, WORLD_COUNTRY_HUBS, getCountryHub, getCountryLabelOffset, buildRouteArcPath } from './worldMapData'
 
 export const ROLE_LABEL: Record<Role, string> = {

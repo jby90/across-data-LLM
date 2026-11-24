@@ -94,12 +94,14 @@ async def source_grounds(session: AsyncSession, cc: str) -> dict[str, Ground | N
     # 通用出境主依据优先选上位基本法律（law/act），排在视频监控、医疗、银行等窄域专用决议/决定之前
     narrow_sector = re.compile(
         r"视频监控|摄像头|图像采集|门禁|考勤|生物识别门禁|医疗|健康|医院|病历|银行|信贷|征信|金融|保险|"
-        r"vidéosurveillance|caméra|télésurveillance|biométr|santé|médical|bancaire",
+        r"vidéosurveillance|caméra|télésurveillance|biométr|santé|médical|bancaire|"
+        r"videoüberwachung|gesundheit|bankwesen|videovigilancia|salud|financ",
         re.I,
     )
     primary_law_words = re.compile(
-        r"个人数据保护法|个人信息保护法|数据安全法|网络安全法|保护自然人.*法|"
-        r"\bAct\b|\bLoi\b|قانون",
+        r"个人数据保护法|个人信息保护法|数据安全法|网络安全法|通用数据保护条例|保护自然人.*法|信息与自由法|联邦数据保护法|"
+        r"\bAct\b|\bLoi\b|\bGesetz\b|\bBDSG\b|\bGDPR\b|\bRGPD\b|\bLGPD\b|\bKVKK\b|\bLey\b|\bLei\b|\bKanun\b|\bUstawa\b|\bWet\b|\bLag\b|"
+        r"Федеральный\s+закон|قانون|보호법|保護法|พระราชบัญญัติ|Luật|Undang-Undang|\bAkta\b",
         re.I,
     )
     doc_ids = {n.document_id for n in (*transfer, *inner) if getattr(n, "document_id", None)}

@@ -50,10 +50,10 @@ def main():
             "CYSH_DB_MEM_LIMIT": "320m",
             "CYSH_PG_SHARED_BUFFERS": "128MB",
             "CYSH_PG_MAX_CONNECTIONS": "60",
-            "CYSH_API_MEM_LIMIT": "576m",
+            "CYSH_API_MEM_LIMIT": "688m",
             "CYSH_DB_POOL_SIZE": "8",
             "CYSH_DB_MAX_OVERFLOW": "12",
-            "CYSH_WORKER_MEM_LIMIT": "352m",
+            "CYSH_WORKER_MEM_LIMIT": "304m",
             "CYSH_WORKER_POOL_SIZE": "2",
             "CYSH_WORKER_MAX_OVERFLOW": "2",
         }

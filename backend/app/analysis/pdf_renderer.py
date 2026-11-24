@@ -253,7 +253,7 @@ def report_html(
         @page {{size:A4; margin:28mm 18mm 22mm;
           {top_slot} {{content:element(reportHeader)}}
           @bottom-center {{content:counter(page) ' / ' counter(pages);font-size:9pt}}}}
-        body{{font-family:inter,notosanssc,notonaskharabic,sans-serif;
+        body{{font-family:inter,notosanssc,notosanskr,notosansthai,notosansbengali,notosanshebrew,notonaskharabic,sans-serif;
           font-size:10.5pt;color:#000000;line-height:1.5;hyphens:none}}
         body.rtl-doc{{direction:rtl;text-align:right}}
         body.rtl-doc table{{direction:rtl}}

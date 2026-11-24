@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { canExport } from '@cyshuhe/shared'
+import { canExport, serverFilename } from '@cyshuhe/shared'
+import CountryFlag from './CountryFlag.vue'
 import { computed as _computed } from 'vue'
 import { useAuth } from '../auth'
 const _auth = useAuth()
 const downloadable = _computed(() => canExport(_auth.user))
-import { serverFilename } from '@cyshuhe/shared'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { reflow } from '@cyshuhe/shared/src/reflow'
@@ -144,7 +144,7 @@ watch(() => props.country, () => { full.value = []; void load() }, { immediate: 
   <div v-loading="loading" class="wp-page" data-testid="whitepaper">
     <div v-if="!country" class="pick" data-testid="wp-pick">
       <p>选择一个国家，查看该国的汽车数据合规洞察简报：</p>
-      <div class="pick-list"><el-button v-for="c in countries || []" :key="c.country_code" size="large" @click="emit('choose', c.country_code)">{{ c.country_name_zh }}</el-button></div>
+      <div class="pick-list"><el-button v-for="c in countries || []" :key="c.country_code" size="large" @click="emit('choose', c.country_code)"><CountryFlag :code="c.country_code" size="sm" style="margin-right: 6px" />{{ c.country_name_zh }}</el-button></div>
     </div>
     <el-alert v-else-if="failed" type="error" :closable="false" :title="failed" />
     <el-empty
@@ -154,7 +154,7 @@ watch(() => props.country, () => { full.value = []; void load() }, { immediate: 
     />
     <template v-else-if="page">
       <section class="overview" data-testid="wp-overview">
-        <h3>{{ page.country_name_zh }}数据合规概述<small class="updated" data-testid="wp-updated">引证核心法规 {{ page.documents }} 部 · {{ page.clauses }} 条<template v-if="page.updated"> · 法规最后更新 {{ page.updated }}</template></small></h3>
+        <h3><CountryFlag :code="page.country_code" style="margin-right: 8px" />{{ page.country_name_zh }}数据合规概述<small class="updated" data-testid="wp-updated">引证核心法规 {{ page.documents }} 部 · {{ page.clauses }} 条<template v-if="page.updated"> · 法规最后更新 {{ page.updated }}</template></small></h3>
         <div v-for="o in page.overview" :key="o.label" class="line"><span class="tag">{{ o.label }}</span><p>{{ o.text }}</p></div>
       </section>
 
