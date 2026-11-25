@@ -69,9 +69,19 @@ async def admission_entries(session: AsyncSession, task, country: str | None) ->
         )
     ).all()
     from app.admission.router import entry_listed
+    from app.analysis.documents_router import task_functions
 
     rows = [r for r in rows if await entry_listed(session, r)]  # 资料不齐的不对用户展示（与准入页同一口径）
-    needed = [r for r in rows if plan.applies(getattr(r, "category", ""), task.scenario_type or "", getattr(r, "functions", None), r.name_zh) == "needed"]
+    fns = task_functions(task)
+    needed = [
+        r
+        for r in rows
+        if (
+            any(plan.applies(getattr(r, "category", ""), fn, getattr(r, "functions", None), r.name_zh) == "needed" for fn in fns)
+            if fns
+            else plan.applies(getattr(r, "category", ""), "", getattr(r, "functions", None), r.name_zh) == "needed"
+        )
+    ]
     return needed or list(rows)
 
 

@@ -128,6 +128,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/analysis/tasks/{task_id}/documents/{code}/saved"): "保存合规文件",
     ("PATCH", "/api/analysis/tasks/{task_id}/documents/{code}/saved"): "修改合规文件",
     ("DELETE", "/api/analysis/tasks/{task_id}/documents/{code}/saved"): "恢复自动生成版合规文件",
+    ("POST", "/api/analysis/tasks/{task_id}/documents/{code}/versions"): "生成合规文件历史版本",
+    ("POST", "/api/analysis/tasks/{task_id}/documents/{code}/versions/{version_no}/rollback"): "回退合规文件历史版本",
     ("POST", "/api/analysis/doc-projects"): "新建合规评估项目",
     ("PATCH", "/api/analysis/doc-projects/{project_id}"): "修改合规评估项目",
     ("POST", "/api/analysis/doc-projects/{project_id}/clone"): "复制合规评估项目",
@@ -180,6 +182,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/notifications/{notification_id}/reevaluate"): "按法规更新重新评估",
     ("PUT", "/api/admin/opinion/digest-config"): "配置舆情合规周报推送",
     ("POST", "/api/admin/opinion/digest-send"): "生成并推送舆情合规周报",
+    ("POST", "/api/admin/opinion/digest-test"): "发送舆情周报验证邮件",
+    ("POST", "/api/admin/opinion/collect-now"): "立即抽取最新舆情动态",
     ("GET", "/api/admin/updates/report/export.xlsx"): "导出法规监测与联动时效报表",
 }
 
@@ -246,6 +250,7 @@ TABLE_ZH: dict[str, str] = {
     "attachment_reviews": "制度对照结果",
     "document_instances": "合规文件",
     "document_edits": "合规文件修改",
+    "document_instance_versions": "合规文件历史版本",
     "document_narratives": "论述",
     "document_templates": "文件模板",
     "form_instances": "官方表格",

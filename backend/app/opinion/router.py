@@ -223,6 +223,30 @@ class DigestSendIn(BaseModel):
         return _validate_recipient_list(v)
 
 
+class DigestTestIn(BaseModel):
+    recipients: list[str] = Field(default_factory=list, max_length=50)
+    smtp_host: str | None = Field(default=None, max_length=255)
+    smtp_port: int | None = Field(default=None, ge=1, le=65535)
+    smtp_user: str | None = Field(default=None, max_length=255)
+    smtp_from: str | None = Field(default=None, max_length=255)
+    smtp_password: str | None = Field(default=None, max_length=255)
+
+    @field_validator("recipients")
+    @classmethod
+    def _check_test_rcpts(cls, v: list[str]) -> list[str]:
+        return _validate_recipient_list(v) or []
+
+    @field_validator("smtp_host", "smtp_user", "smtp_from")
+    @classmethod
+    def _check_test_no_crlf(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        s = v.strip()
+        if any(ord(c) < 32 for c in s):
+            raise ValueError("发件配置不能包含换行或控制字符")
+        return s
+
+
 def _cfg_out(cfg) -> dict:
     return {
         "enabled": bool(cfg.enabled),
@@ -312,8 +336,72 @@ async def send_digest(
         "item_count": run.item_count,
         "delivery_mode": run.delivery_mode,
         "status": run.status,
-        "note": run.note,
+        "note": _clean_run_note(run.note),
         "created_at": run.created_at.isoformat() if run.created_at else None,
+    }
+
+
+@router.post("/digest-test")
+async def test_digest_email(
+    body: DigestTestIn, request: Request, admin: AdminDep, session: SessionDep
+) -> dict:
+    from app.iam.models import Role
+
+    is_super = admin.role == Role.PLATFORM_ADMIN
+    try:
+        res = await wd.send_test_digest_email(
+            session,
+            recipients=body.recipients,
+            smtp_host=body.smtp_host if is_super else None,
+            smtp_port=body.smtp_port if is_super else None,
+            smtp_user=body.smtp_user if is_super else None,
+            smtp_from=body.smtp_from if is_super else None,
+            smtp_password=body.smtp_password if is_super else None,
+        )
+        await session.commit()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from None
+    set_detail(request, summary=f"发送舆情合规周报内部验证邮件（共 {res['recipient_count']} 个收件人）")
+    return res
+
+
+@router.post("/collect-now")
+async def collect_opinion_now(request: Request, _: AdminDep) -> dict:
+    import httpx
+
+    from app.core.config import get_settings
+    from app.core.db import get_sessionmaker
+    from app.ingestion.fetcher import PoliteFetcher
+    from app.opinion.collect import run_due_opinion_collect_if_needed
+
+    settings = get_settings()
+    sf = get_sessionmaker()
+    async with httpx.AsyncClient(timeout=min(float(settings.crawl_timeout_seconds or 15), 15.0)) as client:
+        res = await run_due_opinion_collect_if_needed(
+            sf,
+            lambda: PoliteFetcher(
+                client,
+                user_agent=settings.crawl_user_agent,
+                delay_seconds=max(0.2, min(float(settings.crawl_delay_seconds or 1.0), 1.0)),
+                max_bytes=settings.crawl_max_bytes,
+                allow_resolved_cidrs=settings.crawl_allow_resolved_cidrs,
+            ),
+            force=True,
+            per_page=10,
+        )
+    set_detail(
+        request,
+        summary=f"手动触发舆情动态抽取（扫描 {res['sources']} 个来源，新增 {res['kept']} 条，定级 {res['graded']} 条）",
+    )
+    return {
+        "ran": res["ran"],
+        "sources": res["sources"],
+        "kept": res["kept"],
+        "already": res["already"],
+        "graded": res["graded"],
+        "message": f"已完成 {res['sources']} 个官方与行业来源巡检：新增 {res['kept']} 条资讯，已有 {res['already']} 条",
     }
 
 

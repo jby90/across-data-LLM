@@ -24,7 +24,7 @@ const RegulationRelations = defineAsyncComponent(
 const VersionCompare = defineAsyncComponent(
   () => import('../components/VersionCompare.vue'),
 )
-const CountryWhitepaper = defineAsyncComponent(() => import('../components/CountryWhitepaper.vue'))
+import CountryWhitepaper from '../components/CountryWhitepaper.vue'
 const readingView = ref('clauses')
 // 第 7.5 项 规则 18、21：法规目录可收起，给条文阅读让宽；收起与否记在本机
 const DIR_KEY = 'cyshuhe.kb.dir-collapsed'

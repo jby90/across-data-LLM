@@ -34,7 +34,7 @@ interface FinalStatus {
 // 平台检查结果：挂在题目旁；must 必须 / advise 建议（与准入材料检查同一套分档）；点了跳到对不上的另一处
 type IssueTo = { kind: 'question'; key: string } | { kind: 'route' } | { kind: 'form'; instance_id: string; item: string; name: string }
 interface Issue { id?: string; key: string; text: string; level: 'must' | 'advise'; to: IssueTo }
-interface Suggestion { text: string; source: 'text' | 'general'; quote: string }
+interface Suggestion { text: string; source: 'text' | 'general'; quote: string; keys?: string[] }
 interface DensityHint { missing_facets: string[]; message: string; draft_template: string }
 interface ThirdCountryChecklist { country: string; country_code: string; role: string; in_eu_eea: boolean; framework_note: string; import_guide: string; items: { seq: string; topic: string; detail: string }[] }
 interface SignoffSummary { authority: string; deadline_note: string; required_docs_count: number; unconfirmed_count: number; check_items_count: number }
@@ -43,7 +43,7 @@ interface Carried { kind: 'project' | 'route' | 'said' | 'risk'; text: string; p
 // kind 为 risks：主要风险按行填（lacking 每行还缺什么，remediate 还有几项没生成整改项）；max 这题最多几字
 interface Question { kind?: 'risks'; lacking?: string[]; remediate?: { pending: number; done: number }; max?: number; key: string; label: string; question: string; why: string; hint: string; used_for: string; example: string; basis: BasisCard[]; carried: Carried | null; issues: Issue[]; density_hint?: DensityHint | null; other?: boolean; detail_on?: string; short: boolean; optional: boolean; choices: string[]; value: string; tier: 'company' | 'business' | 'system'; suggestion: Suggestion | null; first_doc: string; used_in: string[] }
 interface SuggestState { state: 'none' | 'running' | 'done' | 'failed'; seconds?: number; error?: string; count: number }
-interface Route { source_country: string; recipient_country: string; function: string; business_scene: string; scenario_text: string; vehicle_model: string; company_name: string; company_name_carried: Carried | null; library_country: string }
+interface Route { source_country: string; recipient_country: string; function: string; functions: string[]; business_scene: string; business_scenes: string[]; scenario_text: string; vehicle_model: string; company_name: string; company_name_carried: Carried | null; library_country: string }
 // 走安全评估时的两个期限：申报截止日（自评估完成日起 3 个月）、评估结果到期日（出具日起 3 年）
 interface Period { date: string; days_left: number; state: string }
 interface Validity { assessed_on: string; issued_on: string; filing: Period | null; result: Period | null; extend: string; basis: BasisCard[] }
@@ -78,7 +78,7 @@ const options = ref<Options>({ countries: [], library_countries: [], functions: 
 const loading = ref(false)
 const busy = ref('')
 const edits = reactive<Record<string, string>>({})
-const startForm = reactive({ source: '', recipient: '', function: '', scene: '', text: '', vehicle: '', company: '' })
+const startForm = reactive({ source: '', recipient: '', functions: [] as string[], scenes: [] as string[], text: '', vehicle: '', company: '' })
 const editingRoute = ref(false)
 
 const openId = computed(() => (route.query.project as string) || '')
@@ -98,6 +98,8 @@ async function open(id: string, refresh = false) {
   if (!before) loading.value = true
   try {
     const next = await api.get<Project>(`/api/analysis/doc-projects/${id}`)
+    if (!Array.isArray(next.route.functions)) next.route.functions = next.route.function ? [next.route.function] : []
+    if (!Array.isArray(next.route.business_scenes)) next.route.business_scenes = next.route.business_scene ? [next.route.business_scene] : []
     project.value = next
     if (before) {
       for (const q of next.questions) if ((edits[q.key] ?? '') === (before[q.key] ?? '')) edits[q.key] = q.value
@@ -125,12 +127,14 @@ async function open(id: string, refresh = false) {
 async function create() {
   if (!startForm.source || !startForm.recipient) { ElMessage.warning('请先选择数据发出国与数据接收国'); return }
   if (startForm.source.trim() === startForm.recipient.trim()) { ElMessage.warning('数据发出国与接收国不能相同，请选择境外目的国或地区'); return }
-  if (!startForm.function && !startForm.scene && !startForm.text.trim()) { ElMessage.warning('请选择车辆数据主要用途或填写业务说明'); return }
+  if (!startForm.functions.length && !startForm.scenes.length && !startForm.text.trim()) { ElMessage.warning('请选择车辆数据主要用途（支持多场景多选）或填写业务说明'); return }
   busy.value = 'create'
   try {
     const p = await api.post<Project>('/api/analysis/doc-projects', {
       source_country: startForm.source, recipient_country: startForm.recipient,
-      function: startForm.function || null, business_scene: startForm.scene || null, scenario_text: startForm.text,
+      functions: startForm.functions, function: startForm.functions[0] || null,
+      business_scenes: startForm.scenes, business_scene: startForm.scenes[0] || null,
+      scenario_text: startForm.text,
       vehicle_model: startForm.vehicle, company_name: startForm.company,
     })
     await loadList()
@@ -146,13 +150,20 @@ async function saveRoute() {
   }
   busy.value = 'route'
   try {
-    project.value = await api.patch<Project>(`/api/analysis/doc-projects/${project.value.id}`, {
-      source_country: r.source_country, recipient_country: r.recipient_country, function: r.function || undefined,
-      business_scene: r.business_scene || undefined, scenario_text: r.scenario_text, vehicle_model: r.vehicle_model, company_name: r.company_name,
+    const fns = Array.isArray(r.functions) ? r.functions : (r.function ? [r.function] : [])
+    const scs = Array.isArray(r.business_scenes) ? r.business_scenes : (r.business_scene ? [r.business_scene] : [])
+    const next = await api.patch<Project>(`/api/analysis/doc-projects/${project.value.id}`, {
+      source_country: r.source_country, recipient_country: r.recipient_country,
+      functions: fns, function: fns[0] || '',
+      business_scenes: scs, business_scene: scs[0] || '',
+      scenario_text: r.scenario_text, vehicle_model: r.vehicle_model, company_name: r.company_name,
     })
+    if (!Array.isArray(next.route.functions)) next.route.functions = next.route.function ? [next.route.function] : []
+    if (!Array.isArray(next.route.business_scenes)) next.route.business_scenes = next.route.business_scene ? [next.route.business_scene] : []
+    project.value = next
     editingRoute.value = false
     await loadList()
-    ElMessage.success('已更新，受影响的文件已重新核对')
+    ElMessage.success('已更新流向与多场景配置，受影响的文件与属地准入事项已同步重新核对')
   } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
 }
 // 安全评估的两个日期：选了就保存，清空就清除
@@ -234,7 +245,7 @@ async function resolveSuggestions(keys: string[] | null, dismiss = false) {
     if (!dismiss) ElMessage.success('已采用，文件已更新；如有不符可在下方修改')
   } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
 }
-const SUGGEST_LABELS: Record<string, string> = { company_name: '公司名称', vehicle_model: '车型或车队' }
+const SUGGEST_LABELS: Record<string, string> = { company_name: '公司名称', vehicle_model: '车型或车队', functions: '识别到的多场景用途' }
 const pending = computed(() => {
   const out: { key: string; label: string; sg: Suggestion }[] = []
   for (const [k, sg] of Object.entries(project.value?.route_suggestions ?? {})) out.push({ key: k, label: SUGGEST_LABELS[k] ?? k, sg })
@@ -435,6 +446,7 @@ async function toggleManualInclude(d: DocView, include: boolean) {
   } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
 }
 interface DocEditLog { user_name: string; place: string; before: string; after: string; at: string | null }
+interface DocVersionItem { version_no: number; edit_count: number; note: string; user_name: string; created_at: string | null; is_current: boolean }
 const previewVisible = ref(false)
 const previewLoading = ref(false)
 const previewSaving = ref(false)
@@ -446,9 +458,18 @@ const previewAidKind = ref<'' | 'signoff' | 'third-country'>('')
 const showThirdCountry = ref(false)
 const previewEditMode = ref(false)
 const showEditHistory = ref(false)
+const showVersionHistory = ref(false)
 const previewEdits = ref<DocEditLog[]>([])
+const previewVersions = ref<DocVersionItem[]>([])
+const viewingVersionNo = ref<number | null>(null)
+const viewingVersionBlocks = ref<PreviewBlock[]>([])
+const pendingVersionSeal = ref(false)
+let versionSealTimer: number | undefined
 const previewKind = ref<'edited' | 'official_docx' | 'standard'>('standard')
 const previewBlocks = ref<PreviewBlock[]>([])
+const displayedPreviewBlocks = computed(() =>
+  viewingVersionNo.value !== null && viewingVersionBlocks.value.length ? viewingVersionBlocks.value : previewBlocks.value,
+)
 const previewHasOutline = computed(
   () => previewBlocks.value.filter((b) => (b.type === 'heading' || b.type === 'subheading') && (b.text || '').trim()).length >= 2,
 )
@@ -513,7 +534,13 @@ async function openPreview(d: DocView) {
   previewIsEdpbEn.value = false
   previewEditMode.value = false
   showEditHistory.value = false
+  showVersionHistory.value = false
   previewEdits.value = []
+  previewVersions.value = []
+  viewingVersionNo.value = null
+  viewingVersionBlocks.value = []
+  pendingVersionSeal.value = false
+  if (versionSealTimer) { window.clearTimeout(versionSealTimer); versionSealTimer = undefined }
   previewTitle.value = d.name
   previewBlocks.value = []
   previewVisible.value = true
@@ -521,17 +548,115 @@ async function openPreview(d: DocView) {
   try {
     const [res, saved] = await Promise.all([
       api.get<{ name: string; kind: 'edited' | 'official_docx' | 'standard'; blocks: PreviewBlock[] }>(`/api/analysis/tasks/${project.value.id}/documents/${d.code}/preview`),
-      api.get<{ exists: boolean; edits?: DocEditLog[] }>(`/api/analysis/tasks/${project.value.id}/documents/${d.code}/saved`).catch(() => ({ exists: false as const })),
+      api.get<{ exists: boolean; edits?: DocEditLog[]; versions?: DocVersionItem[] }>(`/api/analysis/tasks/${project.value.id}/documents/${d.code}/saved`).catch(() => ({ exists: false as const })),
     ])
     previewTitle.value = res.name || d.name
     previewKind.value = res.kind
     previewBlocks.value = res.blocks || []
     if (saved.exists && saved.edits) previewEdits.value = saved.edits
+    if (saved.exists && saved.versions) previewVersions.value = saved.versions
   } catch (e) {
     ElMessage.error((e as Error).message)
     previewVisible.value = false
   } finally {
     previewLoading.value = false
+  }
+}
+async function sealPreviewVersion(note = '') {
+  if (versionSealTimer) { window.clearTimeout(versionSealTimer); versionSealTimer = undefined }
+  if (!pendingVersionSeal.value || !project.value || !previewCode.value || previewIsEdpbEn.value || locked.value) return
+  const taskId = project.value.id
+  const docCode = previewCode.value
+  pendingVersionSeal.value = false
+  try {
+    const res = await api.post<{ exists: boolean; created: boolean; version_no?: number; versions?: DocVersionItem[] }>(
+      `/api/analysis/tasks/${taskId}/documents/${docCode}/versions`,
+      { note },
+    )
+    if (previewCode.value === docCode && res.versions) {
+      previewVersions.value = res.versions
+    }
+  } catch {
+    // 后台存版静默容错，下次停笔或切出时仍会自动补齐
+  }
+}
+function scheduleVersionSeal() {
+  if (versionSealTimer) window.clearTimeout(versionSealTimer)
+  pendingVersionSeal.value = true
+  versionSealTimer = window.setTimeout(() => {
+    void sealPreviewVersion('停止编辑自动存版')
+  }, 2200)
+}
+watch(previewEditMode, (on, wasOn) => {
+  if (on) {
+    viewingVersionNo.value = null
+    viewingVersionBlocks.value = []
+  } else if (wasOn && pendingVersionSeal.value) {
+    void sealPreviewVersion('完成编辑自动存版')
+  }
+})
+watch(previewVisible, (vis, wasVis) => {
+  if (!vis && wasVis) {
+    if (pendingVersionSeal.value) void sealPreviewVersion('停止编辑自动存版')
+    viewingVersionNo.value = null
+    viewingVersionBlocks.value = []
+  }
+})
+async function inspectVersion(v: DocVersionItem) {
+  if (!project.value || !previewCode.value) return
+  if (v.is_current) {
+    viewingVersionNo.value = null
+    viewingVersionBlocks.value = []
+    return
+  }
+  previewLoading.value = true
+  try {
+    const res = await api.get<{ version_no: number; blocks: PreviewBlock[] }>(
+      `/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/versions/${v.version_no}`,
+    )
+    previewEditMode.value = false
+    viewingVersionNo.value = res.version_no
+    viewingVersionBlocks.value = res.blocks || []
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    previewLoading.value = false
+  }
+}
+async function rollbackToVersion(v: DocVersionItem) {
+  if (!project.value || !previewCode.value || previewIsEdpbEn.value || locked.value) return
+  const tsLabel = localTime(v.created_at) || `第 ${v.version_no} 版`
+  try {
+    await ElMessageBox.confirm(
+      `确认将当前文件回退至第 ${v.version_no} 版（${tsLabel}）？回退前的修订内容仍保留在历史版本记录中，可随时按日期再次切换。`,
+      '按日期回退历史版本',
+      { confirmButtonText: '确认回退', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  if (versionSealTimer) { window.clearTimeout(versionSealTimer); versionSealTimer = undefined }
+  pendingVersionSeal.value = false
+  previewSaving.value = true
+  try {
+    const res = await api.post<{ exists: boolean; blocks: PreviewBlock[]; edits: DocEditLog[]; versions: DocVersionItem[] }>(
+      `/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/versions/${v.version_no}/rollback`,
+      {},
+    )
+    viewingVersionNo.value = null
+    viewingVersionBlocks.value = []
+    previewEditMode.value = false
+    previewKind.value = 'edited'
+    previewBlocks.value = res.blocks || previewBlocks.value
+    previewEdits.value = res.edits || []
+    previewVersions.value = res.versions || []
+    const row = project.value.documents.find((x) => x.code === previewCode.value)
+    if (row) row.edited = true
+    ElMessage.success(`已回退至第 ${v.version_no} 版（${tsLabel}），下载文件同步生效`)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    previewSaving.value = false
   }
 }
 async function savePreviewEdit(payload: { block: number; text: string; item?: number; row?: number; col?: number }) {
@@ -541,16 +666,20 @@ async function savePreviewEdit(payload: { block: number; text: string; item?: nu
     if (previewKind.value !== 'edited') {
       await api.post(`/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/saved?draft=${previewDraft.value}`, {})
     }
-    const res = await api.patch<{ exists: boolean; name: string; blocks: PreviewBlock[]; edit_count: number; edits: DocEditLog[] }>(
+    const res = await api.patch<{ exists: boolean; name: string; blocks: PreviewBlock[]; edit_count: number; edits: DocEditLog[]; versions?: DocVersionItem[] }>(
       `/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/saved`,
       payload,
     )
+    viewingVersionNo.value = null
+    viewingVersionBlocks.value = []
     previewKind.value = 'edited'
     previewBlocks.value = res.blocks || previewBlocks.value
     previewEdits.value = res.edits || []
+    if (res.versions) previewVersions.value = res.versions
     const row = project.value.documents.find((x) => x.code === previewCode.value)
     if (row) row.edited = true
-    ElMessage.success('已保存修订，下载 Word、PDF 或 Excel 时将同步输出修订内容')
+    scheduleVersionSeal()
+    ElMessage.success('已保存修订，停止编辑后将自动生成带日期的历史版本')
   } catch (e) {
     ElMessage.error((e as Error).message)
   } finally {
@@ -568,12 +697,18 @@ async function resetPreviewEdits() {
   } catch {
     return
   }
+  if (versionSealTimer) { window.clearTimeout(versionSealTimer); versionSealTimer = undefined }
+  pendingVersionSeal.value = false
   previewSaving.value = true
   try {
     await api.delete(`/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/saved`)
     previewEditMode.value = false
     showEditHistory.value = false
+    showVersionHistory.value = false
     previewEdits.value = []
+    previewVersions.value = []
+    viewingVersionNo.value = null
+    viewingVersionBlocks.value = []
     const res = await api.get<{ name: string; kind: 'edited' | 'official_docx' | 'standard'; blocks: PreviewBlock[] }>(
       `/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/preview`,
     )
@@ -1134,7 +1269,9 @@ function cmpLabelOf(key: string | undefined, list: { key: string; label: string 
 function cmpRouteLine(p: Project | null): string {
   if (!p) return '—'
   const r = p.route
-  const sceneText = cmpLabelOf(r.business_scene, options.value.scenes) || cmpLabelOf(r.function, options.value.functions)
+  const fnText = (r.functions?.length ? r.functions : [r.function]).map((k) => cmpLabelOf(k, options.value.functions)).filter(Boolean).join('、')
+  const scText = (r.business_scenes?.length ? r.business_scenes : [r.business_scene]).map((k) => cmpLabelOf(k, options.value.scenes)).filter(Boolean).join('、')
+  const sceneText = [fnText, scText].filter(Boolean).join(' / ')
   return [
     `${r.source_country || '未填'} → ${r.recipient_country || '未填'}`,
     r.vehicle_model,
@@ -1274,13 +1411,13 @@ function jumpFromCompare(id: string) {
               </el-form-item>
             </div>
             <div class="row2">
-              <el-form-item label="车辆数据主要用途">
-                <el-select v-model="startForm.function" clearable placeholder="请选择" data-testid="doc-function">
+              <el-form-item label="车辆数据主要用途（可多选多场景）">
+                <el-select v-model="startForm.functions" multiple clearable placeholder="请选择一个或多个业务场景" data-testid="doc-function">
                   <el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" />
                 </el-select>
               </el-form-item>
-              <el-form-item label="业务阶段">
-                <el-select v-model="startForm.scene" clearable placeholder="请选择" data-testid="doc-scene">
+              <el-form-item label="业务阶段（可多选）">
+                <el-select v-model="startForm.scenes" multiple clearable placeholder="请选择业务阶段" data-testid="doc-scene">
                   <el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" />
                 </el-select>
               </el-form-item>
@@ -1400,8 +1537,8 @@ function jumpFromCompare(id: string) {
               <el-form-item label="数据接收国"><el-select v-model="project.route.recipient_country" filterable allow-create default-first-option><el-option v-for="c in options.countries" :key="c" :label="c" :value="c" /></el-select></el-form-item>
             </div>
             <div class="row2">
-              <el-form-item label="主要用途"><el-select v-model="project.route.function" clearable><el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" /></el-select></el-form-item>
-              <el-form-item label="业务阶段"><el-select v-model="project.route.business_scene" clearable><el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" /></el-select></el-form-item>
+              <el-form-item label="主要用途（可多选）"><el-select v-model="project.route.functions" multiple clearable placeholder="请选择一个或多个业务场景"><el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" /></el-select></el-form-item>
+              <el-form-item label="业务阶段（可多选）"><el-select v-model="project.route.business_scenes" multiple clearable placeholder="请选择业务阶段"><el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" /></el-select></el-form-item>
             </div>
             <div class="row2">
               <el-form-item label="车型或车队"><el-input v-model="project.route.vehicle_model" />
@@ -1748,7 +1885,8 @@ function jumpFromCompare(id: string) {
             <input ref="fileEl" type="file" accept=".pdf,.docx,.txt,.md" hidden data-testid="doc-file" @change="readFile" />
 
             <div v-if="way === 'say'" class="panel">
-              <el-input v-model="pasted" type="textarea" :rows="4" maxlength="50000" :disabled="locked || project.suggest.state === 'running'" placeholder="例如：企业在突尼斯运营一支测试车队，车载摄像头画面在车端自动隐去人脸与车牌后再识别涉及的数据类型与合规要求，经加密通道传回上海研发中心用于训练感知算法。" data-testid="doc-paste" />
+              <p class="file-guide" style="margin-bottom: 8px">综合信息区：多选多个业务场景后无需分栏重复录入，直接在此合并粘贴全部场景的业务与数据说明，系统将自动按场景拆分识别并填入对应合规模块。</p>
+              <el-input v-model="pasted" type="textarea" :rows="4" maxlength="50000" :disabled="locked || project.suggest.state === 'running'" placeholder="例如：本车型在欧洲同时开展车联网远程诊断OTA、智能驾驶路测及售后服务：车端故障码与软件版本回传国内工程团队用于排障升级；路测摄像头画面在车端隐去人脸车牌后加密回传训练感知算法；预约维保客户信息加密同步售后系统保存2年。" data-testid="doc-paste" />
               <div class="easy-actions">
                 <el-button :loading="busy === 'suggest' || project.suggest.state === 'running'" :disabled="locked" data-testid="doc-read" @click="readText">识别并预填</el-button>
                 <span v-if="project.suggest.state === 'running'" class="muted">正在识别填报要素，约需半分钟，完成后自动提示。</span>
@@ -1870,10 +2008,11 @@ function jumpFromCompare(id: string) {
         <div class="preview-meta">
           <el-tag size="small" :type="previewKind === 'edited' ? 'warning' : previewKind === 'official_docx' ? 'success' : 'info'">{{ previewKind === 'edited' ? '在线修订版' : previewKind === 'official_docx' ? '法定申报表填报预览' : '标准合规报告预览' }}</el-tag>
           <span class="muted">{{ previewSubtitle }}</span>
-          <span v-if="editable && !locked && !previewIsEdpbEn && !previewAidKind" class="preview-meta-actions">
-            <el-button size="small" :type="previewEditMode ? 'primary' : 'default'" plain data-testid="doc-preview-edit-toggle" @click="previewEditMode = !previewEditMode">{{ previewEditMode ? '退出修改' : '在线修改' }}</el-button>
+          <span v-if="!previewIsEdpbEn && !previewAidKind" class="preview-meta-actions">
+            <el-button v-if="editable && !locked" size="small" :type="previewEditMode ? 'primary' : 'default'" plain data-testid="doc-preview-edit-toggle" @click="previewEditMode = !previewEditMode">{{ previewEditMode ? '退出修改' : '在线修改' }}</el-button>
+            <el-button v-if="previewVersions.length" size="small" plain data-testid="doc-preview-versions-toggle" @click="showVersionHistory = !showVersionHistory">{{ showVersionHistory ? '收起历史版本' : `历史版本（${previewVersions.length} 版）` }}</el-button>
             <el-button v-if="previewEdits.length" size="small" plain data-testid="doc-preview-history-toggle" @click="showEditHistory = !showEditHistory">{{ showEditHistory ? '收起修改记录' : `修改记录（${previewEdits.length} 处）` }}</el-button>
-            <el-button v-if="previewKind === 'edited'" size="small" type="warning" plain :loading="previewSaving" data-testid="doc-preview-reset" @click="resetPreviewEdits">恢复自动生成版</el-button>
+            <el-button v-if="editable && !locked && previewKind === 'edited'" size="small" type="warning" plain :loading="previewSaving" data-testid="doc-preview-reset" @click="resetPreviewEdits">恢复自动生成版</el-button>
           </span>
           <span v-else-if="previewAidKind && project" class="preview-meta-actions">
             <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
@@ -1892,13 +2031,30 @@ function jumpFromCompare(id: string) {
             </el-tooltip>
           </span>
         </div>
+        <div v-if="viewingVersionNo !== null" class="preview-version-banner" data-testid="doc-preview-version-banner">
+          <span>正在查阅历史存档：第 {{ viewingVersionNo }} 版（只读预览，不会影响当前生效版本）</span>
+          <el-button size="small" plain data-testid="doc-preview-version-exit" @click="viewingVersionNo = null; viewingVersionBlocks = []">返回当前生效版</el-button>
+        </div>
+        <div v-if="showVersionHistory && previewVersions.length" class="preview-history" data-testid="doc-preview-versions">
+          <div v-for="ver in previewVersions" :key="ver.version_no" class="preview-history-item preview-version-row" :data-testid="`doc-version-item-${ver.version_no}`">
+            <div class="preview-version-main">
+              <b>第 {{ ver.version_no }} 版</b>
+              <span v-if="ver.is_current" class="ver-cur-tag">当前生效</span>
+              <span class="muted">{{ localTime(ver.created_at) }}<template v-if="ver.user_name"> · {{ ver.user_name }}</template> · {{ ver.note }}</span>
+            </div>
+            <div class="preview-version-actions">
+              <el-button size="small" link type="primary" :data-testid="`doc-version-view-${ver.version_no}`" @click="inspectVersion(ver)">{{ viewingVersionNo === ver.version_no ? '正在查阅' : ver.is_current ? '查看当前版' : '按日期查阅' }}</el-button>
+              <el-button v-if="editable && !locked && !ver.is_current" size="small" link type="primary" :loading="previewSaving" :data-testid="`doc-version-rollback-${ver.version_no}`" @click="rollbackToVersion(ver)">回退到此版</el-button>
+            </div>
+          </div>
+        </div>
         <div v-if="showEditHistory && previewEdits.length" class="preview-history" data-testid="doc-preview-history">
           <div v-for="(ed, ei) in previewEdits" :key="ei" class="preview-history-item">
             <div class="preview-history-head"><b>{{ ed.place }}</b><span class="muted">{{ ed.user_name }} · {{ localTime(ed.at) }}</span></div>
             <div class="preview-history-diff"><span class="old">{{ ed.before }}</span><span class="arr">→</span><span class="new">{{ ed.after }}</span></div>
           </div>
         </div>
-        <BlocksView v-if="previewBlocks.length" :blocks="previewBlocks" hide-title :outline="previewHasOutline" :editable="previewEditMode && editable && !locked && !previewIsEdpbEn" :saving="previewSaving" @edit="savePreviewEdit" />
+        <BlocksView v-if="displayedPreviewBlocks.length" :blocks="displayedPreviewBlocks" hide-title :outline="previewHasOutline" :editable="viewingVersionNo === null && previewEditMode && editable && !locked && !previewIsEdpbEn" :saving="previewSaving" @edit="savePreviewEdit" />
       </div>
     </el-drawer>
     <el-dialog v-model="compareVisible" title="合规项目方案对比" width="min(980px, 94vw)" append-to-body destroy-on-close data-testid="doc-compare-dialog">
@@ -2192,6 +2348,11 @@ function jumpFromCompare(id: string) {
 .preview-history-diff .old { color: #64748b; text-decoration: line-through; }
 .preview-history-diff .arr { color: #94a3b8; }
 .preview-history-diff .new { color: #0f766e; font-weight: 600; }
+.preview-version-banner { margin-bottom: 12px; padding: 8px 14px; border-radius: 6px; background: #f8fafc; border: 1px solid #cbd5e1; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; color: #0f172a; }
+.preview-version-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.preview-version-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: #0f172a; }
+.ver-cur-tag { padding: 1px 8px; border-radius: 4px; border: 1px solid #0f172a; background: #ffffff; color: #0f172a; font-size: 13px; font-weight: 600; }
+.preview-version-actions { display: inline-flex; align-items: center; gap: 8px; }
 .summary { margin-bottom: 14px; }
 .summary-line { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
 .more { margin-top: 22px; }

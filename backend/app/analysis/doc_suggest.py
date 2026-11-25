@@ -29,7 +29,7 @@ BATCH = 9
 SYSTEM = (
     "你在帮企业起草跨境数据合规文件所需的填写项。只依据【业务概况】和【用户的业务说明】回答，用中文，简洁。\n"
     "每一项只可能是下面两类之一：\n"
-    "1. source=text：答案来自用户的业务说明。quote 必须逐字摘抄说明里支撑它的原话（不改字、不省略），value 是据此写出的答案。\n"
+    "1. source=text：答案来自用户的业务说明。quote 必须逐字摘抄说明里支撑它的原话（不改字）；若用户将多个业务场景（如车联网服务、远程诊断与OTA、自动驾驶测试、座舱交互、售后维保等）混合写在同一段综合材料中，请自动从混合材料里拆分提取与当前填写项对应的各场景事实，按“一是远程诊断场景：……；二是自动驾驶场景：……”分场景条理化归纳进 value（勿凭空添加原文未出现的阿拉伯数字），quote 中若需跨句引用多处原话可用“……”连接各处逐字原句片段。\n"
     "2. source=general：说明里没有，但 allow_general=true 的项，可以只用【业务概况】里已有的信息拟一版表述。写成计划或建议的口吻（“拟……”“将……”），不得写成企业已经做过的事；不得补充业务概况里没有出现的数据类别、人群、场所、系统；不得出现任何具体数字、日期、公司名、人名、证书号、联系方式。quote 留空。如果写出来只能是“具体待确定”这类空话，就不要输出这一项。\n"
     "allow_general=false 的项，说明里没有依据就不要输出。拿不准的项宁可不输出。\n"
     "同一句话可以同时支撑好几项（如“数据在杭州保存两年，访问需审批”既是保存期限与存放位置，也是保护措施），每一项都要分别输出，不要只放进一项。\n"
@@ -114,8 +114,49 @@ async def diagnose(
     return {"doc_kind": doc_kind, "summary": summary, "gaps": gaps, "followups": followups}, tokens
 
 
+_FUNCTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("autonomous_trial", re.compile(r"自动驾驶|辅助驾驶|智驾|路测|感知算法|车外视频|激光雷达|毫米波雷达")),
+    ("ota_diagnostics", re.compile(r"远程诊断|故障诊断|故障码|OTA|软件升级|固件升级|远程排查")),
+    ("cockpit_biometrics", re.compile(r"智能座舱|座舱|人脸识别|声纹|驾驶员监测|DMS|生物特征|生物识别|语音交互")),
+    ("connected_vehicle_cloud", re.compile(r"车联网|T-Box|车辆状态上云|远程控车|行车状态同步|云端网联")),
+    ("hd_mapping", re.compile(r"高精地图|测绘|众包建图|道路要素|空间坐标测绘")),
+    ("fleet_mobility", re.compile(r"车队管理|网约车|共享出行|出行服务|运营车队调度")),
+    ("sales_service", re.compile(r"售后服务|售后维保|客户管理|车主服务|预约保养|试乘试驾|线索管理|CRM", re.I)),
+    ("insurance_ubi", re.compile(r"UBI|驾驶行为保险|车险定价|出险理赔", re.I)),
+    ("charging_energy", re.compile(r"充电桩|充电服务|补能|电池健康管理|V2G", re.I)),
+)
+
+
+def detect_functions_from_text(text: str) -> list[tuple[str, str]]:
+    """Detect all automotive business scenarios explicitly mentioned in a mixed description, with verbatim quotes."""
+    clean = (text or "").strip()
+    if not clean:
+        return []
+    sentences = [s.strip() for s in re.split(r"[。！？\n]+", clean) if s.strip()]
+    found: list[tuple[str, str]] = []
+    for key, pat in _FUNCTION_PATTERNS:
+        for sent in sentences:
+            if pat.search(sent):
+                found.append((key, sent[:120]))
+                break
+    return found
+
+
 def _flat(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
+
+
+def _quote_matches(quote: str, flat_text: str) -> bool:
+    """Verify verbatim grounding: supports either a single contiguous quote or multi-scenario quotes joined by …… / ..."""
+    if not quote or not flat_text:
+        return False
+    fq = _flat(quote)
+    if fq and fq in flat_text:
+        return True
+    parts = [p for p in re.split(r"(?:……|\.{3,}|…)", quote) if _flat(p)]
+    if len(parts) >= 2 and all(len(_flat(p)) >= 4 and _flat(p) in flat_text for p in parts):
+        return True
+    return False
 
 
 async def _ask(questions: list[dict], context: dict, text: str) -> tuple[list, int]:
@@ -158,7 +199,7 @@ async def draft(questions: list[dict], context: dict, text: str) -> tuple[dict[s
         if q is None or not value or len(value) > MAX_VALUE_CHARS:
             continue
         if source == "text":
-            if not quote or not flat_text or _flat(quote) not in flat_text:
+            if not _quote_matches(quote, flat_text):
                 continue  # 摘抄对不上原文，就不能说是来自原文
         elif source == "general":
             if not q.get("allow_general"):
@@ -166,7 +207,8 @@ async def draft(questions: list[dict], context: dict, text: str) -> tuple[dict[s
             quote = ""
         else:
             continue
-        if _numbers(value) - allowed_numbers or REMARK.search(value):
+        value_for_num_check = re.sub(r"[（(]\d{1,2}[）)]", "", value)
+        if _numbers(value_for_num_check) - allowed_numbers or REMARK.search(value):
             continue  # 答案里不许出现原文和概况里没有的数字，也不许夹带评语
         out[key] = {"text": value, "source": source, "quote": quote}
     return out, tokens

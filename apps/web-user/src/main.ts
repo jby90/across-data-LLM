@@ -7,4 +7,11 @@ import App from './App.vue'
 import router from './router'
 import './style.css'
 
+if (typeof window !== 'undefined') {
+  window.addEventListener('vite:preloadError', (ev) => {
+    ev.preventDefault()
+    window.location.reload()
+  })
+}
+
 createApp(App).use(createPinia()).use(router).use(ElementPlus, { locale: zhCn }).mount('#app')

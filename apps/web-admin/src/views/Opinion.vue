@@ -91,9 +91,11 @@ const digestCfg = ref<DigestConfig>({
   last_sent_at: null, next_run_at: null,
 })
 const recipientsInput = ref('')
+const smtpPasswordInput = ref('')
 const digestPreview = ref<DigestPreview | null>(null)
 const digestRuns = ref<DigestRun[]>([])
 const digestBusy = ref('')
+const collectBusy = ref(false)
 
 async function openDigestDrawer() {
   showDigest.value = true
@@ -149,6 +151,44 @@ async function sendDigestNow() {
     ElMessage.error((e as Error).message || '推送失败')
   } finally {
     digestBusy.value = ''
+  }
+}
+
+async function testDigestEmail() {
+  const rcpts = recipientsInput.value.split(/[,;，；\s]+/).map((s) => s.trim()).filter((s) => s.includes('@'))
+  if (!rcpts.length) {
+    ElMessage.warning('请先填写至少一个接收验证邮件的邮箱地址（多个邮箱用逗号分隔）')
+    return
+  }
+  digestBusy.value = 'test'
+  try {
+    const res = await api.post<{ message: string }>('/api/admin/opinion/digest-test', {
+      recipients: rcpts,
+      smtp_host: isSuperAdmin.value ? digestCfg.value.smtp_host : undefined,
+      smtp_port: isSuperAdmin.value ? digestCfg.value.smtp_port : undefined,
+      smtp_user: isSuperAdmin.value ? digestCfg.value.smtp_user : undefined,
+      smtp_from: isSuperAdmin.value ? digestCfg.value.smtp_from : undefined,
+      smtp_password: isSuperAdmin.value && smtpPasswordInput.value ? smtpPasswordInput.value : undefined,
+    })
+    ElMessage.success(res.message)
+  } catch (e) {
+    ElMessage.error((e as Error).message || '验证邮件发送未成功')
+  } finally {
+    digestBusy.value = ''
+  }
+}
+
+async function collectNow() {
+  collectBusy.value = true
+  try {
+    const res = await api.post<{ message: string }>('/api/admin/opinion/collect-now', {})
+    sources.value = await api.get<Source[]>('/api/admin/opinion/sources')
+    await load()
+    ElMessage.success(res.message)
+  } catch (e) {
+    ElMessage.error((e as Error).message || '抽取动态失败')
+  } finally {
+    collectBusy.value = false
   }
 }
 
@@ -279,7 +319,11 @@ onMounted(load)
       </div>
     </el-drawer>
 
-    <el-dialog v-model="showSources" title="来源与采集情况" width="min(760px, 94vw)">
+    <el-dialog v-model="showSources" title="来源与采集情况（每日定时巡检抽取）" width="min(760px, 94vw)">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 12px; flex-wrap: wrap">
+        <span class="muted" style="font-size: 13px">系统后台按 24 小时周期自动定点巡检官方与行业来源并完成法定风险定级；也可随时手动触发巡检。</span>
+        <el-button size="small" type="primary" plain :loading="collectBusy" data-testid="opinion-collect-now" @click="collectNow">立即抽取最新动态</el-button>
+      </div>
       <el-table :data="sources" size="small">
         <el-table-column label="来源" width="150" prop="publisher" />
         <el-table-column label="类型" width="90"><template #default="{ row }">{{ KIND[row.kind] }}</template></el-table-column>
@@ -310,13 +354,15 @@ onMounted(load)
             <el-input v-model="recipientsInput" size="small" placeholder="compliance@oem.com, legal@oem.com" />
           </div>
           <div v-if="isSuperAdmin" class="digest-row2">
-            <el-input v-model="digestCfg.smtp_host" size="small" style="flex: 1 1 200px" placeholder="发信邮件服务器（选填，如 mail.corp.com）" />
-            <label style="display: inline-flex; align-items: center; gap: 4px">端口：<el-input-number v-model="digestCfg.smtp_port" size="small" :min="1" :max="65535" controls-position="right" style="width: 110px" /></label>
-            <el-input v-model="digestCfg.smtp_user" size="small" style="flex: 1 1 160px" placeholder="发信登录账号（选填）" />
-            <el-input v-model="digestCfg.smtp_from" size="small" style="flex: 1 1 180px" placeholder="对外显示发件邮箱（选填）" />
+            <el-input v-model="digestCfg.smtp_host" size="small" style="flex: 1 1 180px" placeholder="发信邮件服务器（选填，如 mail.corp.com）" />
+            <label style="display: inline-flex; align-items: center; gap: 4px">端口：<el-input-number v-model="digestCfg.smtp_port" size="small" :min="1" :max="65535" controls-position="right" style="width: 106px" /></label>
+            <el-input v-model="digestCfg.smtp_user" size="small" style="flex: 1 1 150px" placeholder="发信登录账号（选填）" />
+            <el-input v-model="smtpPasswordInput" type="password" show-password size="small" style="flex: 1 1 140px" placeholder="发信授权码（仅测试用）" />
+            <el-input v-model="digestCfg.smtp_from" size="small" style="flex: 1 1 160px" placeholder="对外显示发件邮箱（选填）" />
           </div>
           <div class="digest-actions">
             <el-button size="small" :loading="digestBusy === 'save'" data-testid="opinion-digest-save" @click="saveDigestConfig">保存推送策略</el-button>
+            <el-button size="small" plain :loading="digestBusy === 'test'" data-testid="opinion-digest-test" @click="testDigestEmail">发送群发验证邮件</el-button>
             <el-button size="small" type="primary" :loading="digestBusy === 'send'" data-testid="opinion-digest-send" @click="sendDigestNow">立即生成并推送本期周报</el-button>
             <span v-if="digestCfg.next_run_at" class="muted" style="font-size: 13px">下次自动推送：{{ when(digestCfg.next_run_at) }}</span>
           </div>

@@ -60,6 +60,66 @@ class DocumentEdit(Base):
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class DocumentInstanceVersion(Base):
+    """Immutable point-in-time version snapshot sealed when the user starts or stops editing."""
+
+    __tablename__ = "document_instance_versions"
+    __table_args__ = (
+        UniqueConstraint("instance_id", "version_no", name="uq_doc_instance_version_no"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_instances.id", ondelete="CASCADE"), index=True
+    )
+    version_no: Mapped[int] = mapped_column(Integer)
+    blocks: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    edit_count: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    user_name: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+def diff_blocks(cur_blocks: list[dict], target_blocks: list[dict]) -> list[tuple[str, str, str]]:
+    """Compute (place, before_text, after_text) differences from cur_blocks to target_blocks."""
+    diffs: list[tuple[str, str, str]] = []
+    limit = min(len(cur_blocks), len(target_blocks))
+    for b_idx in range(limit):
+        cb, tb = cur_blocks[b_idx], target_blocks[b_idx]
+        kind = cb.get("type")
+        if kind != tb.get("type"):
+            continue
+        if kind in ("title", "heading", "subheading", "paragraph"):
+            c_txt = str(cb.get("text") or "")
+            t_txt = str(tb.get("text") or "")
+            if c_txt != t_txt:
+                diffs.append((f"第 {b_idx + 1} 段", c_txt, t_txt))
+        elif kind == "list":
+            c_items = cb.get("items") or []
+            t_items = tb.get("items") or []
+            for i_idx in range(min(len(c_items), len(t_items))):
+                c_txt = str(c_items[i_idx] or "")
+                t_txt = str(t_items[i_idx] or "")
+                if c_txt != t_txt:
+                    diffs.append((f"第 {b_idx + 1} 段第 {i_idx + 1} 条", c_txt, t_txt))
+        elif kind == "table":
+            c_rows = cb.get("rows") or []
+            t_rows = tb.get("rows") or []
+            for r_idx in range(min(len(c_rows), len(t_rows))):
+                cr, tr = c_rows[r_idx] or [], t_rows[r_idx] or []
+                for col_idx in range(min(len(cr), len(tr))):
+                    c_txt = str(cr[col_idx] or "")
+                    t_txt = str(tr[col_idx] or "")
+                    if c_txt != t_txt:
+                        diffs.append(
+                            (f"第 {b_idx + 1} 段表格第 {r_idx + 1} 行第 {col_idx + 1} 列", c_txt, t_txt)
+                        )
+    return diffs
+
+
 class EditError(ValueError):
     pass
 

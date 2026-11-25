@@ -82,6 +82,8 @@ SYSTEM_KEYS = frozenset({
 SUGGEST_KEY = "_suggest"
 DIAGNOSIS_KEY = "_suggest_diagnosis"
 MANUAL_DOCS_KEY = "_manual_docs"
+FUNCTIONS_KEY = "_functions"
+SCENES_KEY = "_scenes"
 # 带入来源：新项目从同一企业上一个项目复制的企业信息 {题: {from, title, value}}；用户点“采用”的识别结果 {题: {value, quote}}。
 # 值被改过就不再算带入（保存时清掉，读取时也按值比对）
 CARRIED_KEY = "_carried"
@@ -155,8 +157,10 @@ COUNTRY_CHOICES = list(dict.fromkeys(["中国", *COUNTRY_NAMES_ZH.values(), *WOR
 class CreateIn(BaseModel):
     source_country: str = Field(min_length=1, max_length=40)
     recipient_country: str = Field(min_length=1, max_length=40)
-    function: str | None = None  # SCENARIO_LABELS 的键
-    business_scene: str | None = None  # BUSINESS_SCENES 的键
+    function: str | None = None  # SCENARIO_LABELS 的键（兼容单选）
+    functions: list[str] | None = Field(default=None, max_length=12)  # 多场景多选
+    business_scene: str | None = None  # BUSINESS_SCENES 的键（兼容单选）
+    business_scenes: list[str] | None = Field(default=None, max_length=12)  # 多业务阶段多选
     scenario_text: str = Field("", max_length=200)  # 选项都不合适时用一句话描述
     vehicle_model: str = Field("", max_length=128)
     company_name: str = Field("", max_length=120)
@@ -167,7 +171,9 @@ class UpdateIn(BaseModel):
     source_country: str | None = Field(None, max_length=40)
     recipient_country: str | None = Field(None, max_length=40)
     function: str | None = None
+    functions: list[str] | None = Field(default=None, max_length=12)
     business_scene: str | None = None
+    business_scenes: list[str] | None = Field(default=None, max_length=12)
     scenario_text: str | None = Field(None, max_length=200)
     vehicle_model: str | None = Field(None, max_length=128)
     company_name: str | None = Field(None, max_length=120)
@@ -252,6 +258,32 @@ async def _project(session: AsyncSession, project_id: uuid.UUID, user: Principal
     return task
 
 
+def task_business_scenes(task: AnalysisTask) -> list[str]:
+    facts = task.facts_json or {}
+    raw = facts.get(SCENES_KEY)
+    if isinstance(raw, list):
+        out = [str(x).strip() for x in raw if str(x).strip() in BUSINESS_SCENES]
+        if out:
+            return list(dict.fromkeys(out))
+    stored_label = str(facts.get("business_scene") or "").strip()
+    if stored_label:
+        matched = [k for k, v in BUSINESS_SCENES.items() if v == stored_label or v in stored_label.split("、")]
+        if matched:
+            return list(dict.fromkeys(matched))
+    return []
+
+
+def _format_multi_function_short(fns: list[str], fallback: str = "") -> str:
+    labels = [SHORT_FUNCTION.get(f, "") for f in fns if SHORT_FUNCTION.get(f, "")]
+    if not labels:
+        return fallback[:12]
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]}、{labels[1]}"
+    return f"{labels[0]}、{labels[1]}等{len(labels)}项"
+
+
 def _apply_route(task: AnalysisTask, body: CreateIn | UpdateIn) -> None:
     facts = dict(task.facts_json or {})
     for key in ("source_country", "recipient_country"):
@@ -283,13 +315,42 @@ def _apply_route(task: AnalysisTask, body: CreateIn | UpdateIn) -> None:
         task.vehicle_model = body.vehicle_model.strip()
     if getattr(body, "scenario_text", None) is not None:
         facts[DOC_FACT_PREFIX + "scenario"] = body.scenario_text.strip()
-    if getattr(body, "function", None) is not None or getattr(body, "business_scene", None) is not None:
-        function = getattr(body, "function", None) or task.scenario_type
-        scene = getattr(body, "business_scene", None)
-        if function in SCENARIO_LABELS:
-            task.scenario_type = function
-        if scene in BUSINESS_SCENES:
-            facts["business_scene"] = BUSINESS_SCENES[scene]
+    raw_fns = getattr(body, "functions", None)
+    raw_fn = getattr(body, "function", None)
+    if raw_fns is not None:
+        clean_fns = list(dict.fromkeys(str(f).strip() for f in raw_fns if str(f).strip() in SCENARIO_LABELS))
+        if clean_fns:
+            facts[FUNCTIONS_KEY] = clean_fns
+            task.scenario_type = clean_fns[0]
+        else:
+            facts.pop(FUNCTIONS_KEY, None)
+            task.scenario_type = ""
+    elif raw_fn is not None:
+        fn_clean = raw_fn.strip()
+        if fn_clean in SCENARIO_LABELS:
+            facts[FUNCTIONS_KEY] = [fn_clean]
+            task.scenario_type = fn_clean
+        elif fn_clean == "":
+            facts.pop(FUNCTIONS_KEY, None)
+            task.scenario_type = ""
+    raw_scs = getattr(body, "business_scenes", None)
+    raw_sc = getattr(body, "business_scene", None)
+    if raw_scs is not None:
+        clean_scs = list(dict.fromkeys(str(s).strip() for s in raw_scs if str(s).strip() in BUSINESS_SCENES))
+        if clean_scs:
+            facts[SCENES_KEY] = clean_scs
+            facts["business_scene"] = "、".join(BUSINESS_SCENES[s] for s in clean_scs)
+        else:
+            facts.pop(SCENES_KEY, None)
+            facts.pop("business_scene", None)
+    elif raw_sc is not None:
+        sc_clean = raw_sc.strip()
+        if sc_clean in BUSINESS_SCENES:
+            facts[SCENES_KEY] = [sc_clean]
+            facts["business_scene"] = BUSINESS_SCENES[sc_clean]
+        elif sc_clean == "":
+            facts.pop(SCENES_KEY, None)
+            facts.pop("business_scene", None)
     task.facts_json = facts
     source = facts.get(DOC_FACT_PREFIX + "source_country", "")
     recipient = facts.get(DOC_FACT_PREFIX + "recipient_country", "")
@@ -298,7 +359,8 @@ def _apply_route(task: AnalysisTask, body: CreateIn | UpdateIn) -> None:
     facts[DOC_FACT_PREFIX + "country_name"] = LIBRARY_NAMES.get(task.country_code) or recipient
     task.facts_json = facts
     if not task.title_custom:
-        what = SHORT_FUNCTION.get(task.scenario_type or "") or (facts.get(DOC_FACT_PREFIX + "scenario") or "")[:12]
+        cur_fns = D.task_functions(task)
+        what = _format_multi_function_short(cur_fns, facts.get(DOC_FACT_PREFIX + "scenario") or "")
         suffix = str(facts.get("_clone_suffix") or "")
         limit = 54 if suffix else 60
         base = (f"{source or '?'} → {recipient or '?'}" + (f" · {what}" if what else ""))[:limit]
@@ -625,6 +687,7 @@ async def _fast_progress(
             values=answers,
             labels=labels,
             function=task.scenario_type or "",
+            functions=D.task_functions(task),
             library=library,
             cn=cn,
         ),
@@ -1095,7 +1158,9 @@ async def _list(session: AsyncSession, user: Principal, archived: bool) -> list[
 async def create_project(body: CreateIn, user: UserDep, session: SessionDep) -> dict:
     if not body.source_country.strip() or not body.recipient_country.strip():
         raise HTTPException(422, "请选择数据从哪个国家发出、发往哪个国家")
-    if not (body.function or body.business_scene or body.scenario_text.strip()):
+    has_fn = bool(body.function or (body.functions and any(str(x).strip() for x in body.functions)))
+    has_sc = bool(body.business_scene or (body.business_scenes and any(str(x).strip() for x in body.business_scenes)))
+    if not (has_fn or has_sc or body.scenario_text.strip()):
         raise HTTPException(422, "请选择业务场景，或用一句话说明做什么业务")
     task = await new_project(session, user.org_id, user.user_id, body)
     return await overview(task.id, user, session)
@@ -1530,7 +1595,13 @@ async def clone_project(project_id: uuid.UUID, request: Request, user: UserDep, 
     src_facts = dict(src_task.facts_json or {})
     cloned_facts: dict = {}
     for k, v in src_facts.items():
-        if k.startswith(DOC_FACT_PREFIX) or k in (MANUAL_DOCS_KEY, RISK_FACTS_SIG_KEY):
+        if k.startswith(DOC_FACT_PREFIX) or k in (
+            MANUAL_DOCS_KEY,
+            RISK_FACTS_SIG_KEY,
+            FUNCTIONS_KEY,
+            SCENES_KEY,
+            "business_scene",
+        ):
             cloned_facts[k] = v
     base_title = (src_task.title or "合规文件").strip()
     if base_title.endswith("（副本）"):
@@ -2210,8 +2281,15 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
     # 8 份文件各自需要 / 按目前情况不需要 / 还不能判断：依据取自数据发出国的法规，原因引用企业填的答案
     applicability = _apply_manual_docs(
         await doc_applicability.for_project(
-            session, source=source, recipient=recipient, values=answers,
-            labels={k: q["label"] for k, q in questions.items()}, function=task.scenario_type or "", library=library, cn=cn,
+            session,
+            source=source,
+            recipient=recipient,
+            values=answers,
+            labels={k: q["label"] for k, q in questions.items()},
+            function=task.scenario_type or "",
+            functions=D.task_functions(task),
+            library=library,
+            cn=cn,
         ),
         facts,
     )
@@ -2295,6 +2373,8 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
         scenario_type=task.scenario_type or "",
         vehicle_model=task.vehicle_model or "",
     )
+    cur_fns = D.task_functions(task)
+    cur_scs = task_business_scenes(task)
     result = {
         "id": str(task.id),
         "title": task.title,
@@ -2303,8 +2383,10 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
         "route": {
             "source_country": source,
             "recipient_country": recipient,
-            "function": task.scenario_type or "",
-            "business_scene": next((k for k, v in BUSINESS_SCENES.items() if v == facts.get("business_scene")), ""),
+            "function": cur_fns[0] if cur_fns else (task.scenario_type or ""),
+            "functions": cur_fns,
+            "business_scene": cur_scs[0] if cur_scs else "",
+            "business_scenes": cur_scs,
             "scenario_text": facts.get(DOC_FACT_PREFIX + "scenario", ""),
             "vehicle_model": task.vehicle_model,
             "company_name": facts.get(DOC_FACT_PREFIX + "company_name", ""),
@@ -2338,7 +2420,7 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
             if proj_overall
             else None
         ),
-        "route_suggestions": {k: suggestions[k] for k in ("company_name", "vehicle_model") if k in suggestions},
+        "route_suggestions": {k: suggestions[k] for k in ("company_name", "vehicle_model", "functions") if k in suggestions},
     }
     signoff_full = project_delivery_aids.build_signoff_checklist(result, answers)
     result["signoff_summary"] = {k: v for k, v in signoff_full.items() if k != "blocks"}
@@ -2660,6 +2742,18 @@ async def _suggest_job(factory: async_sessionmaker, project_id: uuid.UUID, text:
                 facts = dict(task.facts_json or {})
                 kept = {k: v for k, v in (facts.get(SUGGEST_KEY) or {}).items() if not facts.get(DOC_FACT_PREFIX + k)}
                 kept.update({k: v for k, v in found.items() if not facts.get(DOC_FACT_PREFIX + k)})
+                if text.strip():
+                    detected_fns = doc_suggest.detect_functions_from_text(text)
+                    existing_fns = D.task_functions(task)
+                    new_fns = [fk for fk, _ in detected_fns if fk not in existing_fns]
+                    if new_fns:
+                        merged_fns = list(dict.fromkeys([*existing_fns, *new_fns]))
+                        kept["functions"] = {
+                            "text": "、".join(SHORT_FUNCTION.get(fk, fk) for fk in merged_fns),
+                            "keys": merged_fns,
+                            "source": "text",
+                            "quote": "……".join(qt for fk, qt in detected_fns if fk in new_fns)[:240],
+                        }
                 facts[SUGGEST_KEY] = kept
                 if diag is not None:
                     facts[DIAGNOSIS_KEY] = diag
@@ -2750,6 +2844,20 @@ async def accept_suggestions(project_id: uuid.UUID, body: AcceptIn, user: UserDe
             continue
         if key == "vehicle_model":
             task.vehicle_model = task.vehicle_model or item["text"][:128]
+        elif key == "functions":
+            raw_keys = item.get("keys") if isinstance(item.get("keys"), list) else []
+            clean_fns = list(dict.fromkeys(str(x).strip() for x in raw_keys if str(x).strip() in SCENARIO_LABELS))
+            if clean_fns:
+                facts[FUNCTIONS_KEY] = clean_fns
+                task.scenario_type = clean_fns[0]
+                if not task.title_custom:
+                    src_c = facts.get(DOC_FACT_PREFIX + "source_country", "")
+                    rcp_c = facts.get(DOC_FACT_PREFIX + "recipient_country", "")
+                    what = _format_multi_function_short(clean_fns, facts.get(DOC_FACT_PREFIX + "scenario") or "")
+                    suffix = str(facts.get("_clone_suffix") or "")
+                    limit = 54 if suffix else 60
+                    base = (f"{src_c or '?'} → {rcp_c or '?'}" + (f" · {what}" if what else ""))[:limit]
+                    task.title = (base + suffix)[:60]
         elif key == "risk_rating" and str(item.get("text") or "").strip().startswith("["):
             prev_raw = str(facts.get(DOC_FACT_PREFIX + key) or "")
             facts[DOC_FACT_PREFIX + key] = risk_items.merge_history(prev_raw, str(item["text"]))

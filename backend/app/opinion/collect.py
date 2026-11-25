@@ -713,3 +713,148 @@ async def prune_off_topic(sf, *, dry_run: bool = False) -> dict[str, int]:
             await session.execute(delete(OpinionItem).where(OpinionItem.id.in_(drop)))
             await session.commit()
     return {"kept": len(rows) - len(drop), "removed": len(drop), "dry_run": int(dry_run)}
+
+
+def _deterministic_facts(title: str, body: str):
+    """Deterministic verbatim-sentence fact extraction so scheduled/daytime collection immediately
+    assigns a verified statutory grade without waiting for LLM availability."""
+    from app.opinion.extract import POLICY_TOPIC, REGULATORY_WORDS
+    from app.opinion.grading import Facts, keep_supported
+
+    full = f"{title or ''}。{body or ''}"
+    sents = [s.strip() for s in re.split(r"(?<=[。！？；\n])", full) if len(s.strip()) >= 8]
+    ev: dict[str, str] = {}
+
+    def first_hit(words: tuple[str, ...]) -> str:
+        for s in sents:
+            if any(w in s for w in words):
+                return s[:220]
+        return ""
+
+    if q := first_hit(("车外视频", "车外影像", "人脸", "车牌")):
+        ev["outside_video_or_plates"] = q
+    if q := first_hit(("行踪轨迹", "精确位置", "生物识别", "声纹", "指纹", "座舱视频")):
+        ev["precise_location_or_biometrics"] = q
+    if q := first_hit(("军事管理区", "党政机关", "敏感区域", "测绘地理信息")):
+        ev["sensitive_area"] = q
+    if q := first_hit(("数据出境", "数据跨境", "向境外提供", "跨境传输")):
+        ev["crosses_border"] = q
+    if q := first_hit(("数据泄露", "违法违规收集", "违规出境", "行政处罚", "约谈", "通报批评")):
+        if any(w in q for w in ("数据", "个人信息", "隐私", "信息安全", "网络安全")):
+            ev["harm_happened"] = q
+    for s in sents[:6]:
+        if any(w in s for w in POLICY_TOPIC) and any(r in s for r in REGULATORY_WORDS):
+            ev["policy_signal"] = s[:220]
+            break
+
+    imp_kinds: list[str] = []
+    if "sensitive_area" in ev:
+        imp_kinds.append("重要敏感区域地理信息")
+    if "outside_video_or_plates" in ev and any(w in full for w in ("重要数据", "出境", "泄露")):
+        imp_kinds.append("含人脸车牌车外视频影像")
+    if imp_kinds:
+        ev["important_data"] = ev.get("sensitive_area") or ev.get("outside_video_or_plates", "")
+
+    return keep_supported(
+        Facts(
+            important_data=tuple(imp_kinds),
+            outside_video_or_plates="outside_video_or_plates" in ev,
+            precise_location_or_biometrics="precise_location_or_biometrics" in ev,
+            sensitive_area="sensitive_area" in ev,
+            people=None,
+            sensitive_people=None,
+            crosses_border="crosses_border" in ev,
+            harm_happened="harm_happened" in ev,
+            policy_signal="policy_signal" in ev,
+            evidence=ev,
+        )
+    )
+
+
+async def grade_ungraded_deterministic(sf) -> int:
+    """Assign verified rule-based grades to any newly collected OpinionItem rows with level IS NULL."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.opinion.grading import grade
+    from app.opinion.models import OpinionItem
+
+    graded_n = 0
+    async with sf() as session:
+        rows = (
+            await session.scalars(select(OpinionItem).where(OpinionItem.level.is_(None)))
+        ).all()
+        for item in rows:
+            facts = _deterministic_facts(item.title, item.body)
+            g = grade(facts)
+            item.level = g.level
+            item.rules = list(g.rules)
+            item.bases = list(g.bases)
+            item.scale_unknown = g.scale_unknown
+            item.facts = {
+                "important_data": list(facts.important_data),
+                "outside_video_or_plates": facts.outside_video_or_plates,
+                "precise_location_or_biometrics": facts.precise_location_or_biometrics,
+                "sensitive_area": facts.sensitive_area,
+                "people": facts.people,
+                "sensitive_people": facts.sensitive_people,
+                "crosses_border": facts.crosses_border,
+                "harm_happened": facts.harm_happened,
+                "policy_signal": facts.policy_signal,
+                "evidence": facts.evidence,
+            }
+            item.graded_at = datetime.now(UTC)
+            item.grading_version = "opinion-rule-v1"
+            graded_n += 1
+        if graded_n:
+            await session.commit()
+    return graded_n
+
+
+async def run_due_opinion_collect_if_needed(
+    sf,
+    make_fetcher,
+    *,
+    now=None,
+    force: bool = False,
+    interval_hours: int = 24,
+    per_page: int = 15,
+) -> dict:
+    """Scheduled & manual idempotent opinion collection across enabled official sources."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select, text
+
+    from app.core.rls import system_scope
+    from app.opinion.models import OpinionSource
+
+    cur = now or datetime.now(UTC)
+    cutoff = cur - timedelta(hours=max(1, interval_hours))
+    summary = {"ran": False, "sources": 0, "kept": 0, "already": 0, "errors": 0, "graded": 0}
+    with system_scope("opinion-collect"):
+        async with sf() as session:
+            locked = await session.scalar(text("SELECT pg_try_advisory_xact_lock(64042013)"))
+            if not locked:
+                return summary
+            await ensure_sources(session)
+            stmt = select(OpinionSource).where(OpinionSource.enabled.is_(True))
+            if not force:
+                from sqlalchemy import or_
+
+                stmt = stmt.where(
+                    or_(OpinionSource.last_run_at.is_(None), OpinionSource.last_run_at <= cutoff)
+                )
+            due_sources = list((await session.scalars(stmt.order_by(OpinionSource.publisher))).all())
+        if not due_sources:
+            return summary
+        summary["ran"] = True
+        summary["sources"] = len(due_sources)
+        fetcher = make_fetcher()
+        for src in due_sources:
+            st = await collect_source(sf, fetcher, src, per_page=per_page)
+            summary["kept"] += st.kept
+            summary["already"] += st.already
+            summary["errors"] += st.errors
+        summary["graded"] = await grade_ungraded_deterministic(sf)
+    return summary

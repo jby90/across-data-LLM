@@ -189,9 +189,16 @@ async def source_grounds(session: AsyncSession, cc: str) -> dict[str, Ground | N
     return out
 
 
-async def admission_needed(session: AsyncSession, cc: str, function: str, inbound: bool = False) -> tuple[bool, list[str]]:
+async def admission_needed(
+    session: AsyncSession,
+    cc: str,
+    function: str,
+    inbound: bool = False,
+    *,
+    functions: list[str] | None = None,
+) -> tuple[bool, list[str]]:
     """Whether the library holds admission items for ``cc`` at all, and the names of those this
-    business must handle (the same rule the admission plan uses)."""
+    business must handle (the same rule the admission plan uses, unioned across multi-selected functions)."""
     from app.admission import plan
     from app.admission.models import AdmissionEntry
     from app.admission.router import SHOWN
@@ -207,14 +214,28 @@ async def admission_needed(session: AsyncSession, cc: str, function: str, inboun
     from app.analysis.doc_rules import admission_gate
 
     entries = [e for e in entries if await entry_listed(session, e)]  # 与准入页同一口径
-    needed = [e for e in entries if plan.applies(e.category, function, e.functions, e.name_zh) == "needed" and not admission_gate(e)]
+    fns = [f for f in dict.fromkeys(functions or ([function] if function else [])) if f]
+    if fns:
+        needed = [
+            e
+            for e in entries
+            if any(plan.applies(e.category, fn, e.functions, e.name_zh) == "needed" for fn in fns)
+            and not admission_gate(e)
+        ]
+    else:
+        needed = [
+            e
+            for e in entries
+            if plan.applies(e.category, "", e.functions, e.name_zh) == "needed"
+            and not admission_gate(e)
+        ]
     if inbound:  # 海外一端是接收国：它管数据传出的许可不列（接收方再向第三国转移时才要）
         from app.analysis.doc_rules import _ONWARD
 
         needed = [e for e in needed if not _ONWARD.search(f"{e.name_zh} {e.summary_zh or ''}"[:80])]
     # 举例时车辆、通信设备、数据备案类在前（最常见、最先要办），其余按原顺序
     # 举例时和这项业务直接相关的在前：数据类（每项业务都传车辆数据）、业务本身对应的类别，再到车辆、通信设备
-    own = [c for c, fns in plan.ONLY_FOR.items() if function in fns]  # 这项业务专有的类别（如自动驾驶测试）
+    own = list(dict.fromkeys(c for fn in fns for c, fn_set in plan.ONLY_FOR.items() if fn in fn_set))
     first = ("data_filing", *own, "vehicle_approval", "telecom_approval")
     needed.sort(key=lambda e: first.index(e.category) if e.category in first else len(first))
     return bool(entries), [e.name_zh for e in needed]
@@ -435,8 +456,16 @@ def judge(
 
 
 async def for_project(
-    session: AsyncSession, *, source: str, recipient: str, values: dict[str, str], labels: dict[str, str],
-    function: str, library: frozenset[str], cn: dict | None,
+    session: AsyncSession,
+    *,
+    source: str,
+    recipient: str,
+    values: dict[str, str],
+    labels: dict[str, str],
+    function: str,
+    library: frozenset[str],
+    cn: dict | None,
+    functions: list[str] | None = None,
 ) -> dict[str, dict]:
     """``judge`` for one project: reads the sending country's grounds and the overseas end's
     admission items from the library."""
@@ -451,12 +480,19 @@ async def for_project(
     ends = [c for c in (src_cc, country_of(recipient)) if c and c != "CN"]
     overseas_cc = ends[0] if ends else ""
     inbound = bool(overseas_cc) and overseas_cc == country_of(recipient) and not str(values.get("onward_provision", "")).startswith("有")
-    known, needed = (await admission_needed(session, overseas_cc, function, inbound)) if overseas_cc else (False, [])
+    fns = [f for f in dict.fromkeys(functions or ([function] if function else [])) if f]
+    primary_fn = fns[0] if fns else function
+    known, needed = (
+        await admission_needed(session, overseas_cc, primary_fn, inbound, functions=fns)
+        if overseas_cc
+        else (False, [])
+    )
     overseas = NAMES.get(overseas_cc, "") or (recipient if overseas_cc else "")
+    fn_zh = "、".join(dict.fromkeys(plan.FUNCTIONS[fn] for fn in fns if fn in plan.FUNCTIONS))
     return judge(
         source=source, recipient=recipient,
         source_in_library=cn is not None or bool(grounds and grounds.get("organized")),
         values=values, labels=labels, grounds=grounds, cn=cn,
         overseas=overseas, overseas_known=known, admission=needed,
-        function_zh=plan.FUNCTIONS.get(function, ""),
+        function_zh=fn_zh,
     )

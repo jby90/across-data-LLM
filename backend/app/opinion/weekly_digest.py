@@ -348,22 +348,91 @@ def _send_smtp_sync(
     subject: str,
     html_body: str,
 ) -> None:
+    clean_rcpts = [_sanitize_header_val(r) for r in recipients if _sanitize_header_val(r)]
+    if not clean_rcpts:
+        raise ValueError("未提供有效的收件人邮箱")
     msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = sender or user or "noreply@cyshuhe.local"
-    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = _sanitize_header_val(subject)
+    msg["From"] = _sanitize_header_val(sender or user or "noreply@cyshuhe.local")
+    msg["To"] = ", ".join(clean_rcpts)
     msg.set_content("请使用支持 HTML 的邮件客户端查阅本期合规周报。")
     msg.add_alternative(html_body, subtype="html")
-    with smtplib.SMTP(host, port, timeout=15) as smtp:
-        smtp.ehlo()
-        if port in (587, 25):
-            try:
-                smtp.starttls()
-            except smtplib.SMTPException:
-                pass
-        if user and password:
-            smtp.login(user, password)
-        smtp.send_message(msg)
+    if int(port) == 465:
+        with smtplib.SMTP_SSL(host, int(port), timeout=15) as smtp:
+            smtp.ehlo()
+            if user and password:
+                smtp.login(user, password)
+            smtp.send_message(msg, to_addrs=clean_rcpts)
+    else:
+        with smtplib.SMTP(host, int(port), timeout=15) as smtp:
+            smtp.ehlo()
+            if smtp.has_extn("starttls"):
+                try:
+                    smtp.starttls()
+                    smtp.ehlo()
+                except smtplib.SMTPException:
+                    pass
+            if user and password:
+                smtp.login(user, password)
+            smtp.send_message(msg, to_addrs=clean_rcpts)
+
+
+async def send_test_digest_email(
+    session: AsyncSession,
+    *,
+    recipients: list[str],
+    smtp_host: str | None = None,
+    smtp_port: int | None = None,
+    smtp_user: str | None = None,
+    smtp_from: str | None = None,
+    smtp_password: str | None = None,
+) -> dict:
+    """Send a live multi-recipient verification digest email and return pure-Chinese status."""
+    cfg = await get_or_create_config(session)
+    rcpts = [r.strip() for r in recipients if isinstance(r, str) and "@" in r.strip()]
+    if not rcpts:
+        rcpts = [r.strip() for r in (cfg.recipients or []) if isinstance(r, str) and "@" in r.strip()]
+    if not rcpts:
+        raise ValueError("请先填写至少一个接收测试周报的电子邮箱")
+    host = ((smtp_host if smtp_host is not None else cfg.smtp_host) or os.environ.get("CYSH_SMTP_HOST", "")).strip()
+    port = int((smtp_port if smtp_port is not None else cfg.smtp_port) or os.environ.get("CYSH_SMTP_PORT", "587") or 587)
+    user = ((smtp_user if smtp_user is not None else cfg.smtp_user) or os.environ.get("CYSH_SMTP_USER", "")).strip()
+    sender = ((smtp_from if smtp_from is not None else cfg.smtp_from) or os.environ.get("CYSH_SMTP_FROM", "") or user).strip()
+    password = (smtp_password if smtp_password else os.environ.get("CYSH_SMTP_PASSWORD", "")) or ""
+    if not host:
+        raise ValueError("请先填写发信邮件服务器地址后再执行发信测试")
+    payload = await build_digest_payload(
+        session,
+        lookback_days=cfg.lookback_days,
+        min_level=cfg.min_level,
+    )
+    test_subject = f"【内部发信验证】{payload['subject']}"
+    try:
+        await asyncio.to_thread(
+            _send_smtp_sync,
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            sender=sender,
+            recipients=rcpts,
+            subject=test_subject,
+            html_body=payload["html_body"],
+        )
+    except smtplib.SMTPAuthenticationError as exc:
+        raise RuntimeError("发信账号或授权密码校验未通过，请核对发信登录账号与授权码") from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        raise RuntimeError("收件人邮箱被发信服务器拒收，请检查收件邮箱地址是否有效") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("发信邮件服务器连接超时或端口未开放，请核对服务器地址与端口设置") from exc
+    return {
+        "sent": True,
+        "recipient_count": len(rcpts),
+        "recipients": rcpts,
+        "item_count": payload["item_count"],
+        "subject": test_subject,
+        "message": f"测试邮件已成功群发至 {len(rcpts)} 个邮箱（含本期 {payload['item_count']} 条合规动态）",
+    }
 
 
 def _sanitize_header_val(val: str) -> str:

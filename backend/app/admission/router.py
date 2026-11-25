@@ -1193,17 +1193,23 @@ async def admission_plan(
     """The items a business needs in a country, each with the enterprise's material for it (if
     started). From a compliance-document project: its overseas end and its business."""
     country = country or country_code
-    function = function or functions.split(",")[0].strip()
+    fn_list = [f.strip() for f in functions.split(",") if f.strip() in plan.FUNCTIONS] if functions else []
+    if function and function in plan.FUNCTIONS and function not in fn_list:
+        fn_list.insert(0, function)
+    function = function or (fn_list[0] if fn_list else "")
     task = await _own_task(session, task_id, user) if task_id else None
     values: dict[str, str] = {}
     if task is not None:
         from app.analysis.document_basis import country_of
+        from app.analysis.documents_router import task_functions
         from app.forms.router import facts_for_task
 
         values = facts_for_task(task, "")
         ends = [c for c in (country_of(values.get("source_country")), country_of(values.get("recipient_country"))) if c and c != "CN"]
         country = country or (ends[0] if ends else task.country_code)
-        function = function or (task.scenario_type if task.scenario_type in plan.FUNCTIONS else "")
+        if not fn_list:
+            fn_list = [f for f in task_functions(task) if f in plan.FUNCTIONS]
+        function = function or (fn_list[0] if fn_list else (task.scenario_type if task.scenario_type in plan.FUNCTIONS else ""))
     if not country:
         raise HTTPException(422, "请选择国家")
     cc = country.upper()
@@ -1235,7 +1241,11 @@ async def admission_plan(
     outs = await _named(session, [_entry_out(e, counts.get(e.id, 0)) for e in entries])
     needed, maybe, other = [], [], []
     for e, o in zip(entries, outs, strict=True):
-        where = plan.applies(e.category, function, e.functions, e.name_zh)
+        if len(fn_list) > 1:
+            applies_each = [plan.applies(e.category, fn, e.functions, e.name_zh) for fn in fn_list]
+            where = "needed" if "needed" in applies_each else ("maybe" if "maybe" in applies_each else "")
+        else:
+            where = plan.applies(e.category, function, e.functions, e.name_zh)
         detail = await _entry_detail(session, e)
         if not where or not products.fits(product, e.category, e.name_zh):
             # 与所选业务、产品无关的也列出名称（折叠），和事项库的数目对得上

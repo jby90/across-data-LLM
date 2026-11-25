@@ -45,4 +45,11 @@ if (typeof window !== 'undefined' && typeof window.ResizeObserver === 'function'
   window.ResizeObserver = SafeResizeObserver
 }
 
+if (typeof window !== 'undefined') {
+  window.addEventListener('vite:preloadError', (ev) => {
+    ev.preventDefault()
+    window.location.reload()
+  })
+}
+
 createApp(App).use(createPinia()).use(router).use(ElementPlus, { locale: zhCn }).mount('#app')

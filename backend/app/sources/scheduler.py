@@ -86,6 +86,12 @@ async def run_due_once(
         claimed = await claim_due_site(sf, now_fn())
         if claimed is None:
             try:
+                from app.opinion.collect import run_due_opinion_collect_if_needed
+
+                await run_due_opinion_collect_if_needed(sf, make_fetcher, now=now_fn())
+            except Exception:  # noqa: BLE001
+                log.exception("舆情定时采集检查异常")
+            try:
                 from app.opinion.weekly_digest import run_due_digest_if_needed
 
                 await run_due_digest_if_needed(sf, now_fn())

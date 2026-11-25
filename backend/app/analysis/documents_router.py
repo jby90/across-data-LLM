@@ -22,9 +22,11 @@ from app.analysis.document_basis import NAMES, country_of
 from app.analysis.document_instances import (
     DocumentEdit,
     DocumentInstance,
+    DocumentInstanceVersion,
     EditError,
     apply_edit,
     build_xlsx,
+    diff_blocks,
 )
 from app.analysis.document_narrative import (
     DocumentNarrative,
@@ -618,10 +620,19 @@ async def _fill_admission(session: AsyncSession, task: AnalysisTask, values: dic
         rows = [r for r in cand_rows if await entry_listed(session, r)]
         if rows:
             break
-    # 只列这项业务要办的（与合规评估页“要办 N 项”和准入页同一条规则）；判断不出业务时列全部
+    # 只列这项业务要办的（与合规评估页“要办 N 项”和准入页同一条规则，支持多场景并集）；判断不出业务时列全部
     from app.admission import plan
 
-    needed = [r for r in rows if plan.applies(getattr(r, "category", ""), task.scenario_type or "", getattr(r, "functions", None), r.name_zh) == "needed"]
+    fns = task_functions(task)
+    needed = [
+        r
+        for r in rows
+        if (
+            any(plan.applies(getattr(r, "category", ""), fn, getattr(r, "functions", None), r.name_zh) == "needed" for fn in fns)
+            if fns
+            else plan.applies(getattr(r, "category", ""), "", getattr(r, "functions", None), r.name_zh) == "needed"
+        )
+    ]
     rows = needed or rows
     if not rows:
         return
@@ -1048,10 +1059,26 @@ async def _write_paper(
 _PAPER_WRITE_LOCKS: dict[tuple[int, str, str], object] = {}
 
 
+def task_functions(task: AnalysisTask) -> list[str]:
+    """Return all selected business function keys for a project (preserving order, backward-compatible)."""
+    raw = (getattr(task, "facts_json", None) or {}).get("_functions")
+    out: list[str] = []
+    if isinstance(raw, list):
+        out = [str(x).strip() for x in raw if str(x).strip() in SCENARIO_LABELS]
+        out = list(dict.fromkeys(out))
+    primary = str(getattr(task, "scenario_type", "") or "").strip()
+    if not out and primary in SCENARIO_LABELS:
+        out = [primary]
+    elif primary in SCENARIO_LABELS and primary not in out:
+        out.insert(0, primary)
+    return out
+
+
 def _scenario(task: AnalysisTask) -> dict[str, str]:
-    label = SCENARIO_LABELS.get(task.scenario_type, "")
+    fns = task_functions(task)
+    label = "；".join(SCENARIO_LABELS[f] for f in fns if f in SCENARIO_LABELS)
     scene = str((getattr(task, "facts_json", None) or {}).get("business_scene") or "")
-    return {"scenario": f"{label}（{scene}）" if label and scene else label}
+    return {"scenario": f"{label}（{scene}）" if label and scene else (label or scene)}
 
 
 @user_router.get("/document-templates")
@@ -1588,7 +1615,32 @@ class EditIn(BaseModel):
     col: int | None = Field(None, ge=0)
 
 
-def _instance_view(inst: DocumentInstance, edits: list[DocumentEdit]) -> dict:
+def _version_summary(
+    v: DocumentInstanceVersion, current_blocks: list[dict], *, is_latest: bool = True
+) -> dict:
+    return {
+        "version_no": v.version_no,
+        "edit_count": v.edit_count,
+        "note": v.note or f"第 {v.version_no} 版",
+        "user_name": v.user_name,
+        "created_at": v.created_at.isoformat() if v.created_at else None,
+        "is_current": bool(is_latest and v.blocks == current_blocks),
+    }
+
+
+def _version_summaries(vers: list[DocumentInstanceVersion], current_blocks: list[dict]) -> list[dict]:
+    return [
+        _version_summary(v, current_blocks, is_latest=(idx == 0))
+        for idx, v in enumerate(vers)
+    ]
+
+
+def _instance_view(
+    inst: DocumentInstance,
+    edits: list[DocumentEdit],
+    versions: list[DocumentInstanceVersion] | None = None,
+) -> dict:
+    vers = versions or []
     return {
         "id": str(inst.id),
         "name": inst.name_zh,
@@ -1605,6 +1657,7 @@ def _instance_view(inst: DocumentInstance, edits: list[DocumentEdit]) -> dict:
             }
             for e in edits
         ],
+        "versions": _version_summaries(vers, inst.blocks),
     }
 
 
@@ -1621,14 +1674,67 @@ async def _edits(session: AsyncSession, inst: DocumentInstance) -> list[Document
     )
 
 
+async def _versions(session: AsyncSession, inst: DocumentInstance) -> list[DocumentInstanceVersion]:
+    return list(
+        (
+            await session.scalars(
+                select(DocumentInstanceVersion)
+                .where(DocumentInstanceVersion.instance_id == inst.id)
+                .order_by(DocumentInstanceVersion.version_no.desc())
+                .limit(100)
+            )
+        ).all()
+    )
+
+
+async def _seal_version(
+    session: AsyncSession,
+    inst: DocumentInstance,
+    *,
+    user_id: uuid.UUID | None,
+    user_name: str,
+    blocks_override: list[dict] | None = None,
+    edit_count_override: int | None = None,
+    note: str = "",
+) -> tuple[DocumentInstanceVersion, bool]:
+    """Idempotently seal a point-in-time version snapshot under caller's FOR UPDATE lock."""
+    target_blocks = copy.deepcopy(blocks_override if blocks_override is not None else inst.blocks)
+    target_edits = inst.edit_count if edit_count_override is None else edit_count_override
+    latest = await session.scalar(
+        select(DocumentInstanceVersion)
+        .where(DocumentInstanceVersion.instance_id == inst.id)
+        .order_by(DocumentInstanceVersion.version_no.desc())
+        .limit(1)
+    )
+    if latest is not None and latest.blocks == target_blocks:
+        return latest, False
+    next_no = (latest.version_no + 1) if latest is not None else 1
+    default_note = "初始成稿基线" if next_no == 1 and target_edits == 0 else f"停止编辑自动存版（累计 {target_edits} 处修订）"
+    ver = DocumentInstanceVersion(
+        instance_id=inst.id,
+        version_no=next_no,
+        blocks=target_blocks,
+        edit_count=target_edits,
+        note=(note or default_note)[:200],
+        user_id=user_id,
+        user_name=(user_name or "")[:128],
+    )
+    session.add(ver)
+    await session.flush()
+    return ver, True
+
+
 @user_router.get("/tasks/{task_id}/documents/{code}/saved")
 async def saved_document(task_id: uuid.UUID, code: str, user: UserDep, session: SessionDep) -> dict:
-    """The saved copy of this document (for editing) and its edit log, if there is one."""
+    """The saved copy of this document (for editing), its edit log, and its version snapshots."""
     task = await _task(session, task_id, user)
     inst = await _instance(session, task, code)
     if inst is None:
         return {"exists": False}
-    return {"exists": True, **_instance_view(inst, await _edits(session, inst))}
+    return {
+        "exists": True,
+        **_instance_view(inst, await _edits(session, inst), await _versions(session, inst)),
+    }
 
 
 @user_router.post("/tasks/{task_id}/documents/{code}/saved")
@@ -1662,6 +1768,7 @@ async def save_document(
             _, eff_values, _ = await _inputs(session, task, code)
             name_zh = _effective_doc_name(code, template.name_zh, eff_values)
             ver_no = template.version_no
+        account = await session.get(User, user.user_id)
         inst = DocumentInstance(
             task_id=task.id,
             org_id=task.org_id,
@@ -1672,9 +1779,20 @@ async def save_document(
             created_by=user.user_id,
         )
         session.add(inst)
+        await session.flush()
+        await _seal_version(
+            session,
+            inst,
+            user_id=user.user_id,
+            user_name=_user_label(account),
+            note="初始成稿基线",
+        )
         await session.commit()
         await session.refresh(inst)
-    return {"exists": True, **_instance_view(inst, await _edits(session, inst))}
+    return {
+        "exists": True,
+        **_instance_view(inst, await _edits(session, inst), await _versions(session, inst)),
+    }
 
 
 @user_router.delete("/tasks/{task_id}/documents/{code}/saved")
@@ -1742,15 +1860,30 @@ async def edit_document(
     except EditError as exc:
         raise HTTPException(422, str(exc)) from exc
     if before == after:
-        return {"exists": True, **_instance_view(inst, await _edits(session, inst))}
+        return {
+            "exists": True,
+            **_instance_view(inst, await _edits(session, inst), await _versions(session, inst)),
+        }
     account = await session.get(User, user.user_id)
+    uname = _user_label(account)
+    existing_vers = await _versions(session, inst)
+    if not existing_vers:
+        await _seal_version(
+            session,
+            inst,
+            user_id=inst.created_by or user.user_id,
+            user_name=uname,
+            blocks_override=inst.blocks,
+            edit_count_override=inst.edit_count,
+            note="初始成稿基线",
+        )
     inst.blocks = blocks
     inst.edit_count += 1
     session.add(
         DocumentEdit(
             instance_id=inst.id,
             user_id=user.user_id,
-            user_name=_user_label(account),
+            user_name=uname,
             place=place,
             before=before,
             after=after,
@@ -1759,7 +1892,178 @@ async def edit_document(
     await session.commit()
     await session.refresh(inst)
     set_detail(request, summary=f"修改“{inst.name_zh}”：{place}", before=before, after=after)
-    return {"exists": True, **_instance_view(inst, await _edits(session, inst))}
+    return {
+        "exists": True,
+        **_instance_view(inst, await _edits(session, inst), await _versions(session, inst)),
+    }
+
+
+class SealVersionIn(BaseModel):
+    note: str = Field(default="", max_length=200)
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/versions")
+async def list_document_versions(
+    task_id: uuid.UUID, code: str, user: UserDep, session: SessionDep
+) -> dict:
+    """List date-stamped historical version snapshots of a compliance document."""
+    task = await _task(session, task_id, user)
+    inst = await _instance(session, task, code)
+    if inst is None:
+        return {"exists": False, "versions": []}
+    vers = await _versions(session, inst)
+    return {
+        "exists": True,
+        "versions": _version_summaries(vers, inst.blocks),
+    }
+
+
+@user_router.post("/tasks/{task_id}/documents/{code}/versions")
+async def seal_document_version(
+    task_id: uuid.UUID,
+    code: str,
+    request: Request,
+    user: UserDep,
+    session: SessionDep,
+    body: SealVersionIn | None = None,
+) -> dict:
+    """Automatically seal a dated version snapshot when the user stops editing (idempotent)."""
+    task = await _task(session, task_id, user)
+    await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
+    inst = await _instance(session, task, code, for_update=True)
+    if inst is None:
+        return {"exists": False, "created": False, "versions": []}
+    account = await session.get(User, user.user_id)
+    ver, created = await _seal_version(
+        session,
+        inst,
+        user_id=user.user_id,
+        user_name=_user_label(account),
+        note=(body.note.strip() if body and body.note else ""),
+    )
+    await session.commit()
+    vers = await _versions(session, inst)
+    if created:
+        set_detail(request, summary=f"生成《{inst.name_zh}》第 {ver.version_no} 版快照")
+    else:
+        request.state.audit_skip = True
+    return {
+        "exists": True,
+        "created": created,
+        "version_no": ver.version_no,
+        "versions": _version_summaries(vers, inst.blocks),
+    }
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/versions/{version_no}")
+async def read_document_version(
+    task_id: uuid.UUID,
+    code: str,
+    version_no: int,
+    user: UserDep,
+    session: SessionDep,
+) -> dict:
+    """Read the full blocks of a historical version snapshot by version number."""
+    if version_no < 1 or version_no > 100000:
+        raise HTTPException(422, "历史版本号超出有效范围")
+    task = await _task(session, task_id, user)
+    inst = await _instance(session, task, code)
+    if inst is None:
+        raise HTTPException(404, "当前文件尚未产生历史版本")
+    ver = await session.scalar(
+        select(DocumentInstanceVersion).where(
+            DocumentInstanceVersion.instance_id == inst.id,
+            DocumentInstanceVersion.version_no == version_no,
+        )
+    )
+    if ver is None:
+        raise HTTPException(404, "未找到该历史版本")
+    from sqlalchemy import func as sa_func
+
+    max_vno = await session.scalar(
+        select(sa_func.max(DocumentInstanceVersion.version_no)).where(
+            DocumentInstanceVersion.instance_id == inst.id
+        )
+    )
+    return {
+        **_version_summary(ver, inst.blocks, is_latest=(ver.version_no == max_vno)),
+        "name": inst.name_zh,
+        "blocks": ver.blocks,
+    }
+
+
+@user_router.post("/tasks/{task_id}/documents/{code}/versions/{version_no}/rollback")
+async def rollback_document_version(
+    task_id: uuid.UUID,
+    code: str,
+    version_no: int,
+    request: Request,
+    user: UserDep,
+    session: SessionDep,
+) -> dict:
+    """Roll back a compliance document to a selected dated version while keeping append-only edit logs intact."""
+    if version_no < 1 or version_no > 100000:
+        raise HTTPException(422, "历史版本号超出有效范围")
+    task = await _task(session, task_id, user)
+    await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
+    inst = await _instance(session, task, code, for_update=True)
+    if inst is None:
+        raise HTTPException(404, "当前文件尚未产生历史版本")
+    target_ver = await session.scalar(
+        select(DocumentInstanceVersion).where(
+            DocumentInstanceVersion.instance_id == inst.id,
+            DocumentInstanceVersion.version_no == version_no,
+        )
+    )
+    if target_ver is None:
+        raise HTTPException(404, "未找到要回退的历史版本")
+
+    account = await session.get(User, user.user_id)
+    uname = _user_label(account)
+
+    # First seal any unsealed current edits so the user can always roll forward back to it if needed
+    await _seal_version(session, inst, user_id=user.user_id, user_name=uname)
+
+    diffs = diff_blocks(inst.blocks, target_ver.blocks)
+    if not diffs and inst.blocks == target_ver.blocks:
+        await session.commit()
+        return {
+            "exists": True,
+            "rolled_back_to": version_no,
+            **_instance_view(inst, await _edits(session, inst), await _versions(session, inst)),
+        }
+
+    inst.blocks = copy.deepcopy(target_ver.blocks)
+    inst.edit_count += max(1, len(diffs))
+    for place, before_txt, after_txt in diffs:
+        session.add(
+            DocumentEdit(
+                instance_id=inst.id,
+                user_id=user.user_id,
+                user_name=uname,
+                place=f"{place}（回退至第 {version_no} 版）"[:128],
+                before=before_txt,
+                after=after_txt,
+            )
+        )
+    from datetime import timedelta, timezone
+
+    cst = timezone(timedelta(hours=8))
+    ts_str = (
+        target_ver.created_at.astimezone(cst).strftime("%Y-%m-%d %H:%M")
+        if target_ver.created_at
+        else ""
+    )
+    note_txt = f"回退至第 {version_no} 版" + (f"（{ts_str}）" if ts_str else "")
+    await _seal_version(session, inst, user_id=user.user_id, user_name=uname, note=note_txt)
+    await session.commit()
+    await session.refresh(inst)
+    set_detail(request, summary=f"将《{inst.name_zh}》{note_txt}")
+    return {
+        "exists": True,
+        "rolled_back_to": version_no,
+        **_instance_view(inst, await _edits(session, inst), await _versions(session, inst)),
+    }
 
 
 # 中国的官方原表是指南 Word 原件里的附件（不在 forms.json 的表格目录里），在这里登记
