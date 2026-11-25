@@ -96,6 +96,8 @@ async def _attach_doc_summaries(session: AsyncSession, sites: list[SourceSite]) 
         if countries
         else list(sites)
     )
+    from app.ingestion.safety import document_available
+
     site_map = {st.id: st for st in all_country_sites}
     rows = (
         await session.execute(
@@ -109,7 +111,11 @@ async def _attach_doc_summaries(session: AsyncSession, sites: list[SourceSite]) 
                 Document.document_type,
                 Document.discovered_at,
             )
-            .where(Document.country_code.in_(countries))
+            .where(
+                Document.country_code.in_(countries),
+                Document.relevance.notin_(("irrelevant", "out_of_scope")),
+                document_available(),
+            )
             .order_by(Document.discovered_at.desc(), Document.id)
         )
     ).all()

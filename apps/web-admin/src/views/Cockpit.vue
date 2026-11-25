@@ -299,7 +299,7 @@ onUnmounted(() => {
         <button type="button" class="dk-card dk-btn-card" @click="go({ path: '/documents', query: { status: 'in_force', folder: 'all' } })">
           <span class="dk-kpi-lbl">全库在册现行法规</span>
           <strong class="dk-kpi-val">{{ data.headline.laws_in_force }}<small> 部</small></strong>
-          <span class="dk-kpi-foot">覆盖 {{ data.headline.covered_jurisdictions }} 国 · {{ data.headline.clauses_total }} 条原始条款</span>
+          <span class="dk-kpi-foot">覆盖 {{ data.headline.covered_jurisdictions }} 国 · {{ data.headline.clauses_total }} 条可用条文</span>
         </button>
 
         <button type="button" class="dk-card dk-btn-card" @click="go({ path: '/standards', query: { status: 'active' } })">

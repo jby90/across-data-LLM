@@ -73,11 +73,9 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
     ).all()
     docs_by_cc = {r[0]: int(r[1]) for r in doc_rows if r[0]}
     laws_total = sum(docs_by_cc.values())
-    laws_archived_total = int(
-        (await session.execute(text("SELECT count(*) FROM documents"))).scalar_one() or 0
-    )
+    laws_archived_total = laws_total
 
-    # 2. 各国条文数与译文覆盖数（先物化安全拦截表，消除逐条嵌套子查询）
+    # 2. 各国可用条文数与译文覆盖数（仅统计范围内可用条文；外文有合格译文时仅计合格条文）
     clause_rows = (
         await session.execute(
             text(
@@ -122,7 +120,8 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
                     GROUP BY clause_id
                     HAVING count(*) = 1
                 )
-                SELECT d.country_code,
+                SELECT d.id,
+                       d.country_code,
                        d.language,
                        count(DISTINCT c.id) AS total_clauses,
                        count(DISTINCT c.id) FILTER (
@@ -139,6 +138,14 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
                 WHERE d.relevance IN ('relevant', 'related')
                   AND coalesce(dv.legal_status, 'in_force') NOT IN ('repealed', 'draft')
                   AND hd.doc_id IS NULL
+                  AND NOT (
+                      coalesce(d.intake_scope->>'mode', '') = 'business_sections'
+                      AND d.intake_scope->>'version_id' = c.version_id::text
+                      AND NOT (
+                          coalesce(d.intake_scope->'in_scope_ordinals', '[]'::jsonb)
+                          @> to_jsonb(c.ordinal)
+                      )
+                  )
                   AND NOT EXISTS (
                       SELECT 1 FROM held_page_rules hp
                       WHERE hp.target_id = c.id
@@ -149,7 +156,7 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
                            AND hp.page_no <= c.page_end
                          )
                   )
-                GROUP BY d.country_code, d.language
+                GROUP BY d.id, d.country_code, d.language
                 """
             )
         )
@@ -158,14 +165,20 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
     foreign_clauses_by_cc: dict[str, int] = {}
     translated_by_cc: dict[str, int] = {}
     approved_tr_by_cc: dict[str, int] = {}
-    for cc, lang, total_c, trans_c, appr_c in clause_rows:
+    for _did, cc, lang, total_c, trans_c, appr_c in clause_rows:
         if not cc:
             continue
-        clauses_by_cc[cc] = clauses_by_cc.get(cc, 0) + int(total_c or 0)
-        if not str(lang or "").lower().startswith("zh"):
-            foreign_clauses_by_cc[cc] = foreign_clauses_by_cc.get(cc, 0) + int(total_c or 0)
-            translated_by_cc[cc] = translated_by_cc.get(cc, 0) + int(trans_c or 0)
-            approved_tr_by_cc[cc] = approved_tr_by_cc.get(cc, 0) + int(appr_c or 0)
+        tot = int(total_c or 0)
+        tr = int(trans_c or 0)
+        ap = int(appr_c or 0)
+        if str(lang or "").lower().startswith("zh"):
+            clauses_by_cc[cc] = clauses_by_cc.get(cc, 0) + tot
+        else:
+            usable_c = tr if tr > 0 else tot
+            clauses_by_cc[cc] = clauses_by_cc.get(cc, 0) + usable_c
+            foreign_clauses_by_cc[cc] = foreign_clauses_by_cc.get(cc, 0) + usable_c
+            translated_by_cc[cc] = translated_by_cc.get(cc, 0) + tr
+            approved_tr_by_cc[cc] = approved_tr_by_cc.get(cc, 0) + ap
 
     # 3. 知识图谱六要素节点与语义关系（物化可用法规、条文与有效节点集合，消除双端重复嵌套扫描）
     from sqlalchemy import func, or_

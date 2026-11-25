@@ -156,7 +156,8 @@ const headerCountryOptions = computed(() => {
 
 function matchesStatusFilter(d: DocumentOut): boolean {
   if (statusFilter.value === 'in_force') {
-    if (!d.latest_version) return false
+    if (!d.latest_version || d.safety_hold) return false
+    if (d.latest_version.state !== 'parsed' || d.latest_version.review_status === 'rejected') return false
     if (!['relevant', 'related'].includes(d.relevance)) return false
     const legal = d.latest_version.legal_status || 'in_force'
     return !['repealed', 'draft'].includes(legal)

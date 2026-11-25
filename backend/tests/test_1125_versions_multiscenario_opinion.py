@@ -654,3 +654,198 @@ async def test_opinion_scheduled_extract_and_real_loopback_multi_recipient_smtp(
     assert "发信邮件服务器" in err_detail
     for forbidden in ("SMTP", "Traceback", "ConnectionRefused", "Errno", "Exception"):
         assert forbidden not in err_detail
+
+
+@pytest.mark.asyncio
+async def test_usable_only_counts_and_bilingual_reader_zero_empty_cells(
+    client, session_factory, seed
+):
+    """Verify '只显示可用的，而不是总共的':
+    1) Out-of-scope documents, repealed versions, out-of-scope chapters (intake_scope), and
+       untranslated/failed stub clauses on translated foreign laws are excluded from Cockpit,
+       User Knowledge Overview, User Regulation Directory, Bilingual Reader, and Admin Sites counts.
+    2) Bilingual reader returns 100% matched usable articles with 0 empty translation cells.
+    """
+    tok_admin = await login(client, "admin", "admin@example.com")
+    tok_member = await login(client, "user", "a-member@example.com")
+
+    async with session_factory() as s:
+        site_fr = SourceSite(
+            country_code="FR",
+            publisher="法国官方公报门户",
+            language="fr",
+            document_type="LAW",
+            entry_url="https://www.legifrance.gouv.fr",
+        )
+        s.add(site_fr)
+        await s.flush()
+
+        # 1. Usable law with 2 usable translated clauses + 1 failed stub + 1 out_of_scope chapter clause
+        doc_usable = Document(
+            site_id=site_fr.id,
+            country_code="FR",
+            language="fr",
+            title="Loi relative à la protection des données personnelles",
+            title_zh="法国个人数据保护法",
+            document_type="LAW",
+            instrument_kind="PRIMARY",
+            relevance="relevant",
+            source_url="https://www.legifrance.gouv.fr/loda/id/1",
+        )
+        # 2. Out-of-scope archived stub under the same site (must NOT inflate counts)
+        doc_stub = Document(
+            site_id=site_fr.id,
+            country_code="FR",
+            language="fr",
+            title="Notice administrative hors périmètre",
+            title_zh="范围外行政公告",
+            document_type="GUIDANCE",
+            relevance="out_of_scope",
+            source_url="https://www.legifrance.gouv.fr/loda/id/2",
+        )
+        s.add_all([doc_usable, doc_stub])
+        await s.flush()
+
+        ver_u = DocumentVersion(
+            document_id=doc_usable.id,
+            version_no=1,
+            state="parsed",
+            legal_status="in_force",
+            review_status="approved",
+            content_hash="1" * 64,
+            archive_path="test/fr_usable.html",
+            size_bytes=2048,
+            mime_type="text/html",
+            final_url=doc_usable.source_url,
+        )
+        ver_stub = DocumentVersion(
+            document_id=doc_stub.id,
+            version_no=1,
+            state="parsed",
+            legal_status="in_force",
+            review_status="approved",
+            content_hash="2" * 64,
+            archive_path="test/fr_stub.html",
+            size_bytes=512,
+            mime_type="text/html",
+            final_url=doc_stub.source_url,
+        )
+        s.add_all([ver_u, ver_stub])
+        await s.flush()
+
+        doc_usable.intake_scope = {
+            "mode": "business_sections",
+            "version_id": str(ver_u.id),
+            "in_scope_ordinals": [1, 2, 3],
+            "parts": [],
+        }
+
+        c1 = Clause(
+            version_id=ver_u.id,
+            ordinal=1,
+            clause_number="Article 1",
+            original_text="Le responsable du traitement garantit la sécurité des données personnelles.",
+            text_hash="c" * 64,
+            language="fr",
+        )
+        c2 = Clause(
+            version_id=ver_u.id,
+            ordinal=2,
+            clause_number="Article 2",
+            original_text="Tout transfert hors Union requiert des garanties appropriées.",
+            text_hash="d" * 64,
+            language="fr",
+        )
+        c3_failed = Clause(
+            version_id=ver_u.id,
+            ordinal=3,
+            clause_number="Annexe",
+            original_text="Tableau récapitulatif non traduit des codes internes.",
+            text_hash="e" * 64,
+            language="fr",
+        )
+        c4_oos = Clause(
+            version_id=ver_u.id,
+            ordinal=4,
+            clause_number="Article 99",
+            original_text="Dispositions relatives aux écoles de conduite sans rapport.",
+            text_hash="f" * 64,
+            language="fr",
+        )
+        c_stub = Clause(
+            version_id=ver_stub.id,
+            ordinal=1,
+            clause_number="1",
+            original_text="Texte hors périmètre.",
+            text_hash="0" * 64,
+            language="fr",
+        )
+        s.add_all([c1, c2, c3_failed, c4_oos, c_stub])
+        await s.flush()
+
+        s.add_all(
+            [
+                ClauseTranslation(
+                    clause_id=c1.id,
+                    engine="llm",
+                    translated_text="数据处理者应当保障个人数据的安全。",
+                    model_name="test",
+                    prompt_version="v1",
+                    is_current=True,
+                    quality_check_passed=True,
+                    review_status="approved",
+                ),
+                ClauseTranslation(
+                    clause_id=c2.id,
+                    engine="llm",
+                    translated_text="任何向欧盟境外传输个人数据的行为均须具备适当保障措施。",
+                    model_name="test",
+                    prompt_version="v1",
+                    is_current=True,
+                    quality_check_passed=True,
+                    review_status="machine_translated",
+                ),
+                ClauseTranslation(
+                    clause_id=c3_failed.id,
+                    engine="llm",
+                    translated_text="",
+                    model_name="test",
+                    prompt_version="v1",
+                    is_current=True,
+                    quality_check_passed=False,
+                    review_status="translation_failed",
+                ),
+            ]
+        )
+        await s.commit()
+        usable_doc_id = str(doc_usable.id)
+
+    # 1. Cockpit shows ONLY usable law (1, not 2) and ONLY usable clauses (2, not 4 or 5; 100% coverage)
+    ck = (await client.get("/api/admin/cockpit/overview", headers=bearer(tok_admin))).json()
+    assert ck["headline"]["laws_in_force"] == 1
+    assert ck["headline"]["laws_archived_total"] == 1
+    assert ck["headline"]["clauses_total"] == 2
+    assert ck["headline"]["foreign_clauses_total"] == 2
+    assert ck["headline"]["translated_clauses_total"] == 2
+    assert ck["headline"]["translation_coverage_pct"] == 100.0
+
+    # 2. Admin Sites count shows ONLY usable document (1, excluding out_of_scope stub)
+    sites_fr = (await client.get("/api/admin/sites?country_code=FR", headers=bearer(tok_admin))).json()
+    assert len(sites_fr) == 1 and sites_fr[0]["document_count"] == 1
+
+    # 3. User Knowledge Overview, Directory, and Bilingual Reader agree 100% on 2 usable articles & 0 empty cells
+    ov = {
+        c["country_code"]: c
+        for c in (await client.get("/api/knowledge/overview", headers=bearer(tok_member))).json()
+    }
+    assert ov["FR"]["documents_count"] == 1
+    assert ov["FR"]["clauses_count"] == 2
+    assert ov["FR"]["translations_count"] == 2
+
+    regs = (await client.get("/api/knowledge/regulations?country_code=FR", headers=bearer(tok_member))).json()
+    assert len(regs) == 1 and regs[0]["clauses_count"] == 2
+
+    det = (await client.get(f"/api/knowledge/regulations/{usable_doc_id}", headers=bearer(tok_member))).json()
+    assert det["clauses_total"] == 2
+    assert len(det["clauses"]) == 2
+    assert all(c["translated_text"] and c["scope_note"] is None for c in det["clauses"])

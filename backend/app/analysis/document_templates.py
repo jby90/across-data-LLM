@@ -424,6 +424,7 @@ def _quote(citation: dict, limit: int = 300) -> str:
     clause is cut at the end of a sentence (never in the middle of one) and marked as cut."""
     from app.analysis.clause_gate import (
         _close_delims_before_ellipsis,
+        _strip_dangling_tail,
         clean_margin_numbers,
         find_clean_sentence_cut,
         strip_own_label,
@@ -435,12 +436,12 @@ def _quote(citation: dict, limit: int = 300) -> str:
         return text
     cut_end = find_clean_sentence_cut(text, limit)
     if cut_end > 0:
-        return _close_delims_before_ellipsis(text[:cut_end].rstrip(" /\n\t")) + " ……"
+        return _close_delims_before_ellipsis(_strip_dangling_tail(text[:cut_end])) + " ……"
     end = limit
     if end < len(text) and text[end - 1].isascii() and text[end].isascii():
         while end > limit - 24 and text[end - 1].isalnum():
             end -= 1
-    return _close_delims_before_ellipsis(text[:end].rstrip()) + "……"
+    return _close_delims_before_ellipsis(_strip_dangling_tail(text[:end])) + "……"
 
 
 def _clause_key(c: dict) -> str:

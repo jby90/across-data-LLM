@@ -69,6 +69,79 @@ async def light_rows(session: AsyncSession, version_ids: list) -> dict:
     return out
 
 
+async def qualified_translation_ids(
+    session: AsyncSession, version_ids: list
+) -> tuple[dict[uuid.UUID, set[uuid.UUID]], dict[uuid.UUID, set[uuid.UUID]]]:
+    """version_id → (qualified_translated_clause_ids, native_zh_clause_ids)."""
+    if not version_ids:
+        return {}, {}
+    from app.knowledge.models import ClauseTranslation
+
+    tr_rows = (
+        await session.execute(
+            select(Clause.version_id, ClauseTranslation.clause_id)
+            .join(Clause, Clause.id == ClauseTranslation.clause_id)
+            .where(
+                Clause.version_id.in_(version_ids),
+                ClauseTranslation.is_current.is_(True),
+                ClauseTranslation.quality_check_passed.is_(True),
+                ClauseTranslation.review_status.in_(USABLE_TRANSLATION),
+            )
+            .group_by(Clause.version_id, ClauseTranslation.clause_id)
+            .having(func.count(ClauseTranslation.id) == 1)
+        )
+    ).all()
+    tr_by_ver: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for vid, cid in tr_rows:
+        tr_by_ver.setdefault(vid, set()).add(cid)
+
+    zh_rows = (
+        await session.execute(
+            select(Clause.version_id, Clause.id).where(
+                Clause.version_id.in_(version_ids),
+                Clause.language.ilike("zh%"),
+            )
+        )
+    ).all()
+    zh_by_ver: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for vid, cid in zh_rows:
+        zh_by_ver.setdefault(vid, set()).add(cid)
+    return tr_by_ver, zh_by_ver
+
+
+def usable_unit_list(
+    units: list,
+    *,
+    is_native_zh: bool,
+    intake_scope: dict | None,
+    version_id: uuid.UUID,
+    translated_cids: set[uuid.UUID],
+    zh_cids: set[uuid.UUID],
+) -> list:
+    """Filter reading units to strictly usable items:
+    1) Exclude chapters marked out-of-scope in ``intake_scope``.
+    2) On foreign documents that have qualified Chinese translations, keep only units whose
+       substantive rows all have qualified translations (pure numeric sub-rows are preserved),
+       guaranteeing 0 empty translation cells; untranslated documents keep full original units."""
+    from app.ingestion.intake_scope import out_of_scope
+    from app.knowledge.numeric_integrity import is_numeric_only
+
+    scoped_units = [
+        u for u in units if not out_of_scope(intake_scope or {}, version_id, u.head.ordinal)
+    ]
+    if is_native_zh or not (translated_cids or zh_cids):
+        return scoped_units
+    return [
+        u
+        for u in scoped_units
+        if any(r.id in translated_cids or r.id in zh_cids for r in u.rows)
+        and all(
+            r.id in translated_cids or r.id in zh_cids or is_numeric_only(r.original_text)
+            for r in u.rows
+        )
+    ]
+
+
 async def latest_parsed(session: AsyncSession, document_ids: list) -> dict:
     if not document_ids:
         return {}
@@ -112,7 +185,9 @@ async def library(
         stmt = stmt.where(Document.country_code == country_code.upper())
     docs = list((await session.scalars(stmt)).all())
     latest = await latest_parsed(session, [d.id for d in docs])
-    rows = await light_rows(session, [v.id for v in latest.values()])
+    vids = [v.id for v in latest.values()]
+    rows = await light_rows(session, vids)
+    tr_by_ver, zh_by_ver = await qualified_translation_ids(session, vids)
     out = []
     for d in docs:
         v = latest.get(d.id)
@@ -120,13 +195,35 @@ async def library(
             continue
         if in_force_only and (v.legal_status or "in_force") in NOT_CITABLE_STATUSES:
             continue
-        out.append(Entry(d, v, len(reading_units(rows[v.id]))))
+        units = usable_unit_list(
+            reading_units(rows[v.id]),
+            is_native_zh=str(d.language or "").lower().startswith("zh"),
+            intake_scope=d.intake_scope,
+            version_id=v.id,
+            translated_cids=tr_by_ver.get(v.id, set()),
+            zh_cids=zh_by_ver.get(v.id, set()),
+        )
+        if not units:
+            continue
+        out.append(Entry(d, v, len(units)))
     return out
 
 
 async def articles_in(session: AsyncSession, version_id) -> int:
+    ver = await session.get(DocumentVersion, version_id)
+    doc = await session.get(Document, ver.document_id) if ver else None
     rows = await light_rows(session, [version_id])
-    return len(reading_units(rows.get(version_id, [])))
+    tr_by_ver, zh_by_ver = await qualified_translation_ids(session, [version_id])
+    return len(
+        usable_unit_list(
+            reading_units(rows.get(version_id, [])),
+            is_native_zh=str((doc.language if doc else "") or "").lower().startswith("zh"),
+            intake_scope=doc.intake_scope if doc else None,
+            version_id=version_id,
+            translated_cids=tr_by_ver.get(version_id, set()),
+            zh_cids=zh_by_ver.get(version_id, set()),
+        )
+    )
 
 
 USABLE_TRANSLATION = ("approved", "machine_translated", "pending_review")
@@ -137,6 +234,7 @@ async def article_of(session: AsyncSession, clause_id, cache: dict | None = None
     ""). The Chinese text is joined from each row's usable translation; a row without one is
     marked where it falls."""
     from app.knowledge.models import ClauseTranslation
+    from app.knowledge.numeric_integrity import is_numeric_only
     from app.knowledge.reading import joined
 
     cache = {} if cache is None else cache
@@ -167,7 +265,18 @@ async def article_of(session: AsyncSession, clause_id, cache: dict | None = None
     for tr in trs:
         by.setdefault(tr.clause_id, []).append(tr)
     parts = [by[r.id][0].translated_text if len(by.get(r.id, [])) == 1 else None for r in unit.rows]
-    zh = joined([p or "〔此段暂无中文〕" for p in parts]) if any(parts) else ""
+    zh = (
+        joined(
+            [
+                p
+                if p
+                else (r.original_text.strip() if is_numeric_only(r.original_text) else "〔此段暂无中文〕")
+                for r, p in zip(unit.rows, parts, strict=True)
+            ]
+        )
+        if any(parts)
+        else ""
+    )
     return unit.head, unit.rows, zh
 
 

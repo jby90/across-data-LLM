@@ -52,22 +52,33 @@ _AR_DUAL_PAREN = re.compile(
     r"([\u0600-\u06ff][^（）\n]{2,120}?)\s*\([A-Za-z0-9 ,./'\"\-–—:;]*\b(?:Law|Decree|Act|Decision|Resolution|Regulation)\b[A-Za-z0-9 ,./'\"\-–—:;]*\)"
 )
 _ELLIPSIS_TAIL = re.compile(r"(\s*(?:……|…|\.{3,}))\s*$")
+_EG_FOOTER_NOISE = re.compile(r"\n\s*私密及机密\s+EG-CERT[^\n]*")
+_DANGLING_BEFORE_ELLIPSIS = re.compile(
+    r"(?:[，,；;：:\s]+(?:以及|及|和|或|且|并|与|具体涉及|包括|涵盖|and|or|ou|et)|(?:^|[\s；;。，,])\d+\.)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _tidy_brackets(s: str) -> str:
     s = _PRIVATE.sub("•", s)
+    s = _EG_FOOTER_NOISE.sub("", s)
     if "Law))" in s or "Law)）" in s or _AR_DUAL_PAREN.search(s):
         s = _AR_DUAL_PAREN.sub(r"\1", s)
         s = re.sub(r"(\b(?:Law|Decree|Act|Decision)\b[^()（）]{0,60})\)\)", r"\1)", s)
     m = _ELLIPSIS_TAIL.search(s)
     if m:
-        head = s[: m.start()]
-        tail = m.group(1)
+        head = s[: m.start()].rstrip()
+        while True:
+            trimmed = _DANGLING_BEFORE_ELLIPSIS.sub("", head).rstrip(" ，,；;：:\n\t")
+            if trimmed == head or not trimmed:
+                break
+            head = trimmed
+        tail = m.group(1).lstrip("\n\r")
         for op, cl in (("《", "》"), ("（", "）"), ("(", ")")):
             diff = head.count(op) - head.count(cl)
             if diff > 0:
                 head = head + (cl * diff)
-        s = head + tail
+        s = head + (tail if tail else "……")
     return s
 
 

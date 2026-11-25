@@ -888,12 +888,12 @@ onMounted(async () => {
       <el-tab-pane v-if="country" label="法规浏览" name="library"
         ><div class="library-toolbar">
           <div class="knowledge-search in-tab"><el-input v-model="search" clearable :placeholder="SEARCH_HINT[tab]" :aria-label="SEARCH_HINT[tab]" @input="resetSearchPages" /></div>
-          <el-radio-group v-model="statusFilter" size="small" class="cy-pill-group" aria-label="效力状态筛选" data-testid="kb-status-filter">
-            <el-radio-button value="">全部效力</el-radio-button>
+          <el-radio-group v-if="regulations.some((d) => d.legal_status && d.legal_status !== 'in_force')" v-model="statusFilter" size="small" class="cy-pill-group" aria-label="效力状态筛选" data-testid="kb-status-filter">
+            <el-radio-button value="">全部可用</el-radio-button>
             <el-radio-button value="in_force">现行有效</el-radio-button>
-            <el-radio-button value="amended">已修订</el-radio-button>
-            <el-radio-button value="draft">草案</el-radio-button>
-            <el-radio-button value="repealed">已废止</el-radio-button>
+            <el-radio-button v-if="regulations.some((d) => d.legal_status === 'amended')" value="amended">已修订</el-radio-button>
+            <el-radio-button v-if="regulations.some((d) => d.legal_status === 'draft')" value="draft">草案</el-radio-button>
+            <el-radio-button v-if="regulations.some((d) => d.legal_status === 'repealed')" value="repealed">已废止</el-radio-button>
           </el-radio-group>
         </div><div class="library-layout" :class="{ 'dir-collapsed': dirCollapsed && !!detail, 'has-detail': !!detail }" v-loading="busy">
           <button v-if="dirCollapsed && detail" type="button" class="dir-rail" title="展开法规目录" aria-label="展开法规目录" data-testid="kb-dir-open" @click="dirCollapsed = false">
@@ -1198,7 +1198,7 @@ onMounted(async () => {
               aria-label="标准范围筛选"
               @change="standardPage = 1"
             >
-              <el-radio-button value="all">全部已收录标准（{{ standards.length }}）</el-radio-button>
+              <el-radio-button value="all">全部可用标准（{{ standards.length }}）</el-radio-button>
               <el-radio-button value="intl">国际通用标准（{{ intlStandardsCount }}）</el-radio-button>
               <el-radio-button value="domestic">中国标准（{{ cnStandardsCount }}）</el-radio-button>
             </el-radio-group>
@@ -1213,7 +1213,7 @@ onMounted(async () => {
               <el-radio-button value="local">本国及国际通用（{{ localStandardsCount }}）</el-radio-button>
               <el-radio-button v-if="domesticStandardsCount > 0 && domesticStandardsCount < localStandardsCount" value="domestic">仅本国标准（{{ domesticStandardsCount }}）</el-radio-button>
               <el-radio-button v-if="domesticStandardsCount > 0 && intlStandardsCount > 0" value="intl">国际通用标准（{{ intlStandardsCount }}）</el-radio-button>
-              <el-radio-button v-if="localStandardsCount < standards.length" value="all">全部已收录标准（{{ standards.length }}）</el-radio-button>
+              <el-radio-button v-if="localStandardsCount < standards.length" value="all">全部可用标准（{{ standards.length }}）</el-radio-button>
             </el-radio-group>
             <el-radio-group
               v-model="standardKind"
@@ -1231,7 +1231,7 @@ onMounted(async () => {
           </div>
         </div>
         <p v-if="country && domesticStandardsCount === 0 && standards.length > 0" class="muted" style="margin: 0 0 14px">
-          当前所选目的国暂无独立本国标准收录，默认展示可跨国适用的 {{ intlStandardsCount }} 项国际通用标准（ISO、UN、IEC 等）；如需对照车辆研发出境源头配套技术要求，可切换至全部已收录标准一并查阅中国标准（共 {{ standards.length }} 项）。
+          当前所选目的国暂无独立本国标准收录，默认展示可跨国适用的 {{ intlStandardsCount }} 项国际通用标准（ISO、UN、IEC 等）；如需对照车辆研发出境源头配套技术要求，可切换至全部可用标准一并查阅中国标准（共 {{ standards.length }} 项）。
         </p>
         <div class="term-grid" data-testid="kb-standards-grid">
           <article

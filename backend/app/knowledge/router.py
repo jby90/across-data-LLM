@@ -986,7 +986,12 @@ async def list_translations(
         .join(DocumentVersion, DocumentVersion.id == Clause.version_id)
         .join(Document, Document.id == DocumentVersion.document_id)
         .join(latest, (latest.c.document_id == Document.id) & (latest.c.v == DocumentVersion.version_no))
-        .where(Document.relevance.notin_(("irrelevant", "out_of_scope")))
+        .where(
+            document_available(),
+            Document.relevance.notin_(("irrelevant", "out_of_scope")),
+            DocumentVersion.review_status != "rejected",
+            DocumentVersion.legal_status.notin_(NOT_CITABLE_STATUSES),
+        )
         .order_by(weight, topic, Document.title, Clause.ordinal, ClauseTranslation.id)
     )
     if country_code:
@@ -994,9 +999,17 @@ async def list_translations(
     if review_status:
         stmt = stmt.where(ClauseTranslation.review_status == review_status)
     elif not include_history:
-        stmt = stmt.where(
-            ClauseTranslation.review_status != TranslationReviewStatus.SUPERSEDED.value
-        )
+        if not include_short:
+            stmt = stmt.where(
+                ClauseTranslation.quality_check_passed.is_(True),
+                ClauseTranslation.review_status.in_(
+                    ("approved", "machine_translated", "pending_review")
+                ),
+            )
+        else:
+            stmt = stmt.where(
+                ClauseTranslation.review_status != TranslationReviewStatus.SUPERSEDED.value
+            )
     if document_id:
         stmt = stmt.where(Document.id == document_id)
     if not include_history and review_status != "superseded":
@@ -2468,32 +2481,39 @@ async def _knowledge_overview(session: AsyncSession) -> list[dict]:
             and (v.legal_status or "in_force") not in NOT_CITABLE_STATUSES
             and rows_by_ver.get(v.id)
         ):
-            units = reading_units(rows_by_ver[v.id])
+            from app.knowledge.library_view import usable_unit_list
+
+            doc_is_zh = str(d.language or "").lower().startswith("zh")
+            ver_cids = {r.id for r in rows_by_ver[v.id]}
+            ver_tr_cids = ver_cids & translated_cids
+            ver_zh_cids = {
+                cid
+                for cid in ver_cids
+                if clause_meta.get(cid, ("", False))[0].lower().startswith("zh")
+            }
+            units = usable_unit_list(
+                reading_units(rows_by_ver[v.id]),
+                is_native_zh=doc_is_zh,
+                intake_scope=d.intake_scope,
+                version_id=v.id,
+                translated_cids=ver_tr_cids,
+                zh_cids=ver_zh_cids,
+            )
+            if not units:
+                continue
             parsed_docs[cc] = parsed_docs.get(cc, 0) + 1
             clauses[cc] = clauses.get(cc, 0) + len(units)
             prev_t, prev_a = translations.get(cc, (0, 0))
-            doc_is_zh = str(d.language or "").lower().startswith("zh")
             u_trans = sum(
                 1
                 for u in units
-                if doc_is_zh
-                or any(
-                    c.id in translated_cids
-                    or clause_meta.get(c.id, ("", False))[0].lower().startswith("zh")
-                    for c in u.rows
-                )
+                if doc_is_zh or any(c.id in ver_tr_cids or c.id in ver_zh_cids for c in u.rows)
             )
             u_appr = sum(
                 1
                 for u in units
                 if (
-                    (
-                        doc_is_zh
-                        or all(
-                            clause_meta.get(c.id, ("", False))[0].lower().startswith("zh")
-                            for c in u.rows
-                        )
-                    )
+                    (doc_is_zh or all(c.id in ver_zh_cids for c in u.rows))
                     and v.review_status == "approved"
                     and not any(clause_meta.get(c.id, ("", True))[1] for c in u.rows)
                 )
@@ -2749,51 +2769,44 @@ async def get_user_glossary(
 
 
 async def _version_unit_counts(
-    session: AsyncSession, version_id: uuid.UUID, *, is_native_zh: bool = False
+    session: AsyncSession,
+    version_id: uuid.UUID,
+    *,
+    is_native_zh: bool | None = None,
+    intake_scope: dict | None = None,
 ) -> tuple[int, int]:
-    from app.knowledge.library_view import light_rows
+    from app.knowledge.library_view import (
+        light_rows,
+        qualified_translation_ids,
+        usable_unit_list,
+    )
     from app.knowledge.reading import reading_units
+
+    if is_native_zh is None or intake_scope is None:
+        ver_obj = await session.get(DocumentVersion, version_id)
+        doc_obj = await session.get(Document, ver_obj.document_id) if ver_obj else None
+        if is_native_zh is None:
+            is_native_zh = str((doc_obj.language if doc_obj else "") or "").lower().startswith("zh")
+        if intake_scope is None and doc_obj is not None:
+            intake_scope = doc_obj.intake_scope
 
     rows_map = await light_rows(session, [version_id])
     rows = rows_map.get(version_id) or []
     if not rows:
         return 0, 0
-    units = reading_units(rows)
+    tr_by_ver, zh_by_ver = await qualified_translation_ids(session, [version_id])
+    translated_cids = tr_by_ver.get(version_id, set())
+    zh_cids = zh_by_ver.get(version_id, set())
+    units = usable_unit_list(
+        reading_units(rows),
+        is_native_zh=bool(is_native_zh),
+        intake_scope=intake_scope,
+        version_id=version_id,
+        translated_cids=translated_cids,
+        zh_cids=zh_cids,
+    )
     if is_native_zh:
         return len(units), len(units)
-    translated_cids = set(
-        (
-            await session.scalars(
-                select(ClauseTranslation.clause_id)
-                .join(Clause, Clause.id == ClauseTranslation.clause_id)
-                .where(
-                    Clause.version_id == version_id,
-                    ClauseTranslation.is_current.is_(True),
-                    ClauseTranslation.quality_check_passed.is_(True),
-                    ClauseTranslation.review_status.notin_(
-                        (
-                            "superseded",
-                            "not_translated",
-                            "translation_failed",
-                            "rejected",
-                            "stale",
-                        )
-                    ),
-                )
-                .group_by(ClauseTranslation.clause_id)
-                .having(func.count(ClauseTranslation.id) == 1)
-            )
-        ).all()
-    )
-    zh_cids = set(
-        (
-            await session.scalars(
-                select(Clause.id).where(
-                    Clause.version_id == version_id, Clause.language.ilike("zh%")
-                )
-            )
-        ).all()
-    )
     translated_units = sum(
         1 for u in units if any(c.id in translated_cids or c.id in zh_cids for c in u.rows)
     )
@@ -3178,13 +3191,28 @@ async def get_user_regulation_detail(
         from app.ingestion.display_text import for_reading
         from app.ingestion.intake_scope import note_for as scope_note_for
         from app.ingestion.safety import held_citation_ids
+        from app.knowledge.library_view import qualified_translation_ids, usable_unit_list
+        from app.knowledge.numeric_integrity import is_numeric_only
         from app.knowledge.reading import joined, reading_units
         from app.knowledge.user_relations import reader_relations
 
         rows = list(
             (await session.scalars(select(Clause).where(Clause.version_id == latest.id))).all()
         )
-        units = reading_units(rows)
+        all_units = reading_units(rows)
+        tr_by_ver, zh_by_ver = await qualified_translation_ids(session, [latest.id])
+        units = usable_unit_list(
+            all_units,
+            is_native_zh=str(doc.language or "").lower().startswith("zh"),
+            intake_scope=doc.intake_scope,
+            version_id=latest.id,
+            translated_cids=tr_by_ver.get(latest.id, set()),
+            zh_cids=zh_by_ver.get(latest.id, set()),
+        )
+        if focus_clause_id and not any(focus_clause_id in u.ids for u in units):
+            focused_u = next((u for u in all_units if focus_clause_id in u.ids), None)
+            if focused_u is not None:
+                units = sorted([*units, focused_u], key=lambda u: u.head.ordinal)
         first_numbered = next((u.head.ordinal for u in units if u.head.clause_number), None)
         if first_numbered is None and units:
             first_numbered = units[0].head.ordinal + 1  # 全文都没有条号：只有第一段算“前言”
@@ -3288,8 +3316,21 @@ async def get_user_regulation_detail(
             elif not done:
                 zh, state = None, "not_translated"
             else:
-                # 一条由几段组成：每段用自己的中文；某段还没有中文时在那里注明，不拿别段顶替
-                zh = for_reading(joined([tr.translated_text if tr else "〔此段暂无中文〕" for _, tr in parts]))
+                # 一条由几段组成：每段用自己的中文；纯编号段保留原编号
+                zh = for_reading(
+                    joined(
+                        [
+                            tr.translated_text
+                            if tr
+                            else (
+                                c.original_text.strip()
+                                if is_numeric_only(c.original_text)
+                                else "〔此段暂无中文〕"
+                            )
+                            for c, tr in parts
+                        ]
+                    )
+                )
                 states = {tr.review_status for tr in done}
                 state = (
                     "approved"

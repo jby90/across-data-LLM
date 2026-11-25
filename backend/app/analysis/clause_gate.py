@@ -250,6 +250,16 @@ def find_clean_sentence_cut(text: str, limit: int) -> int:
     return best if best >= limit // 3 else -1
 
 
+def _strip_dangling_tail(fragment: str) -> str:
+    s = fragment.rstrip(" /\n\t")
+    while True:
+        nxt = _DANGLING_LINE_TAIL_RE.sub("", s).rstrip(" ，,：:/\n\t")
+        if nxt == s or not nxt:
+            break
+        s = nxt
+    return s
+
+
 def cut(text: str, limit: int = 220) -> str:
     """An excerpt that ends at the end of a sentence or an item, marked when cut."""
     text = clean_margin_numbers(text or "")
@@ -257,12 +267,12 @@ def cut(text: str, limit: int = 220) -> str:
         return text
     cut_end = find_clean_sentence_cut(text, limit)
     if cut_end > 0:
-        return _close_delims_before_ellipsis(text[:cut_end].rstrip(" /\n\t")) + "……"
+        return _close_delims_before_ellipsis(_strip_dangling_tail(text[:cut_end])) + "……"
     end = limit
     if end < len(text) and text[end - 1].isascii() and text[end].isascii():
         while end > limit - 24 and text[end - 1].isalnum():
             end -= 1
-    return _close_delims_before_ellipsis(text[:end].rstrip()) + "……"
+    return _close_delims_before_ellipsis(_strip_dangling_tail(text[:end])) + "……"
 
 
 _HISTORICAL = re.compile(r"颁布原文|历史指南|历史版本|旧版|已废止|已失效|原始版本")

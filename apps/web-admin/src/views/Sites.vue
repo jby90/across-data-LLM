@@ -137,7 +137,7 @@ function goDocuments(site: SiteOut) {
       site_id: site.id,
       publisher: site.publisher,
       country_code: site.country_code,
-      status: 'all',
+      status: 'in_force',
     },
   })
 }
