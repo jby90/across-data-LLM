@@ -2934,22 +2934,116 @@ async def _build_regulation_summary(
     return summary, latest
 
 
+_REGULATIONS_LIST_CACHE: dict[str, list[RegulationSummaryOut]] = {}
+
+
+async def _build_all_user_regulations(session: AsyncSession) -> dict[str, list[RegulationSummaryOut]]:
+    """Vectorized 3-query build of RegulationSummaryOut across all countries in the library."""
+    from collections import defaultdict
+
+    from app.analysis.workflow_engine import country_name_zh
+    from app.knowledge.library_view import library, main_law, relation_counts
+
+    all_entries = await library(session, None, include_peripheral=True)
+    all_vids = [e.version.id for e in all_entries]
+    relations = await relation_counts(session, all_vids) if all_vids else {}
+    site_ids = {e.document.site_id for e in all_entries if e.document.site_id}
+    sites = (
+        {
+            s.id: s.publisher
+            for s in (await session.scalars(select(SourceSite).where(SourceSite.id.in_(site_ids)))).all()
+        }
+        if site_ids
+        else {}
+    )
+    by_cc: dict[str, list] = defaultdict(list)
+    for e in all_entries:
+        by_cc[e.document.country_code].append(e)
+
+    out_by_cc: dict[str, list[RegulationSummaryOut]] = {}
+    all_flat: list[RegulationSummaryOut] = []
+    for cc, entries in sorted(by_cc.items()):
+        main = main_law(entries, relations)
+        cc_list: list[RegulationSummaryOut] = []
+        for e in entries:
+            doc, v = e.document, e.version
+            kind = public_doc_type(doc.document_type, doc.instrument_kind)
+            item = RegulationSummaryOut(
+                id=doc.id,
+                country_code=doc.country_code,
+                title=doc.title,
+                title_zh=doc.title_zh,
+                business_topic=doc.business_topic,
+                business_weight=doc.business_weight,
+                document_type=kind,
+                document_type_zh=_doc_type_zh(kind, doc.title),
+                language=doc.language,
+                source_url=doc.source_url,
+                publisher=sites.get(doc.site_id) or f"{country_name_zh(doc.country_code)}官方发布机构",
+                version_no=v.version_no,
+                legal_status=v.legal_status,
+                fetched_at=v.fetched_at,
+                sha256_hex=None,
+                clauses_count=e.articles,
+                translated_clauses_count=0,
+                edges_count=0,
+                eight_attributes={},
+                version_count=1,
+                relations_count=relations.get(v.id, 0),
+                primary=main is not None and main.document.id == doc.id,
+            )
+            cc_list.append(item)
+            all_flat.append(item)
+        out_by_cc[cc] = cc_list
+    _REGULATIONS_LIST_CACHE.clear()
+    _REGULATIONS_LIST_CACHE.update(out_by_cc)
+    _REGULATIONS_LIST_CACHE["ALL"] = all_flat
+    return _REGULATIONS_LIST_CACHE
+
+
 @user_router.get("/regulations", response_model=list[PublicRegulationSummary])
 async def list_user_regulations(
     _: UserDep,
     session: SessionDep,
-    country_code: str = Query(default="SG", min_length=2, max_length=2),
+    country_code: str = Query(default="SG", min_length=2, max_length=3),
     keyword: str | None = None,
     legal_status: str | None = Query(default=None, max_length=32),
 ) -> list[RegulationSummaryOut]:
-    """按国家返回法规文件目录（供用户端「国家 → 法律层级/监管机构 → 法规」分级树与列表使用）。"""
-    # 与检索分析用同一条规则：被判定为范围外（法院改革法、公共部门治理法、门户页、办事表格等）的文件
-    # 不出现在用户的法规目录里。文件原样留在库中，管理端仍可见，直接按链接打开某份文档也不受影响。
-    # 目录、国家列表、合规简报用同一个范围（library_view），同一国家在各处显示的份数一致。
+    """按国家（或 country_code=ALL 一次批量获取全库各国）返回法规文件目录。"""
+    from app.knowledge.cache_sync import use_cached
     from app.knowledge.library_view import library, main_law, relation_counts
 
+    cc_norm = country_code.strip().upper()
+    status_filter = (legal_status or "").strip().lower()
+    terms = [t for t in (keyword or "").strip().lower().split() if t]
+    unfiltered = (not status_filter or status_filter == "all") and not terms
+
+    if cc_norm == "ALL":
+        if use_cached("ALL" in _REGULATIONS_LIST_CACHE):
+            base_all = _REGULATIONS_LIST_CACHE["ALL"]
+        else:
+            base_all = (await _build_all_user_regulations(session))["ALL"]
+        if unfiltered:
+            return base_all
+        items = base_all
+        if status_filter and status_filter != "all":
+            items = [r for r in items if (r.legal_status or "in_force").lower() == status_filter]
+        if terms:
+            items = [
+                r
+                for r in items
+                if all(t in f"{r.title or ''} {r.title_zh or ''} {r.business_topic or ''} {r.country_code or ''}".lower() for t in terms)
+            ]
+        return items
+
+    if len(cc_norm) != 2:
+        raise HTTPException(status_code=422, detail="国家或地区代码格式不正确")
+
+    if unfiltered and use_cached(cc_norm in _REGULATIONS_LIST_CACHE):
+        return _REGULATIONS_LIST_CACHE[cc_norm]
+
     # 外围文件（与车辆数据业务关系较远）也返回、带上标记：目录里不列，按名称搜索时能找到
-    entries = await library(session, country_code, include_peripheral=True)
+    entries = await library(session, cc_norm, include_peripheral=True)
     relations = await relation_counts(session, [e.version.id for e in entries])
     main = main_law(entries, relations)
     status_filter = (legal_status or "").strip().lower()

@@ -206,6 +206,8 @@ async def relation_counts(session: AsyncSession, version_ids: list) -> dict:
         .group_by(Clause.version_id)
     )
     counts = dict(rows.all())
+    while len(_RELATIONS_CACHE) >= 64 and key not in _RELATIONS_CACHE:
+        _RELATIONS_CACHE.pop(next(iter(_RELATIONS_CACHE)), None)
     _RELATIONS_CACHE[key] = (time.monotonic(), counts)
     return counts
 

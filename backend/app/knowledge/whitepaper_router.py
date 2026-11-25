@@ -144,6 +144,8 @@ async def _page_data(session: AsyncSession, code: str) -> dict:
         "dimensions": meta["dimensions"],
         "refs": meta["refs"],
     }
+    while len(_page_cache) >= 24 and code not in _page_cache:
+        _page_cache.pop(next(iter(_page_cache)), None)
     _page_cache[code] = (time.monotonic(), data)
     return data
 

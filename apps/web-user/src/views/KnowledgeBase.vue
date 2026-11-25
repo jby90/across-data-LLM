@@ -788,16 +788,20 @@ onMounted(async () => {
     ])
     countries.value = ov
     standards.value = stdRes.items || []
-    // 后台静默预取各国法规摘要，用于筛选效力状态或搜索时在左侧折叠栏实时展示各国匹配份数
-    for (const c of ov) {
-      void api
-        .get<Regulation[]>(`/api/knowledge/regulations?country_code=${c.country_code}`)
-        .then((list) => {
-          allCountryRegs[c.country_code] = list
-          list.forEach((d) => registerDocTitle(d.id, d.title_zh || d.title))
-        })
-        .catch(() => {})
-    }
+    // 后台单次批量静默预取全库法规摘要（避免 46 国逐国并发请求挤占连接池），用于筛选或搜索时实时展示各国匹配份数
+    void api
+      .get<Regulation[]>('/api/knowledge/regulations?country_code=ALL')
+      .then((list) => {
+        const grouped: Record<string, Regulation[]> = {}
+        for (const d of list) {
+          ;(grouped[d.country_code] ||= []).push(d)
+          registerDocTitle(d.id, d.title_zh || d.title)
+        }
+        for (const [cc, items] of Object.entries(grouped)) {
+          allCountryRegs[cc] = items
+        }
+      })
+      .catch(() => {})
     // 不替用户选国家：每次进来由用户自己选（标签共用这一个国家）；带了链接参数的直接打开那一条
   } catch (e) {
     ElMessage.error((e as Error).message)

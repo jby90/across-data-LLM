@@ -30,7 +30,7 @@ services:
       POSTGRES_USER: cyshuhe
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
-    command: ["postgres", "-c", "shared_buffers=${CYSH_PG_SHARED_BUFFERS:-256MB}", "-c", "work_mem=4MB", "-c", "max_connections=${CYSH_PG_MAX_CONNECTIONS:-120}"]
+    command: ["postgres", "-c", "shared_buffers=${CYSH_PG_SHARED_BUFFERS:-256MB}", "-c", "work_mem=${CYSH_PG_WORK_MEM:-4MB}", "-c", "max_connections=${CYSH_PG_MAX_CONNECTIONS:-120}"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cyshuhe -d cyshuhe"]

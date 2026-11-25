@@ -340,12 +340,15 @@ async def warm_basis(factory=None) -> None:
                 from app.knowledge.library_view import library, relation_counts
                 from app.knowledge.router import (
                     _OVERVIEW_CACHE,
+                    _build_all_user_regulations,
                     _knowledge_overview,
                     _topics_cached,
                 )
                 from app.knowledge.whitepaper_router import _page_data
 
                 _OVERVIEW_CACHE["all"] = (_time.monotonic(), await _knowledge_overview(session))
+                await _build_all_user_regulations(session)
+                session.expunge_all()
                 codes = sorted(await library_countries(session))
                 from sqlalchemy import text as _sql_text
 

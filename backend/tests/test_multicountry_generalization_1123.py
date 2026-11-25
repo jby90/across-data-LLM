@@ -220,3 +220,14 @@ def test_receiving_law_regulator_filter_and_privacy_data_law_patterns():
     assert not doc_sections._NON_DPA_NODE_RE.search("以色列隐私保护局（PPA）")
     assert doc_sections._STATUTORY_SUPERVISORS["IL"] == "以色列隐私保护局（PPA）"
     assert doc_sections._EU_SUPERVISORS["PL"][1] == "波兰个人数据保护局局长（UODO）"
+
+
+def test_knowledge_base_uses_batch_all_regulations_and_low_ram_db_headroom():
+    repo_root = Path(__file__).resolve().parents[2]
+    kb_vue = (repo_root / "apps" / "web-user" / "src" / "views" / "KnowledgeBase.vue").read_text(encoding="utf-8")
+    assert "/api/knowledge/regulations?country_code=ALL" in kb_vue
+    assert "for (const c of ov)" not in kb_vue
+
+    compose_rt = (repo_root / "deploy" / "compose_runtime.py").read_text(encoding="utf-8")
+    assert '"CYSH_DB_MEM_LIMIT": "544m"' in compose_rt
+    assert '"CYSH_PG_SHARED_BUFFERS": "96MB"' in compose_rt

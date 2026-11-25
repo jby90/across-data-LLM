@@ -47,15 +47,16 @@ def main():
     host_mib = _host_mem_mib()
     if 0 < host_mib <= 2300:
         low_ram_defaults = {
-            "CYSH_DB_MEM_LIMIT": "320m",
-            "CYSH_PG_SHARED_BUFFERS": "128MB",
-            "CYSH_PG_MAX_CONNECTIONS": "60",
-            "CYSH_API_MEM_LIMIT": "688m",
-            "CYSH_DB_POOL_SIZE": "8",
-            "CYSH_DB_MAX_OVERFLOW": "12",
-            "CYSH_WORKER_MEM_LIMIT": "304m",
-            "CYSH_WORKER_POOL_SIZE": "2",
-            "CYSH_WORKER_MAX_OVERFLOW": "2",
+            "CYSH_DB_MEM_LIMIT": "544m",
+            "CYSH_PG_SHARED_BUFFERS": "96MB",
+            "CYSH_PG_WORK_MEM": "2MB",
+            "CYSH_PG_MAX_CONNECTIONS": "40",
+            "CYSH_API_MEM_LIMIT": "544m",
+            "CYSH_DB_POOL_SIZE": "6",
+            "CYSH_DB_MAX_OVERFLOW": "6",
+            "CYSH_WORKER_MEM_LIMIT": "224m",
+            "CYSH_WORKER_POOL_SIZE": "1",
+            "CYSH_WORKER_MAX_OVERFLOW": "1",
         }
         for k, v in low_ram_defaults.items():
             env[k] = caller_env.get(k, v)
