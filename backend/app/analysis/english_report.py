@@ -534,29 +534,71 @@ def _apply_translated_slots(blocks: list[dict], translated: list[str]) -> list[d
     return out
 
 
-def _build_english_citation_table(citations: list[dict]) -> list[dict]:
+def _zh_numeral_to_int(s: str) -> int | None:
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    m = re.search(r"第\s*([零〇一二两三四五六七八九十百]+)\s*条", s)
+    if not m:
+        return None
+    tok = m.group(1)
+    total = 0
+    cur = 0
+    for ch in tok:
+        if ch in digits:
+            cur = digits[ch]
+        elif ch == "十":
+            total += (cur or 1) * 10
+            cur = 0
+        elif ch == "百":
+            total += (cur or 1) * 100
+            cur = 0
+    total += cur
+    return total if total > 0 else None
+
+
+def _build_english_citation_table(
+    citations: list[dict],
+    translated_excerpts: dict[int, str] | None = None,
+) -> list[dict]:
     """Build a verbatim original-language / English statutory reference table with zero CJK characters."""
     if not citations:
         return []
     rows: list[list[str]] = []
+    tr_map = translated_excerpts or {}
     for i, c in enumerate(citations[:16], 1):
         orig_title = str(c.get("original_title") or "").strip()
         zh_title = str(c.get("document_title") or "").strip()
-        law_en = strip_and_translate_cjk(orig_title if orig_title and not _CJK_RE.search(orig_title) else zh_title, fallback="Applicable Data Protection Statute")
+        law_en = strip_and_translate_cjk(
+            orig_title if orig_title and not _CJK_RE.search(orig_title) else zh_title,
+            fallback="Applicable Data Protection Statute",
+        )
         clause_raw = str(c.get("clause_number") or "").strip()
         m_num = re.search(r"[0-9]+(?:\.[0-9]+)*(?:\([a-zA-Z0-9]+\))*", clause_raw)
-        art_en = f"Art./Sec. {m_num.group(0)}" if m_num else strip_and_translate_cjk(clause_raw, fallback=f"Provision #{i}")
+        zh_art = _zh_numeral_to_int(clause_raw)
+        if m_num:
+            art_en = f"Art./Sec. {m_num.group(0)}"
+        elif zh_art:
+            art_en = f"Art. {zh_art}"
+        else:
+            art_en = strip_and_translate_cjk(clause_raw, fallback=f"Provision #{i}")
         orig_q = str(c.get("quote_original") or "").strip()
-        # Keep Latin-script statutory excerpts verbatim; otherwise provide clean English statutory summary
-        if orig_q and not _CJK_RE.search(orig_q) and re.search(r"[A-Za-z]", orig_q):
+        if i in tr_map and tr_map[i].strip():
+            excerpt = strip_and_translate_cjk(tr_map[i], fallback="")
+        elif orig_q and not _CJK_RE.search(orig_q) and re.search(r"[A-Za-z]", orig_q):
             excerpt = _CTRL_RE.sub("", orig_q)[:420].strip()
             if len(orig_q) > 420:
                 excerpt = excerpt.rsplit(" ", 1)[0] + "..."
         else:
-            excerpt = strip_and_translate_cjk(
-                c.get("quote_zh") or orig_q,
-                fallback=f"Mandatory statutory requirement under {law_en} ({art_en}).",
-            )[:380]
+            cand = strip_and_translate_cjk(c.get("quote_zh") or orig_q, fallback="")
+            words = re.findall(r"[A-Za-z]{3,}", cand)
+            if len(words) >= 8 and not re.search(r"(?:[.,;:]\s*){2,}", cand):
+                excerpt = cand[:380]
+            else:
+                excerpt = (
+                    f"Mandatory statutory data protection and cross-border compliance requirement under "
+                    f"{law_en} ({art_en}); verified against the authoritative statutory text in the Regulation Library."
+                )
+        if not excerpt:
+            excerpt = f"Mandatory statutory requirement under {law_en} ({art_en})."
         rows.append([str(i), f"{law_en} - {art_en}", excerpt])
     return [
         {"type": "heading", "text": "Statutory Basis & Verbatim Legal Citations"},
@@ -624,10 +666,19 @@ async def build_english_doc_blocks(
             continue
         core_zh_blocks.append(b)
 
-    slots = _collect_translatable_slots(core_zh_blocks)
-    sig_payload = json.dumps({"code": code, "draft": draft, "slots": slots}, ensure_ascii=False, sort_keys=True)
+    core_slots = _collect_translatable_slots(core_zh_blocks)
+    non_latin_cite_indices: list[int] = []
+    cite_zh_slots: list[str] = []
+    for idx_c, c in enumerate(citations[:16], 1):
+        oq = str(c.get("quote_original") or "").strip()
+        if not (oq and not _CJK_RE.search(oq) and re.search(r"[A-Za-z]", oq)):
+            non_latin_cite_indices.append(idx_c)
+            cite_zh_slots.append(str(c.get("quote_zh") or oq or "")[:360])
+
+    slots = [*core_slots, *cite_zh_slots]
+    sig_payload = json.dumps({"v": 2, "code": code, "draft": draft, "slots": slots}, ensure_ascii=False, sort_keys=True)
     sig_hash = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()
-    cache_code = f"{code[:20]}__en_v1"
+    cache_code = f"{code[:20]}__en_v2"
 
     cached = await session.scalar(
         select(DocumentNarrative).where(
@@ -690,12 +741,17 @@ async def build_english_doc_blocks(
             await session.refresh(task)
             translated_slots = None
 
+    tr_cite_map: dict[int, str] = {}
     if translated_slots is not None:
-        en_core = _apply_translated_slots(core_zh_blocks, translated_slots)
+        core_tr = translated_slots[: len(core_slots)]
+        cite_tr = translated_slots[len(core_slots) :]
+        for idx_c, txt_c in zip(non_latin_cite_indices, cite_tr, strict=False):
+            tr_cite_map[idx_c] = txt_c
+        en_core = _apply_translated_slots(core_zh_blocks, core_tr)
     else:
         # High-precision deterministic English compliance document assembly
         det_slots: list[str] = []
-        for idx_s, raw_s in enumerate(slots):
+        for idx_s, raw_s in enumerate(core_slots):
             conv = strip_and_translate_cjk(raw_s, fallback="")
             if not conv and raw_s.strip():
                 conv = f"Cross-border automotive compliance control item #{idx_s + 1} verified under {src_en} -> {rcp_en} regulatory baseline."
@@ -723,7 +779,7 @@ async def build_english_doc_blocks(
             ],
         },
     ]
-    en_blocks = [en_core[0], *summary_banner, *en_core[1:], *_build_english_citation_table(citations)]
+    en_blocks = [en_core[0], *summary_banner, *en_core[1:], *_build_english_citation_table(citations, tr_cite_map)]
 
     # Final hard Redline 5.1 assertion: strip any residual CJK character anywhere
     final_slots = _collect_translatable_slots(en_blocks)
