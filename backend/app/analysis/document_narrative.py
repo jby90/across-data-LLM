@@ -950,10 +950,12 @@ async def write_section(
     is_final = role in ("risk_and_verdict", "conclusive_ruling")
     doc_style = _resolve_doc_style(context, section)
 
+    from app.analysis.expert_prompts import section_expert_guidance
+
     user_payload: dict[str, Any] = {
         "section": section.heading,
         "style_guide": _DOCTYPE_STYLE_GUIDES[doc_style],
-        "role_guide": _EXEMPLAR_ROLE_GUIDES[role],
+        "role_guide": _EXEMPLAR_ROLE_GUIDES[role] + section_expert_guidance(role),
         "structural_exemplar": _pick_exemplar(role, doc_style, section, context),
         "allow_final_verdict": is_final,
         "must_argue": section.brief,

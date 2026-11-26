@@ -551,6 +551,16 @@ async function renameConversation(t: { id: string; title: string }) {
     ElMessage.success('已重命名')
   } catch (e: unknown) { ElMessage.error((e as Error).message || '重命名失败') }
 }
+async function cloneConversation(t: { id: string; title: string }) {
+  closeMenu()
+  try {
+    const cloned = await api.post<{ id: string; title: string }>(`/api/analysis/tasks/${t.id}/clone`, {})
+    await refreshTasks()
+    showArchive.value = false
+    await openTask(cloned.id)
+    ElMessage.success(`已复制对话：${cloned.title}`)
+  } catch (e: unknown) { ElMessage.error((e as Error).message || '复制对话失败') }
+}
 async function restoreConversation(t: { id: string }) {
   try {
     await api.post(`/api/analysis/tasks/${t.id}/restore`, {})
@@ -943,7 +953,7 @@ function serverFilename(res: Response): string | null {
   return /filename="([^"]+)"/i.exec(header)?.[1] ?? null
 }
 
-async function download(ext: 'docx' | 'pdf' | 'zip', dimension?: string) {
+async function download(ext: 'docx' | 'pdf' | 'zip', dimension?: string, lang: 'zh' | 'en' = 'zh') {
   if (!downloadable.value || !detail.value || !report.value || exportJob.value) return
   if (report.value.source_integrity_alerts?.length) {
     ElMessage.error('报告引用的原文来源异常，已停止导出，请核实来源后重新分析')
@@ -952,10 +962,14 @@ async function download(ext: 'docx' | 'pdf' | 'zip', dimension?: string) {
   const id = detail.value.id
   const country = detail.value.country_code
   const ver = report.value.version_no
-  const label = `${dimension ? `${dimensionName(dimension)}章节` : '完整报告'} · ${ext.toUpperCase()}`
+  const label = `${dimension ? `${dimensionName(dimension)}章节` : '完整报告'}${lang === 'en' ? '（英文版）' : ''} · ${ext.toUpperCase()}`
   exportJob.value = {taskId: id, label, started: Date.now(), phase: 'preparing', received: 0, total: null}
   try {
-    const res = await fetch(`/api/analysis/tasks/${id}/reports/${ver}/export.${ext}${dimension ? '?dimension=' + encodeURIComponent(dimension) : ''}`, {
+    const q = new URLSearchParams()
+    if (dimension) q.set('dimension', dimension)
+    if (lang === 'en') q.set('lang', 'en')
+    const qs = q.toString()
+    const res = await fetch(`/api/analysis/tasks/${id}/reports/${ver}/export.${ext}${qs ? '?' + qs : ''}`, {
       headers: { Authorization: `Bearer ${api.token()}` },
     })
     const blob = await receiveExport(res, (received, total) => {
@@ -1122,8 +1136,9 @@ onUnmounted(() => {
               <a v-if="t.project_id" class="s-project" :href="`/documents?project=${t.project_id}`" title="关联的合规评估项目" @click.stop.prevent="router.push({ path: '/documents', query: { project: t.project_id } })">文件项目</a>
             </span>
             <span v-if="canManageTask(t)" class="s-tools">
+              <button v-if="canEdit(auth.user)" class="s-delete" type="button" title="复制当前对话与报告快照" data-testid="session-clone" @click.stop="cloneConversation(t)" @keydown.enter.stop @keydown.space.stop>复制</button>
               <button class="s-delete" type="button" title="重命名对话（支持右键菜单）" data-testid="session-rename" @click.stop="renameConversation(t)" @keydown.enter.stop @keydown.space.stop>重命名</button>
-              <button class="s-delete" type="button" title="移入已归档列表" data-testid="session-delete" @click.stop="deleteConversation(t)" @keydown.enter.stop @keydown.space.stop>归档</button>
+              <button class="s-delete" type="button" title="冻结保存至已归档列表" data-testid="session-delete" @click.stop="deleteConversation(t)" @keydown.enter.stop @keydown.space.stop>归档</button>
             </span>
           </div>
           <div v-if="conversationSignal(t).label || isUnread(t)" class="session-state" :class="conversationSignal(t).tone">
@@ -1136,8 +1151,9 @@ onUnmounted(() => {
     <teleport to="body">
       <div v-if="menu.open" class="ctx-mask" @click="closeMenu" @contextmenu.prevent="closeMenu" />
       <ul v-if="menu.open && menu.task" class="ctx-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" data-testid="session-menu">
+        <li v-if="canEdit(auth.user)" data-testid="menu-clone" @click="cloneConversation(menu.task!)">复制对话</li>
         <li data-testid="menu-rename" @click="renameConversation(menu.task!)">重命名</li>
-        <li class="danger" data-testid="menu-delete" @click="closeMenu(); deleteConversation(menu.task!)">归档</li>
+        <li class="danger" data-testid="menu-delete" @click="closeMenu(); deleteConversation(menu.task!)">归档冻结</li>
       </ul>
     </teleport>
 
@@ -1323,11 +1339,17 @@ onUnmounted(() => {
                 ><template #dropdown
                   ><el-dropdown-menu
                     ><el-dropdown-item data-testid="btn-export-docx" @click="download('docx')"
-                      >Word 文档</el-dropdown-item
+                      >中文报告 · Word</el-dropdown-item
                     ><el-dropdown-item data-testid="btn-export-pdf" @click="download('pdf')"
-                      >PDF 文档</el-dropdown-item
+                      >中文报告 · PDF</el-dropdown-item
                     ><el-dropdown-item data-testid="btn-export-zip" @click="download('zip')"
-                      >整份与八章 Word 压缩包</el-dropdown-item
+                      >中文整份与八章 Word 压缩包</el-dropdown-item
+                    ><el-dropdown-item divided data-testid="btn-export-en-docx" @click="download('docx', undefined, 'en')"
+                      >英文报告 · Word</el-dropdown-item
+                    ><el-dropdown-item data-testid="btn-export-en-pdf" @click="download('pdf', undefined, 'en')"
+                      >英文报告 · PDF</el-dropdown-item
+                    ><el-dropdown-item data-testid="btn-export-en-zip" @click="download('zip', undefined, 'en')"
+                      >英文整份与八章 Word 压缩包</el-dropdown-item
                     ></el-dropdown-menu
                   ></template
                 ></el-dropdown

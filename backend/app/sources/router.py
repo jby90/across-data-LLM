@@ -1,5 +1,6 @@
+import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -18,6 +19,19 @@ from app.sources.schemas import RunOut, SiteCreate, SiteOut, SitePatch, TermsDec
 router = APIRouter(prefix="/api/admin/sites", tags=["sources"])
 
 _SHARED_CDN_HOSTS = frozenset({"isomer-user-content.by.gov.sg"})
+_SITES_CACHE: dict[tuple[str, str], tuple[float, list[SiteOut]]] = {}
+_SITES_CACHE_TTL_SEC = 20.0
+
+
+def invalidate_sites_cache() -> None:
+    _SITES_CACHE.clear()
+
+
+def staggered_next_run(site_id: uuid.UUID, interval_hours: int = 168) -> datetime:
+    """Spread weekly (168h) site crawls evenly across the window to protect memory."""
+    span = max(1, min(interval_hours, 168))
+    offset_minutes = (site_id.int % (span * 60))
+    return datetime.now(UTC) + timedelta(minutes=offset_minutes)
 
 
 def _norm_host(url: str | None) -> str:
@@ -188,8 +202,12 @@ async def list_sites(
     _: Principal = Depends(require_platform_admin),
     session: AsyncSession = Depends(get_session),
 ):
-    """monitor：入口页与已启用的采集站点（要定期看的）；imports：人工导入单份文件时留下的记录
+    """monitor：入口页与已启用的采集站点（默认每周一次错峰定期巡检）；imports：人工导入单份文件时留下的记录
     （一份文件一条，不会被定期采集）；all：全部。"""
+    cache_key = ((country_code or "").upper(), scope)
+    cached = _SITES_CACHE.get(cache_key)
+    if cached and (time.monotonic() - cached[0]) < _SITES_CACHE_TTL_SEC:
+        return cached[1]
     stmt = select(SourceSite).order_by(
         SourceSite.country_code, SourceSite.publisher, SourceSite.entry_url
     )
@@ -201,7 +219,11 @@ async def list_sites(
     if country_code:
         stmt = stmt.where(SourceSite.country_code == country_code.upper())
     sites = list((await session.execute(stmt)).scalars().all())
-    return await _attach_doc_summaries(session, sites)
+    res = await _attach_doc_summaries(session, sites)
+    if len(_SITES_CACHE) >= 32:
+        _SITES_CACHE.clear()
+    _SITES_CACHE[cache_key] = (time.monotonic(), res)
+    return res
 
 
 @router.post("", response_model=SiteOut, status_code=201, summary="新增站点(默认停用、条款待确认)")
@@ -227,6 +249,7 @@ async def create_site(
     except IntegrityError:
         await session.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "该国家下已存在相同入口地址的站点") from None
+    invalidate_sites_cache()
     return (await _attach_doc_summaries(session, [site]))[0]
 
 
@@ -259,8 +282,9 @@ async def patch_site(
     if "enabled" in data and data["enabled"] is not None:
         site.enabled = data["enabled"]
         if site.enabled and site.next_run_at is None:
-            site.next_run_at = datetime.now(UTC)
+            site.next_run_at = staggered_next_run(site.id, site.interval_hours or 168)
     await session.commit()
+    invalidate_sites_cache()
     return (await _attach_doc_summaries(session, [site]))[0]
 
 
@@ -284,6 +308,7 @@ async def decide_terms(
     if body.status != TermsStatus.APPROVED.value:
         site.enabled = False  # 条款被否决:立即停用
     await session.commit()
+    invalidate_sites_cache()
     return (await _attach_doc_summaries(session, [site]))[0]
 
 
@@ -301,6 +326,7 @@ async def run_now(
     site.run_requested = True
     site.next_run_at = datetime.now(UTC)
     await session.commit()
+    invalidate_sites_cache()
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
@@ -335,4 +361,5 @@ async def delete_site(
         )
     await session.delete(site)
     await session.commit()
+    invalidate_sites_cache()
     return {"deleted_site_id": str(site_id), "country_code": site.country_code}

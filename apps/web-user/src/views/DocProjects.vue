@@ -271,12 +271,52 @@ async function fetchFile(url: string, fallback: string) {
   document.body.appendChild(a); a.click(); a.remove()
   window.setTimeout(() => URL.revokeObjectURL(href), 30000)
 }
-async function download(d: DocView, kind: 'docx' | 'pdf' | 'xlsx') {
-  if (!project.value || !downloadable.value) return
+async function download(d: DocView, kind: 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview') {
+  if (!project.value) return
+  if (kind === 'en-preview') {
+    await openPreviewEn(d)
+    return
+  }
+  if (!downloadable.value) return
+  if (kind === 'en-docx' || kind === 'en-pdf') {
+    const ext = kind === 'en-docx' ? 'docx' : 'pdf'
+    busy.value = `dl-${d.code}-en-${ext}`
+    try {
+      await fetchFile(`/api/analysis/tasks/${project.value.id}/documents/${d.code}/export-en.${ext}?draft=${d.state !== 'ready'}`, `${d.code}_EN.${ext}`)
+    } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
+    return
+  }
   busy.value = kind === 'docx' ? `dl-${d.code}` : `dl-${d.code}-${kind}`
   try {
     await fetchFile(`/api/analysis/tasks/${project.value.id}/documents/${d.code}/export.${kind}?draft=${d.state !== 'ready'}`, `${d.name}.${kind}`)
   } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
+}
+async function openPreviewEn(d: DocView) {
+  if (!project.value) return
+  previewCode.value = d.code
+  previewDraft.value = d.state !== 'ready'
+  previewIsEdpbEn.value = true
+  previewAidKind.value = ''
+  previewEditMode.value = false
+  previewEdits.value = []
+  showEditHistory.value = false
+  previewTitle.value = `${d.name}（英文版预览）`
+  previewBlocks.value = []
+  previewVisible.value = true
+  previewLoading.value = true
+  try {
+    const res = await api.get<{ name: string; kind: 'edited' | 'official_docx' | 'standard'; blocks: PreviewBlock[] }>(
+      `/api/analysis/tasks/${project.value.id}/documents/${d.code}/preview-en?draft=${d.state !== 'ready'}`,
+    )
+    previewTitle.value = `${d.name} · ${res.name || 'English Edition'}`
+    previewKind.value = res.kind
+    previewBlocks.value = res.blocks || []
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+    previewVisible.value = false
+  } finally {
+    previewLoading.value = false
+  }
 }
 async function downloadEdpbEn(d: DocView, kind: 'docx' | 'pdf') {
   if (!project.value || !downloadable.value) return
@@ -312,10 +352,11 @@ async function openPreviewEdpbEn(d: DocView) {
     previewLoading.value = false
   }
 }
-async function downloadAll(draft: boolean, fmt: 'docx' | 'pdf' | 'xlsx' = 'docx') {
+async function downloadAll(draft: boolean, fmt: 'docx' | 'pdf' | 'xlsx' = 'docx', lang: 'zh' | 'en' = 'zh') {
   if (!project.value || !downloadable.value) return
   busy.value = 'zip'
-  try { await fetchFile(`/api/analysis/doc-projects/${project.value.id}/export.zip?fmt=${fmt}&draft=${draft}`, `${project.value.title}.zip`) } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
+  const suffix = lang === 'en' ? '_EN' : ''
+  try { await fetchFile(`/api/analysis/doc-projects/${project.value.id}/export.zip?fmt=${fmt}&draft=${draft}&lang=${lang}`, `${project.value.title}${suffix}.zip`) } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
 }
 async function writePaper(d: DocView) {
   if (!project.value) return
@@ -1263,7 +1304,7 @@ function cmpLabelOf(key: string | undefined, list: { key: string; label: string 
   if (!k) return ''
   const hit = list.find((x) => x.key === k || x.label === k)
   if (hit) return hit.label
-  return /^[a-z0-9_]+$/i.test(k) ? '' : k
+  return k
 }
 
 function cmpRouteLine(p: Project | null): string {
@@ -1411,13 +1452,13 @@ function jumpFromCompare(id: string) {
               </el-form-item>
             </div>
             <div class="row2">
-              <el-form-item label="车辆数据主要用途（可多选多场景）">
-                <el-select v-model="startForm.functions" multiple clearable placeholder="请选择一个或多个业务场景" data-testid="doc-function">
+              <el-form-item label="车辆数据主要用途（可多选，支持直接输入添加自定义场景）">
+                <el-select v-model="startForm.functions" multiple filterable allow-create default-first-option clearable placeholder="请选择一个或多个预设场景，或输入新场景回车添加" data-testid="doc-function">
                   <el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" />
                 </el-select>
               </el-form-item>
-              <el-form-item label="业务阶段（可多选）">
-                <el-select v-model="startForm.scenes" multiple clearable placeholder="请选择业务阶段" data-testid="doc-scene">
+              <el-form-item label="业务阶段（可多选，支持直接输入添加）">
+                <el-select v-model="startForm.scenes" multiple filterable allow-create default-first-option clearable placeholder="请选择业务阶段，或输入自定义阶段回车添加" data-testid="doc-scene">
                   <el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" />
                 </el-select>
               </el-form-item>
@@ -1450,15 +1491,19 @@ function jumpFromCompare(id: string) {
               <div class="head-actions">
               <el-button v-if="editable && !locked" data-testid="doc-open-copilot" @click="openCopilot">辅助填写</el-button>
               <el-button v-if="editable && !locked && !allReady && queue.length" type="primary" data-testid="doc-continue" @click="continueFill">继续填写</el-button>
-              <el-dropdown v-if="downloadable" trigger="click" placement="bottom-end" @command="(c: string) => { const [kind, f] = c.split(':'); void downloadAll(kind === 'draft', f as 'docx' | 'pdf' | 'xlsx') }">
+              <el-dropdown v-if="downloadable" trigger="click" placement="bottom-end" @command="(c: string) => { const [kind, f, lg] = c.split(':'); void downloadAll(kind === 'draft', f as 'docx' | 'pdf' | 'xlsx', (lg === 'en' ? 'en' : 'zh')) }">
                 <el-button :type="allReady || !editable ? 'primary' : 'default'" :loading="busy === 'zip'" data-testid="doc-zip-menu">下载</el-button>
                 <template #dropdown><el-dropdown-menu>
-                  <el-dropdown-item command="draft:docx" data-testid="doc-zip-draft">全部初稿 · Word（ZIP）</el-dropdown-item>
-                  <el-dropdown-item command="draft:pdf">全部初稿 · PDF（ZIP）</el-dropdown-item>
-                  <el-dropdown-item command="draft:xlsx" data-testid="doc-zip-draft-xlsx">全部初稿 · Excel（ZIP）</el-dropdown-item>
-                  <el-dropdown-item command="final:docx" :disabled="!allReady" divided data-testid="doc-zip-final">全部成稿 · Word（ZIP）</el-dropdown-item>
-                  <el-dropdown-item command="final:pdf" :disabled="!allReady">全部成稿 · PDF（ZIP）</el-dropdown-item>
-                  <el-dropdown-item command="final:xlsx" :disabled="!allReady" data-testid="doc-zip-final-xlsx">全部成稿 · Excel（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="draft:docx:zh" data-testid="doc-zip-draft">全部初稿 · 中文 Word（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="draft:pdf:zh">全部初稿 · 中文 PDF（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="draft:xlsx:zh" data-testid="doc-zip-draft-xlsx">全部初稿 · 中文 Excel（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="draft:docx:en" data-testid="doc-zip-draft-en">全部初稿 · 英文 Word（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="draft:pdf:en">全部初稿 · 英文 PDF（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="final:docx:zh" :disabled="!allReady" divided data-testid="doc-zip-final">全部成稿 · 中文 Word（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="final:pdf:zh" :disabled="!allReady">全部成稿 · 中文 PDF（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="final:xlsx:zh" :disabled="!allReady" data-testid="doc-zip-final-xlsx">全部成稿 · 中文 Excel（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="final:docx:en" :disabled="!allReady" data-testid="doc-zip-final-en">全部成稿 · 英文 Word（ZIP）</el-dropdown-item>
+                  <el-dropdown-item command="final:pdf:en" :disabled="!allReady">全部成稿 · 英文 PDF（ZIP）</el-dropdown-item>
                 </el-dropdown-menu></template>
               </el-dropdown>
               <el-tooltip v-else content="当前只读账号未开通导出权限" placement="top">
@@ -1537,8 +1582,8 @@ function jumpFromCompare(id: string) {
               <el-form-item label="数据接收国"><el-select v-model="project.route.recipient_country" filterable allow-create default-first-option><el-option v-for="c in options.countries" :key="c" :label="c" :value="c" /></el-select></el-form-item>
             </div>
             <div class="row2">
-              <el-form-item label="主要用途（可多选）"><el-select v-model="project.route.functions" multiple clearable placeholder="请选择一个或多个业务场景"><el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" /></el-select></el-form-item>
-              <el-form-item label="业务阶段（可多选）"><el-select v-model="project.route.business_scenes" multiple clearable placeholder="请选择业务阶段"><el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" /></el-select></el-form-item>
+              <el-form-item label="主要用途（可多选，支持自定义输入回车添加）"><el-select v-model="project.route.functions" multiple filterable allow-create default-first-option clearable placeholder="请选择或输入自定义业务场景"><el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" /></el-select></el-form-item>
+              <el-form-item label="业务阶段（可多选，支持自定义输入回车添加）"><el-select v-model="project.route.business_scenes" multiple filterable allow-create default-first-option clearable placeholder="请选择或输入业务阶段"><el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" /></el-select></el-form-item>
             </div>
             <div class="row2">
               <el-form-item label="车型或车队"><el-input v-model="project.route.vehicle_model" />
@@ -1757,12 +1802,17 @@ function jumpFromCompare(id: string) {
                 <AdmissionLaunch v-if="d.code === 'admission' && editable" :task-id="project.id" :disabled="locked" label="去办理" />
                 <el-button v-if="d.narrative && d.state === 'needs_paper' && d.paper?.state !== 'running'" size="small" type="primary" plain :disabled="locked" @click="writePaper(d)">生成论述</el-button>
                 <el-button v-if="!officialOnly(d)" size="small" :data-testid="`preview-${d.code}`" @click="openPreview(d)">{{ d.has_edpb_en ? '预览中文稿' : '预览' }}</el-button>
-                <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: 'docx' | 'pdf' | 'xlsx') => download(d, f)">
-                  <el-button size="small" :loading="busy === `dl-${d.code}` || busy === `dl-${d.code}-pdf` || busy === `dl-${d.code}-xlsx`" :data-testid="`dl-${d.code}`">{{ d.has_edpb_en ? '下载中文版' : '下载' }}</el-button>
+                <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview') => download(d, f)">
+                  <el-button size="small" :loading="busy.startsWith(`dl-${d.code}`)" :data-testid="`dl-${d.code}`">{{ d.has_edpb_en ? '下载中文版' : '下载（中/英）' }}</el-button>
                   <template #dropdown><el-dropdown-menu>
-                    <el-dropdown-item command="docx" :data-testid="`dl-${d.code}-word`">{{ d.state === 'ready' ? 'Word' : 'Word 初稿' }}</el-dropdown-item>
-                    <el-dropdown-item command="pdf" :data-testid="`dl-${d.code}-pdf`">{{ d.state === 'ready' ? 'PDF' : 'PDF 初稿' }}</el-dropdown-item>
-                    <el-dropdown-item command="xlsx" :data-testid="`dl-${d.code}-xlsx`">{{ d.state === 'ready' ? 'Excel' : 'Excel 初稿' }}</el-dropdown-item>
+                    <el-dropdown-item command="docx" :data-testid="`dl-${d.code}-word`">{{ d.state === 'ready' ? '中文版 · Word' : '中文初稿 · Word' }}</el-dropdown-item>
+                    <el-dropdown-item command="pdf" :data-testid="`dl-${d.code}-pdf`">{{ d.state === 'ready' ? '中文版 · PDF' : '中文初稿 · PDF' }}</el-dropdown-item>
+                    <el-dropdown-item command="xlsx" :data-testid="`dl-${d.code}-xlsx`">{{ d.state === 'ready' ? '中文版 · Excel' : '中文初稿 · Excel' }}</el-dropdown-item>
+                    <template v-if="!d.has_edpb_en">
+                      <el-dropdown-item command="en-preview" divided :data-testid="`preview-${d.code}-en`">预览英文版</el-dropdown-item>
+                      <el-dropdown-item command="en-docx" :data-testid="`dl-${d.code}-en-word`">{{ d.state === 'ready' ? '英文版 · Word' : '英文初稿 · Word' }}</el-dropdown-item>
+                      <el-dropdown-item command="en-pdf" :data-testid="`dl-${d.code}-en-pdf`">{{ d.state === 'ready' ? '英文版 · PDF' : '英文初稿 · PDF' }}</el-dropdown-item>
+                    </template>
                   </el-dropdown-menu></template>
                 </el-dropdown>
                 <el-tooltip v-else-if="!officialOnly(d)" content="当前只读账号未开通导出权限" placement="top">
@@ -1815,12 +1865,15 @@ function jumpFromCompare(id: string) {
                     <AdmissionLaunch v-if="d.code === 'admission' && editable" :task-id="project.id" :disabled="locked" label="去办理" />
                     <el-button v-if="d.narrative && d.state === 'needs_paper' && d.paper?.state !== 'running'" size="small" :disabled="locked" @click="writePaper(d)">生成论述</el-button>
                     <el-button v-if="!officialOnly(d)" size="small" :data-testid="`preview-${d.code}`" @click="openPreview(d)">预览</el-button>
-                    <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: 'docx' | 'pdf' | 'xlsx') => download(d, f)">
-                      <el-button size="small" :loading="busy === `dl-${d.code}` || busy === `dl-${d.code}-pdf` || busy === `dl-${d.code}-xlsx`" :data-testid="`dl-${d.code}`">下载</el-button>
+                    <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview') => download(d, f)">
+                      <el-button size="small" :loading="busy.startsWith(`dl-${d.code}`)" :data-testid="`dl-${d.code}`">下载（中/英）</el-button>
                       <template #dropdown><el-dropdown-menu>
-                        <el-dropdown-item command="docx" :data-testid="`dl-${d.code}-word`">{{ d.state === 'ready' ? 'Word' : 'Word 初稿' }}</el-dropdown-item>
-                        <el-dropdown-item command="pdf" :data-testid="`dl-${d.code}-pdf`">{{ d.state === 'ready' ? 'PDF' : 'PDF 初稿' }}</el-dropdown-item>
-                        <el-dropdown-item command="xlsx" :data-testid="`dl-${d.code}-xlsx`">{{ d.state === 'ready' ? 'Excel' : 'Excel 初稿' }}</el-dropdown-item>
+                        <el-dropdown-item command="docx" :data-testid="`dl-${d.code}-word`">{{ d.state === 'ready' ? '中文版 · Word' : '中文初稿 · Word' }}</el-dropdown-item>
+                        <el-dropdown-item command="pdf" :data-testid="`dl-${d.code}-pdf`">{{ d.state === 'ready' ? '中文版 · PDF' : '中文初稿 · PDF' }}</el-dropdown-item>
+                        <el-dropdown-item command="xlsx" :data-testid="`dl-${d.code}-xlsx`">{{ d.state === 'ready' ? '中文版 · Excel' : '中文初稿 · Excel' }}</el-dropdown-item>
+                        <el-dropdown-item command="en-preview" divided :data-testid="`preview-${d.code}-en`">预览英文版</el-dropdown-item>
+                        <el-dropdown-item command="en-docx" :data-testid="`dl-${d.code}-en-word`">{{ d.state === 'ready' ? '英文版 · Word' : '英文初稿 · Word' }}</el-dropdown-item>
+                        <el-dropdown-item command="en-pdf" :data-testid="`dl-${d.code}-en-pdf`">{{ d.state === 'ready' ? '英文版 · PDF' : '英文初稿 · PDF' }}</el-dropdown-item>
                       </el-dropdown-menu></template>
                     </el-dropdown>
                     <el-tooltip v-else-if="!officialOnly(d)" content="当前只读账号未开通导出权限" placement="top">

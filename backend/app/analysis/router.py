@@ -1509,6 +1509,117 @@ async def restore_own_analysis_task(task_id: uuid.UUID, user: UserDep, session: 
     return {"restored": True, "id": str(task_id), "conversation_code": format_conversation_code(task.id, task.created_at)}
 
 
+@user_router.post("/tasks/{task_id}/clone")
+async def clone_own_analysis_task(
+    task_id: uuid.UUID,
+    request: Request,
+    user: UserDep,
+    session: SessionDep,
+) -> dict:
+    """复制咨询对话（含问答记录与评估报告快照），便于将原对话或副本重命名并归档冻结保存。"""
+    import copy as _copy
+
+    from app.audit.service import set_detail
+    from app.iam.models import Role
+
+    if user.role == Role.VIEWER:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "查看账号只能查看，不能新建或修改")
+    task = await _own_task(session, task_id, user, write=False)
+    if task.kind != "chat":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请使用合规文件项目的复制入口")
+    if task.status == "running":
+        raise HTTPException(status.HTTP_409_CONFLICT, "当前对话正在运行评估，请等待完成后再复制")
+
+    base_title = (task.title or "新对话").strip()
+    base_clean = re.sub(r"（副本(?:\s*\d+)?）$", "", base_title).strip() or "新对话"
+    cloned_title = f"{base_clean[:52]}（副本）"
+    cloned_facts = _copy.deepcopy(task.facts_json or {})
+    cloned_facts.pop("_doc_project", None)
+    cloned_facts.pop("_project_side", None)
+
+    new_task = AnalysisTask(
+        org_id=task.org_id,
+        created_by=user.user_id,
+        kind="chat",
+        title=cloned_title,
+        title_custom=True,
+        country_code=task.country_code,
+        vehicle_model=task.vehicle_model,
+        scenario_type=task.scenario_type,
+        status=task.status if task.status in ("completed", "partial_sample") else "collecting_facts",
+        citation_policy=task.citation_policy,
+        facts_json=cloned_facts,
+        missing_facts_json=_copy.deepcopy(task.missing_facts_json or []),
+        sufficiency_score=task.sufficiency_score,
+        findings_json=_copy.deepcopy(task.findings_json or []),
+        total_tokens=task.total_tokens,
+        total_duration_ms=task.total_duration_ms,
+        mcp_calls_count=task.mcp_calls_count,
+        backtrack_count=task.backtrack_count,
+        fact_followup_rounds=task.fact_followup_rounds,
+        pending_user_facts_json=_copy.deepcopy(task.pending_user_facts_json or []),
+        fact_followup_history_json=_copy.deepcopy(task.fact_followup_history_json or []),
+        analysis_checkpoint_json=_copy.deepcopy(task.analysis_checkpoint_json or {}),
+        workflow_version_id=task.workflow_version_id,
+        workflow_version_no=task.workflow_version_no,
+    )
+    session.add(new_task)
+    await session.flush()
+
+    msgs = (
+        await session.scalars(
+            select(AnalysisMessage).where(AnalysisMessage.task_id == task.id).order_by(AnalysisMessage.seq_no)
+        )
+    ).all()
+    for m in msgs:
+        session.add(
+            AnalysisMessage(
+                org_id=task.org_id,
+                task_id=new_task.id,
+                seq_no=m.seq_no,
+                role=m.role,
+                content=m.content,
+                options_json=_copy.deepcopy(m.options_json or []),
+                slot=m.slot,
+            )
+        )
+
+    rep_vers = (
+        await session.scalars(
+            select(ReportVersion).where(ReportVersion.task_id == task.id).order_by(ReportVersion.version_no)
+        )
+    ).all()
+    for rv in rep_vers:
+        session.add(
+            ReportVersion(
+                org_id=task.org_id,
+                task_id=new_task.id,
+                version_no=rv.version_no,
+                status=rv.status,
+                is_partial_sample=rv.is_partial_sample,
+                change_note=rv.change_note,
+                executive_summary=rv.executive_summary,
+                dimensions_json=_copy.deepcopy(rv.dimensions_json or []),
+                stale_impacts_json=_copy.deepcopy(rv.stale_impacts_json or []),
+                consulting_json=_copy.deepcopy(rv.consulting_json) if rv.consulting_json is not None else None,
+                citation_policy=rv.citation_policy,
+                created_by=user.user_id,
+            )
+        )
+
+    await session.commit()
+    set_detail(
+        request,
+        summary=f"复制咨询对话：{new_task.title}",
+        after={"source_task_id": str(task.id), "cloned_task_id": str(new_task.id), "title": new_task.title},
+    )
+    return {
+        "id": str(new_task.id),
+        "title": new_task.title,
+        "conversation_code": format_conversation_code(new_task.id, new_task.created_at),
+    }
+
+
 async def _project_side_chat(session: AsyncSession, task: AnalysisTask) -> AnalysisTask | None:
     """The conversation opened beside a documents project (not a consulting chat that went on to create
     the project — that one stays the user's own conversation)."""
@@ -1777,6 +1888,7 @@ async def export_user_report(
     user: UserDep,
     session: SessionDep,
     dimension: Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"] | None = None,
+    lang: Literal["zh", "en"] = "zh",
 ) -> Response:
     task = await session.get(AnalysisTask, task_id)
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
@@ -1817,14 +1929,46 @@ async def export_user_report(
     # Native PDF shaping must not block chat progress or SSE heartbeats.
     started = perf_counter()
     cache_hit = False
-    if ext == "zip":
+    if lang == "en":
+        import io
+        import zipfile
+
+        from app.analysis.document_templates import Rendered, build_docx, build_pdf
+        from app.analysis.english_report import build_english_consulting_report_blocks
+
+        if ext == "zip":
+            def _build_en_zip() -> bytes:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    full_blks, full_stem, full_hdr = build_english_consulting_report_blocks(task, export_view, None)
+                    zf.writestr(f"00_{full_stem}.docx", build_docx(Rendered(blocks=full_blks), full_hdr, foreign=True, table_style="formal_black"))
+                    for d_idx in range(1, 9):
+                        d_code = f"D{d_idx}"
+                        d_blks, d_stem, d_hdr = build_english_consulting_report_blocks(task, export_view, d_code)
+                        zf.writestr(f"{d_idx:02d}_{d_stem}.docx", build_docx(Rendered(blocks=d_blks), d_hdr, foreign=True, table_style="formal_black"))
+                return buf.getvalue()
+
+            data = await run_in_threadpool(_build_en_zip)
+            _, en_stem, _ = build_english_consulting_report_blocks(task, export_view, None)
+            out_fname = f"{en_stem}.zip"
+        else:
+            en_blks, en_stem, en_hdr = build_english_consulting_report_blocks(task, export_view, dimension)
+            builder_fn = build_docx if ext == "docx" else build_pdf
+            data = await run_in_threadpool(
+                builder_fn, Rendered(blocks=en_blks), en_hdr, foreign=True, table_style="formal_black"
+            )
+            out_fname = f"{en_stem}.{ext}"
+    elif ext == "zip":
         data = await run_in_threadpool(build_report_zip, task, export_view)
+        out_fname = export_filename(task, rv, ext, dimension)
     elif ext == "docx":
         data = await run_in_threadpool(build_report_docx, task, export_view, dimension)
+        out_fname = export_filename(task, rv, ext, dimension)
     else:
         data, cache_hit = await run_in_threadpool(
             cached_pdf, task, export_view, dimension, build_report_pdf
         )
+        out_fname = export_filename(task, rv, ext, dimension)
     media = {
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "pdf": "application/pdf",
@@ -1834,7 +1978,7 @@ async def export_user_report(
         data,
         media_type=media[ext],
         headers={
-            "Content-Disposition": content_disposition(export_filename(task, rv, ext, dimension)),
+            "Content-Disposition": content_disposition(out_fname),
             "Access-Control-Expose-Headers": "Content-Disposition",
             "Cache-Control": "private, no-store",
             "Server-Timing": f"export;dur={(perf_counter() - started) * 1000:.1f}",

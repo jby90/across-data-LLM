@@ -40,6 +40,20 @@ const inactiveAdminCount = computed(() => admins.value.filter((u) => !u.is_activ
 const hasAnyDialogOpen = computed(() => dialog.open || pwdDialog.open || !!editing.value)
 const me = useAuth()
 const SOURCE: Record<string, string> = { admin: '超级管理员开通', portal: '门户注册' }
+const ORG_ROLE_DISPLAY: Record<'member' | 'viewer', string> = {
+  member: '企业用户（编辑者）',
+  viewer: '普通查看者（只读用户）',
+}
+const ORG_ROLE_SCOPE_TEXT: Record<'member' | 'viewer', string> = {
+  member: '编辑者 · 可新建评估与修改报告',
+  viewer: '只读用户 · 仅限查阅，禁止新建或改报告',
+}
+const orgRoleFilter = reactive<Record<string, 'all' | 'member' | 'viewer'>>({})
+function filteredUsersOf(orgId: string): UserOut[] {
+  const f = orgRoleFilter[orgId] || 'all'
+  const list = usersOf(orgId)
+  return f === 'all' ? list : list.filter((u) => u.role === f)
+}
 
 async function load() {
   const orgQuery = showInactiveOrgs.value ? '?include_inactive=true' : ''
@@ -211,7 +225,7 @@ onMounted(load)
     <header class="page-heading">
       <div>
         <h1>企业与账号</h1>
-        <p>管理后台四类权限角色账号（超级管理员、运维管理员、企业用户、普通查看者；门户自助注册体验账号归属独立体验空间隔离管理），并按企业配置模型调用敏感词保护清单。</p>
+        <p>管理后台四类权限角色账号：管理端设超级管理员、运维管理员；企业下细分为<strong>企业用户（编辑者，可新建与修改报告）</strong>与<strong>普通查看者（只读用户，仅限查阅、禁止新建或修改，控制并发与误改风险）</strong>，门户自助注册体验账号归属独立体验空间隔离管理。</p>
       </div>
     </header>
 
@@ -242,16 +256,25 @@ onMounted(load)
         <template #default="{ row }">
           <div class="org-detail" :data-testid="`org-detail-${row.id}`">
             <div class="detail-head">
-              <h3>{{ row.name }} 账号列表（企业用户 {{ memberCountOf(row.id) }} · 普通查看者 {{ viewerCountOf(row.id) }}<template v-if="inactiveOrgCountOf(row.id) > 0">，停用 {{ inactiveOrgCountOf(row.id) }} 个</template>）</h3>
-              <el-button size="small" data-testid="org-add-user" @click="openAccount(row)">新增企业账号</el-button>
+              <h3>{{ row.name }} 账号列表（编辑者 {{ memberCountOf(row.id) }} · 只读用户 {{ viewerCountOf(row.id) }}<template v-if="inactiveOrgCountOf(row.id) > 0">，停用 {{ inactiveOrgCountOf(row.id) }} 个</template>）</h3>
+              <div class="detail-head-actions">
+                <el-radio-group :model-value="orgRoleFilter[row.id] || 'all'" size="small" :data-testid="`org-role-filter-${row.id}`" @update:model-value="(v: string | number | boolean | undefined) => (orgRoleFilter[row.id] = (v as 'all' | 'member' | 'viewer') || 'all')">
+                  <el-radio-button value="all">全部</el-radio-button>
+                  <el-radio-button value="member">编辑者</el-radio-button>
+                  <el-radio-button value="viewer">只读用户</el-radio-button>
+                </el-radio-group>
+                <el-button size="small" :data-testid="`org-add-viewer-${row.id}`" @click="openAccount(row, 'viewer')">新增只读用户</el-button>
+                <el-button size="small" type="primary" plain data-testid="org-add-user" @click="openAccount(row, 'member')">新增企业账号</el-button>
+              </div>
             </div>
-            <el-table v-if="usersOf(row.id).length" :data="usersOf(row.id)" size="small" data-testid="org-users">
-              <el-table-column label="姓名" width="140"><template #default="{ row: u }">{{ userName(u) }}</template></el-table-column>
-              <el-table-column prop="email" label="登录邮箱" min-width="200" show-overflow-tooltip />
-              <el-table-column label="角色" width="152"><template #default="{ row: u }">
-                <el-select :model-value="u.role" size="small" style="width: 128px" :data-testid="`user-role-${u.email}`" @change="(r: Role) => updateUser(u, { role: r })">
-                  <el-option v-for="r in (['member', 'viewer'] as Role[])" :key="r" :label="ROLE_LABEL[r]" :value="r" />
+            <el-table v-if="filteredUsersOf(row.id).length" :data="filteredUsersOf(row.id)" size="small" data-testid="org-users">
+              <el-table-column label="姓名" width="132"><template #default="{ row: u }">{{ userName(u) }}</template></el-table-column>
+              <el-table-column prop="email" label="登录邮箱" min-width="190" show-overflow-tooltip />
+              <el-table-column label="角色" width="196"><template #default="{ row: u }">
+                <el-select :model-value="u.role" size="small" style="width: 176px" :data-testid="`user-role-${u.email}`" @change="(r: Role) => updateUser(u, { role: r })">
+                  <el-option v-for="r in (['member', 'viewer'] as const)" :key="r" :label="ORG_ROLE_DISPLAY[r]" :value="r" />
                 </el-select></template></el-table-column>
+              <el-table-column label="权限边界" min-width="210"><template #default="{ row: u }"><span class="muted">{{ ORG_ROLE_SCOPE_TEXT[(u.role === 'viewer' ? 'viewer' : 'member')] }}</span></template></el-table-column>
               <el-table-column label="下载文件" width="96"><template #default="{ row: u }">
                 <el-switch v-if="u.role === 'viewer'" :model-value="!!u.can_export" :data-testid="`user-export-${u.email}`" @change="(v: string | number | boolean) => updateUser(u, { can_export: !!v })" />
                 <el-switch v-else :model-value="true" disabled aria-label="企业用户都可以下载" /></template></el-table-column>
@@ -327,7 +350,7 @@ onMounted(load)
       <el-form label-position="top">
         <el-form-item label="角色">
           <el-radio-group v-model="dialog.role" class="role-pick" data-testid="account-role">
-            <el-radio v-for="r in ROLES_HERE" :key="r" :value="r"><strong>{{ ROLE_LABEL[r] }}</strong><small>{{ ROLE_HINT[r] }}</small></el-radio>
+            <el-radio v-for="r in ROLES_HERE" :key="r" :value="r"><strong>{{ (r === 'member' || r === 'viewer') ? ORG_ROLE_DISPLAY[r] : ROLE_LABEL[r] }}</strong><small>{{ r === 'viewer' ? '仅限查看本企业的评估项目、合规文件、简报与属地准入；无权新建或修改企业项目，避免多人误改与并发压力' : ROLE_HINT[r] }}</small></el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item v-if="dialog.role === 'viewer'"><el-checkbox v-model="dialog.can_export" data-testid="account-can-export">允许下载评估文件、申请材料和简报</el-checkbox></el-form-item>
@@ -374,7 +397,8 @@ onMounted(load)
 .role-card__hint { margin: 0; font-size: 13px; line-height: 1.6; color: #4b5e6c; flex: 1; }
 .role-card__act { padding-top: 4px; }
 .org-detail { padding: 8px 24px 16px; }
-.detail-head { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+.detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
+.detail-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .detail-head h3, .detail-head h2 { margin: 0; font-size: 15px; }
 .section-count { font-size: 13px; font-weight: 400; color: #64748b; margin-left: 4px; }
 .role-empty-note { margin: 8px 0 0; font-size: 13px; line-height: 1.6; color: #4b5e6c; }

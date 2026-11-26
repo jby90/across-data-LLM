@@ -1059,24 +1059,38 @@ async def _write_paper(
 _PAPER_WRITE_LOCKS: dict[tuple[int, str, str], object] = {}
 
 
+def sanitize_custom_tag(val: object, *, max_len: int = 40) -> str:
+    """Clean a preset scenario key or a user-entered custom scenario label safely."""
+    raw = str(val or "")
+    cleaned = "".join(
+        ch for ch in raw if ch >= " " and ch != "\x7f" and not (0xD800 <= ord(ch) <= 0xDFFF)
+    )
+    cleaned = " ".join(cleaned.split()).strip()
+    return cleaned[:max_len]
+
+
 def task_functions(task: AnalysisTask) -> list[str]:
-    """Return all selected business function keys for a project (preserving order, backward-compatible)."""
+    """Return all selected business function keys or custom scenario labels for a project (preserving order)."""
     raw = (getattr(task, "facts_json", None) or {}).get("_functions")
     out: list[str] = []
     if isinstance(raw, list):
-        out = [str(x).strip() for x in raw if str(x).strip() in SCENARIO_LABELS]
-        out = list(dict.fromkeys(out))
-    primary = str(getattr(task, "scenario_type", "") or "").strip()
-    if not out and primary in SCENARIO_LABELS:
+        for x in raw:
+            tag = sanitize_custom_tag(x)
+            if tag and tag not in out:
+                out.append(tag)
+            if len(out) >= 12:
+                break
+    primary = sanitize_custom_tag(getattr(task, "scenario_type", "") or "")
+    if not out and primary:
         out = [primary]
-    elif primary in SCENARIO_LABELS and primary not in out:
+    elif primary and primary not in out:
         out.insert(0, primary)
-    return out
+    return out[:12]
 
 
 def _scenario(task: AnalysisTask) -> dict[str, str]:
     fns = task_functions(task)
-    label = "；".join(SCENARIO_LABELS[f] for f in fns if f in SCENARIO_LABELS)
+    label = "；".join(SCENARIO_LABELS.get(f, f) for f in fns if f)
     scene = str((getattr(task, "facts_json", None) or {}).get("business_scene") or "")
     return {"scenario": f"{label}（{scene}）" if label and scene else (label or scene)}
 
@@ -1604,6 +1618,123 @@ async def preview_edpb_en(
         "name": "数据保护影响评估（欧盟标准英文范本）",
         "kind": "official_docx",
         "blocks": await asyncio.to_thread(od.docx_preview_blocks, data),
+    }
+
+
+async def _build_en_doc(
+    session: AsyncSession,
+    task: AnalysisTask,
+    code: str,
+    user: Principal,
+    draft: bool,
+) -> tuple[list[dict], str, str]:
+    from app.analysis.english_report import build_english_doc_blocks
+    from app.iam.models import Role
+
+    zh_blocks, _name_zh, _ctx_zh = await _export_source(session, task, code, draft)
+    _tpl, values, citations = await _inputs(session, task, code)
+    answered = {
+        k.removeprefix(DOC_FACT_PREFIX): str(v).strip()
+        for k, v in (task.facts_json or {}).items()
+        if k.startswith(DOC_FACT_PREFIX) and isinstance(v, str) and v.strip()
+    }
+    merged_vals = {**answered, **{k: v for k, v in values.items() if v}}
+    return await build_english_doc_blocks(
+        session,
+        task,
+        code,
+        zh_blocks,
+        merged_vals,
+        citations,
+        draft=draft,
+        read_only_viewer=(user.role == Role.VIEWER),
+    )
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/export-en.docx")
+async def export_document_en_docx(
+    task_id: uuid.UUID, code: str, user: UserDep, session: SessionDep, draft: bool = False
+) -> Response:
+    from app.analysis.english_report import strip_and_translate_cjk
+
+    task = await _task(session, task_id, user)
+    task_title_raw = task.title
+    if code == "dpia":
+        from app.analysis.doc_projects import involves_eu_eea
+        from app.analysis.document_basis import CN
+
+        _tpl, in_vals, _cits = await _inputs(session, task, "dpia")
+        if involves_eu_eea(in_vals.get("source_country"), in_vals.get("recipient_country")) and country_of(in_vals.get("source_country")) != CN:
+            return await export_edpb_en_docx(task_id=task_id, user=user, session=session, draft=draft)
+
+    en_blocks, label_en, header_en = await _build_en_doc(session, task, code, user, draft)
+    task_en = strip_and_translate_cjk(task_title_raw, fallback="Compliance_Project")
+    await session.close()
+    docx_bytes = await asyncio.to_thread(
+        build_docx,
+        Rendered(blocks=en_blocks),
+        header_en,
+        foreign=True,
+        table_style="formal_black",
+    )
+    return Response(
+        docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": content_disposition(named(task_en, label_en, ext="docx"))},
+    )
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/export-en.pdf")
+async def export_document_en_pdf(
+    task_id: uuid.UUID, code: str, user: UserDep, session: SessionDep, draft: bool = False
+) -> Response:
+    from app.analysis.english_report import strip_and_translate_cjk
+
+    task = await _task(session, task_id, user)
+    task_title_raw = task.title
+    if code == "dpia":
+        from app.analysis.doc_projects import involves_eu_eea
+        from app.analysis.document_basis import CN
+
+        _tpl, in_vals, _cits = await _inputs(session, task, "dpia")
+        if involves_eu_eea(in_vals.get("source_country"), in_vals.get("recipient_country")) and country_of(in_vals.get("source_country")) != CN:
+            return await export_edpb_en_pdf(task_id=task_id, user=user, session=session, draft=draft)
+
+    en_blocks, label_en, header_en = await _build_en_doc(session, task, code, user, draft)
+    task_en = strip_and_translate_cjk(task_title_raw, fallback="Compliance_Project")
+    await session.close()
+    pdf_bytes = await asyncio.to_thread(
+        build_pdf,
+        Rendered(blocks=en_blocks),
+        header_en,
+        foreign=True,
+        table_style="formal_black",
+    )
+    return Response(
+        pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": content_disposition(named(task_en, label_en, ext="pdf"))},
+    )
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/preview-en")
+async def preview_document_en(
+    task_id: uuid.UUID, code: str, user: UserDep, session: SessionDep, draft: bool = True
+) -> dict:
+    task = await _task(session, task_id, user)
+    if code == "dpia":
+        from app.analysis.doc_projects import involves_eu_eea
+        from app.analysis.document_basis import CN
+
+        _tpl, in_vals, _cits = await _inputs(session, task, "dpia")
+        if involves_eu_eea(in_vals.get("source_country"), in_vals.get("recipient_country")) and country_of(in_vals.get("source_country")) != CN:
+            return await preview_edpb_en(task_id=task_id, user=user, session=session, draft=draft)
+
+    en_blocks, label_en, _header_en = await _build_en_doc(session, task, code, user, draft)
+    return {
+        "name": label_en.replace("_", " "),
+        "kind": "standard",
+        "blocks": en_blocks,
     }
 
 

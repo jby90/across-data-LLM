@@ -757,7 +757,10 @@ def build_pdf(
             return docx_to_pdf(build_docx(rendered, context, foreign=foreign, table_style=table_style))
         except PdfEngineUnavailable:
             pass
-    return _render_pdf(rendered, context, table_style=table_style, foreign=foreign)
+    from app.core.resource_gate import pdf_render_slot
+
+    with pdf_render_slot():
+        return _render_pdf(rendered, context, table_style=table_style, foreign=foreign)
 
 
 def _render_pdf(

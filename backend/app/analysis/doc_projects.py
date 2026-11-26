@@ -262,19 +262,21 @@ def task_business_scenes(task: AnalysisTask) -> list[str]:
     facts = task.facts_json or {}
     raw = facts.get(SCENES_KEY)
     if isinstance(raw, list):
-        out = [str(x).strip() for x in raw if str(x).strip() in BUSINESS_SCENES]
+        out = [D.sanitize_custom_tag(x) for x in raw if D.sanitize_custom_tag(x)]
         if out:
-            return list(dict.fromkeys(out))
+            return list(dict.fromkeys(out))[:12]
     stored_label = str(facts.get("business_scene") or "").strip()
     if stored_label:
-        matched = [k for k, v in BUSINESS_SCENES.items() if v == stored_label or v in stored_label.split("、")]
+        rev_map = {v: k for k, v in BUSINESS_SCENES.items()}
+        parts = [D.sanitize_custom_tag(p) for p in stored_label.split("、") if D.sanitize_custom_tag(p)]
+        matched = [rev_map.get(p, p) for p in parts]
         if matched:
-            return list(dict.fromkeys(matched))
+            return list(dict.fromkeys(matched))[:12]
     return []
 
 
 def _format_multi_function_short(fns: list[str], fallback: str = "") -> str:
-    labels = [SHORT_FUNCTION.get(f, "") for f in fns if SHORT_FUNCTION.get(f, "")]
+    labels = [SHORT_FUNCTION.get(f, f[:12]) for f in fns if SHORT_FUNCTION.get(f, f[:12])]
     if not labels:
         return fallback[:12]
     if len(labels) == 1:
@@ -318,37 +320,37 @@ def _apply_route(task: AnalysisTask, body: CreateIn | UpdateIn) -> None:
     raw_fns = getattr(body, "functions", None)
     raw_fn = getattr(body, "function", None)
     if raw_fns is not None:
-        clean_fns = list(dict.fromkeys(str(f).strip() for f in raw_fns if str(f).strip() in SCENARIO_LABELS))
+        clean_fns = list(dict.fromkeys(D.sanitize_custom_tag(f) for f in raw_fns if D.sanitize_custom_tag(f)))[:12]
         if clean_fns:
             facts[FUNCTIONS_KEY] = clean_fns
-            task.scenario_type = clean_fns[0]
+            task.scenario_type = clean_fns[0][:64]
         else:
             facts.pop(FUNCTIONS_KEY, None)
             task.scenario_type = ""
     elif raw_fn is not None:
-        fn_clean = raw_fn.strip()
-        if fn_clean in SCENARIO_LABELS:
+        fn_clean = D.sanitize_custom_tag(raw_fn)
+        if fn_clean:
             facts[FUNCTIONS_KEY] = [fn_clean]
-            task.scenario_type = fn_clean
-        elif fn_clean == "":
+            task.scenario_type = fn_clean[:64]
+        else:
             facts.pop(FUNCTIONS_KEY, None)
             task.scenario_type = ""
     raw_scs = getattr(body, "business_scenes", None)
     raw_sc = getattr(body, "business_scene", None)
     if raw_scs is not None:
-        clean_scs = list(dict.fromkeys(str(s).strip() for s in raw_scs if str(s).strip() in BUSINESS_SCENES))
+        clean_scs = list(dict.fromkeys(D.sanitize_custom_tag(s) for s in raw_scs if D.sanitize_custom_tag(s)))[:12]
         if clean_scs:
             facts[SCENES_KEY] = clean_scs
-            facts["business_scene"] = "、".join(BUSINESS_SCENES[s] for s in clean_scs)
+            facts["business_scene"] = "、".join(BUSINESS_SCENES.get(s, s) for s in clean_scs)
         else:
             facts.pop(SCENES_KEY, None)
             facts.pop("business_scene", None)
     elif raw_sc is not None:
-        sc_clean = raw_sc.strip()
-        if sc_clean in BUSINESS_SCENES:
+        sc_clean = D.sanitize_custom_tag(raw_sc)
+        if sc_clean:
             facts[SCENES_KEY] = [sc_clean]
-            facts["business_scene"] = BUSINESS_SCENES[sc_clean]
-        elif sc_clean == "":
+            facts["business_scene"] = BUSINESS_SCENES.get(sc_clean, sc_clean)
+        else:
             facts.pop(SCENES_KEY, None)
             facts.pop("business_scene", None)
     task.facts_json = facts
@@ -3072,6 +3074,7 @@ async def export_delivery_aid(
 async def export_all(
     project_id: uuid.UUID, user: UserDep, session: SessionDep,
     fmt: Literal["docx", "pdf", "xlsx"] = "docx", draft: bool = True,
+    lang: Literal["zh", "en"] = "zh",
 ) -> Response:
     """All eight documents in one package. As a draft, what is unanswered reads “【待补充】”."""
     task = await _project(session, project_id, user)
@@ -3138,6 +3141,25 @@ async def export_all(
                     originals.append((f"{prefix}{named(task_title, label_part, ext='pdf')}", raw_form))
             if official_only(code, values.get("source_country", ""), forms):
                 continue  # 发出国有官方表：申报表就是官方原表，不再放通用申报表
+        if lang == "en" and fmt in ("docx", "pdf"):
+            try:
+                from app.analysis.english_report import strip_and_translate_cjk
+
+                en_blocks, label_en, header_en = await D._build_en_doc(session, task, code, user, draft)
+                task_en = strip_and_translate_cjk(task_title, fallback="Compliance_Project")
+                if via_word or fmt == "docx":
+                    en_bytes = await asyncio.to_thread(
+                        build_docx, Rendered(blocks=en_blocks), header_en, foreign=True, table_style="formal_black"
+                    )
+                    made.append((f"{i:02d}_{named(task_en, label_en, ext='docx')}", en_bytes))
+                else:
+                    en_pdf = await asyncio.to_thread(
+                        build_pdf, Rendered(blocks=en_blocks), header_en, foreign=True, table_style="formal_black"
+                    )
+                    originals.append((f"{i:02d}_{named(task_en, label_en, ext='pdf')}", en_pdf))
+            except HTTPException as exc:
+                skipped.append(f"{code}：{exc.detail}")
+            continue
         try:
             data, filename, _ = await _file(session, task, code, "docx" if via_word else fmt, draft)
         except HTTPException as exc:
