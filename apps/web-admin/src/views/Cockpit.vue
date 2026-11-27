@@ -470,7 +470,7 @@ onUnmounted(() => {
     v-loading="loading"
     :data-testid="props.opsMode ? 'ops-admin-cockpit' : 'super-admin-cockpit'"
   >
-    <!-- 1. 领导汇报冠冕顶栏 -->
+    <!-- 1. 领导汇报冠冕顶栏（按角色真实权限显式区分范围） -->
     <header class="cockpit-header">
       <div class="crown-left">
         <div class="crown-mark" aria-hidden="true">数合</div>
@@ -481,8 +481,11 @@ onUnmounted(() => {
               全球 {{ data.operations.monitor_sites_total - data.operations.attention_sites_total }}/{{ data.operations.monitor_sites_total }} 个官方源站错峰巡检正常 ·
               {{ whitepapersOutdated === 0 ? `${data.headline.briefings_ready} 国简报全部最新` : `${whitepapersOutdated} 国简报待同步` }}
             </span>
+            <span class="perm-scope-pill" :class="props.opsMode ? 'ops' : 'super'">
+              {{ props.opsMode ? '运维管理员 · 法规底座与巡检维护权限（租户与审计已隔离）' : '超级管理员 · 全平台租户治理与安全审计总控权限' }}
+            </span>
           </div>
-          <h1>{{ props.opsMode ? '全球法规知识底座与采集巡检态势台' : '全球汽车数据跨境与属地准入战略态势总控台' }}</h1>
+          <h1>{{ props.opsMode ? '全球法规知识底座与采集巡检运维台' : '全球汽车数据跨境与属地准入战略态势总控台' }}</h1>
         </div>
       </div>
 
@@ -501,10 +504,12 @@ onUnmounted(() => {
       <!-- 2. 一页纸核心建设成果结论带 -->
       <section class="takeaway-ribbon" aria-label="核心成效摘要">
         <p class="takeaway-text">{{ executiveTakeaway }}</p>
-        <span class="takeaway-badge">中英双语文书直出 · 25 套官方原表套打</span>
+        <span class="takeaway-badge">
+          {{ props.opsMode ? '51 站周错峰巡检 · 8 类标准模板与 25 套原表维护' : '中英双语文书直出 · 多租户隔离与不可变审计' }}
+        </span>
       </section>
 
-      <!-- 3. 顶部 6 大旗舰精密指标舱 -->
+      <!-- 3. 顶部 6 大核心指标舱（超管聚焦底座+租户项目审计，运维聚焦纯法规图谱简报源站） -->
       <section class="dk-kpi6" aria-label="平台核心指标">
         <button
           type="button"
@@ -556,55 +561,71 @@ onUnmounted(() => {
           <span class="dk-kpi-foot">{{ data.headline.translated_clauses_total.toLocaleString() }} / {{ data.headline.foreign_clauses_total.toLocaleString() }} 条已核验</span>
         </button>
 
-        <button type="button" class="dk-card dk-btn-card" @click="go('/knowledge-graph')">
-          <div class="dk-kpi-top">
-            <span class="dk-kpi-lbl">知识图谱关联要素</span>
-            <span class="dk-kpi-tag">逐字锚定</span>
-          </div>
-          <strong class="dk-kpi-val">{{ data.headline.kg_nodes_total.toLocaleString() }}<small> 个</small></strong>
-          <div class="dk-mini-track"><div class="dk-mini-fill" style="width: 94%" /></div>
-          <span class="dk-kpi-foot">已梳理 {{ data.headline.kg_edges_total.toLocaleString() }} 条义务与罚则关系</span>
-        </button>
+        <template v-if="!props.opsMode">
+          <button type="button" class="dk-card dk-btn-card" @click="go('/orgs')">
+            <div class="dk-kpi-top">
+              <span class="dk-kpi-lbl">入驻车企与角色账号</span>
+              <span class="dk-kpi-tag gold">超管专享</span>
+            </div>
+            <strong class="dk-kpi-val">{{ data.headline.active_organizations }}<small> 家车企</small></strong>
+            <div class="dk-mini-track"><div class="dk-mini-fill gold" style="width: 90%" /></div>
+            <span class="dk-kpi-foot">
+              管理账号 {{ data.account_summary.super_admins + data.account_summary.ops_admins }} · 企业账号 {{ data.account_summary.enterprise_members + data.account_summary.ordinary_viewers }}
+            </span>
+          </button>
 
-        <button type="button" class="dk-card dk-btn-card" @click="go('/whitepapers')">
-          <div class="dk-kpi-top">
-            <span class="dk-kpi-lbl">国家合规简报与准入</span>
-            <span class="dk-kpi-tag emerald">{{ whitepapersOutdated === 0 ? '零待更新' : `${whitepapersOutdated} 待同步` }}</span>
-          </div>
-          <strong class="dk-kpi-val">{{ data.headline.briefings_ready }}<small> 国简报</small></strong>
-          <div class="dk-mini-track"><div class="dk-mini-fill emerald" style="width: 100%" /></div>
-          <span class="dk-kpi-foot">{{ data.headline.admission_entries_total }} 项准入 · {{ data.headline.official_forms_total }} 套法定申报表</span>
-        </button>
+          <button type="button" class="dk-card dk-btn-card" @click="go('/agent-studio')">
+            <div class="dk-kpi-top">
+              <span class="dk-kpi-lbl">企业评估与准入项目</span>
+              <span class="dk-kpi-tag gold">{{ data.routes.length }} 条走廊</span>
+            </div>
+            <strong class="dk-kpi-val">{{ data.headline.doc_projects_total + data.headline.admission_projects_total }}<small> 个项目</small></strong>
+            <div class="dk-mini-track"><div class="dk-mini-fill gold" style="width: 92%" /></div>
+            <span class="dk-kpi-foot">合规评估 {{ data.headline.doc_projects_total }} · 属地准入 {{ data.headline.admission_projects_total }}</span>
+          </button>
 
-        <button
-          v-if="!props.opsMode"
-          type="button"
-          class="dk-card dk-btn-card"
-          @click="go('/agent-studio')"
-        >
-          <div class="dk-kpi-top">
-            <span class="dk-kpi-lbl">企业评估与准入项目</span>
-            <span class="dk-kpi-tag gold">{{ data.headline.active_organizations }} 家单位</span>
-          </div>
-          <strong class="dk-kpi-val">{{ data.headline.doc_projects_total + data.headline.admission_projects_total }}<small> 个项目</small></strong>
-          <div class="dk-mini-track"><div class="dk-mini-fill gold" style="width: 92%" /></div>
-          <span class="dk-kpi-foot">合规评估 {{ data.headline.doc_projects_total }} · 属地准入 {{ data.headline.admission_projects_total }}</span>
-        </button>
+          <button type="button" class="dk-card dk-btn-card" @click="go('/audit-logs')">
+            <div class="dk-kpi-top">
+              <span class="dk-kpi-lbl">近 7 日不可变审计</span>
+              <span class="dk-kpi-tag emerald">安全留痕</span>
+            </div>
+            <strong class="dk-kpi-val">{{ data.operations.audit_events_7d }}<small> 条审计</small></strong>
+            <div class="dk-mini-track"><div class="dk-mini-fill emerald" style="width: 100%" /></div>
+            <span class="dk-kpi-foot">{{ data.headline.briefings_ready }} 国简报 · {{ data.headline.official_forms_total }} 套原表就绪</span>
+          </button>
+        </template>
 
-        <button
-          v-else
-          type="button"
-          class="dk-card dk-btn-card"
-          @click="go('/sites')"
-        >
-          <div class="dk-kpi-top">
-            <span class="dk-kpi-lbl">官方源站与舆情监测</span>
-            <span class="dk-kpi-tag emerald">周错峰巡检</span>
-          </div>
-          <strong class="dk-kpi-val">{{ data.operations.monitor_sites_total }}<small> 个源站</small></strong>
-          <div class="dk-mini-track"><div class="dk-mini-fill emerald" :style="{ width: `${siteHealthyPct ?? 100}%` }" /></div>
-          <span class="dk-kpi-foot">正常 {{ data.operations.monitor_sites_total - data.operations.attention_sites_total }} 站 · 舆情动态 {{ data.headline.opinion_items_total }} 条</span>
-        </button>
+        <template v-else>
+          <button type="button" class="dk-card dk-btn-card" @click="go('/knowledge-graph')">
+            <div class="dk-kpi-top">
+              <span class="dk-kpi-lbl">知识图谱关联要素</span>
+              <span class="dk-kpi-tag">逐字锚定</span>
+            </div>
+            <strong class="dk-kpi-val">{{ data.headline.kg_nodes_total.toLocaleString() }}<small> 个</small></strong>
+            <div class="dk-mini-track"><div class="dk-mini-fill" style="width: 94%" /></div>
+            <span class="dk-kpi-foot">已梳理 {{ data.headline.kg_edges_total.toLocaleString() }} 条义务与罚则关系</span>
+          </button>
+
+          <button type="button" class="dk-card dk-btn-card" @click="go('/whitepapers')">
+            <div class="dk-kpi-top">
+              <span class="dk-kpi-lbl">国家合规简报汇编</span>
+              <span class="dk-kpi-tag emerald">{{ whitepapersOutdated === 0 ? '零待更新' : `${whitepapersOutdated} 待同步` }}</span>
+            </div>
+            <strong class="dk-kpi-val">{{ data.headline.briefings_ready }}<small> 国简报</small></strong>
+            <div class="dk-mini-track"><div class="dk-mini-fill emerald" style="width: 100%" /></div>
+            <span class="dk-kpi-foot">{{ data.headline.admission_entries_total }} 项准入 · {{ data.headline.official_forms_total }} 套法定申报表</span>
+          </button>
+
+          <button type="button" class="dk-card dk-btn-card" @click="go('/sites')">
+            <div class="dk-kpi-top">
+              <span class="dk-kpi-lbl">官方源站周错峰巡检</span>
+              <span class="dk-kpi-tag emerald">168h 巡检</span>
+            </div>
+            <strong class="dk-kpi-val">{{ data.operations.monitor_sites_total }}<small> 个源站</small></strong>
+            <div class="dk-mini-track"><div class="dk-mini-fill emerald" :style="{ width: `${siteHealthyPct ?? 100}%` }" /></div>
+            <span class="dk-kpi-foot">正常 {{ data.operations.monitor_sites_total - data.operations.attention_sites_total }} 站 · 舆情动态 {{ data.headline.opinion_items_total }} 条</span>
+          </button>
+        </template>
       </section>
 
       <!-- 4. 主体三栏战略大屏 -->
@@ -760,8 +781,10 @@ onUnmounted(() => {
         <div class="map-frame dk-col-center">
           <div class="map-header-row">
             <div>
-              <h2>全球法域法规密度热力与跨境业务流向沙盘</h2>
-              <span class="map-hint">支持按洲推近镜头 · 点击高亮国家或右侧排行联动查阅单国穿透档案</span>
+              <h2>{{ props.opsMode ? '全球法域法规收录密度与官方源站分布沙盘' : '全球法域法规密度热力与车企跨境流向沙盘' }}</h2>
+              <span class="map-hint">
+                {{ props.opsMode ? '按运维权限仅呈现公共法规底座与源站分布 · 点击法域查阅法规与巡检台账' : '支持按洲推近镜头 · 点亮车企跨洲数据走廊并查阅单国五维穿透档案' }}
+              </span>
             </div>
             <div class="cam-bar" role="group" aria-label="区域镜头切换">
               <button
@@ -913,8 +936,9 @@ onUnmounted(() => {
                   <strong>{{ data.headline.kg_nodes_total.toLocaleString() }} 个 / {{ data.headline.kg_edges_total.toLocaleString() }} 边</strong>
                 </div>
                 <div class="dossier-cell">
-                  <span>准入与申报原表</span>
-                  <strong>{{ data.headline.admission_entries_total }} 项 / {{ data.headline.official_forms_total }} 套</strong>
+                  <span>{{ props.opsMode ? '巡检源站与原表' : '企业项目与原表' }}</span>
+                  <strong v-if="props.opsMode">{{ data.operations.monitor_sites_total }} 站 / {{ data.headline.official_forms_total }} 套</strong>
+                  <strong v-else>{{ data.headline.doc_projects_total + data.headline.admission_projects_total }} 项 / {{ data.headline.official_forms_total }} 套</strong>
                 </div>
               </div>
             </template>
@@ -931,7 +955,15 @@ onUnmounted(() => {
                 <div class="dossier-actions">
                   <button type="button" class="dk-inline-reset" @click="selectedGeoCode = 'ALL'">返回全部</button>
                   <button
-                    v-if="selectedCountry.country_code !== 'CN' && selectedCountry.briefing_ready"
+                    v-if="props.opsMode"
+                    type="button"
+                    class="dk-inline-reset"
+                    @click="go('/sites')"
+                  >
+                    采集源站 →
+                  </button>
+                  <button
+                    v-else-if="selectedCountry.country_code !== 'CN' && selectedCountry.briefing_ready"
                     type="button"
                     class="dk-inline-reset"
                     @click="go('/whitepapers')"
@@ -973,20 +1005,29 @@ onUnmounted(() => {
                   <strong>{{ selectedCountry.kg_nodes_count.toLocaleString() }} 个 / {{ selectedCountry.kg_edges_count.toLocaleString() }} 边</strong>
                 </div>
                 <div class="dossier-cell">
-                  <span>准入与法定原表</span>
-                  <strong>{{ selectedCountry.admission_entries_count }} 项 / {{ selectedCountry.official_forms_count }} 套</strong>
+                  <span>{{ props.opsMode ? '官方源站与原表' : '准入与法定原表' }}</span>
+                  <strong v-if="props.opsMode">{{ selectedCountry.monitor_sites_count }} 站 / {{ selectedCountry.official_forms_count }} 套</strong>
+                  <strong v-else>{{ selectedCountry.admission_entries_count }} 项 / {{ selectedCountry.official_forms_count }} 套</strong>
                 </div>
               </div>
             </template>
           </div>
         </div>
 
-        <!-- 右栏：重点出海法域密度排行 + 平台治理/运维巡检概况 -->
+        <!-- 右栏：按角色真实权限区分（超管看储备榜+租户审计，运维看各国源站简报台账+模板巡检） -->
         <div class="dk-stack dk-col-right">
           <div class="dk-card">
             <div class="dk-sec-head">
-              <h2>{{ activeCamera === 'WORLD' ? '重点法域法规与条文储备榜' : `${CAMERA_PRESETS[activeCamera].label}法规储备榜` }}</h2>
-              <span class="dk-link" @click="go('/documents')">全部法规 →</span>
+              <h2>
+                {{
+                  props.opsMode
+                    ? (activeCamera === 'WORLD' ? '各国源站与简报维护台账' : `${CAMERA_PRESETS[activeCamera].label}源站维护台账`)
+                    : (activeCamera === 'WORLD' ? '重点法域法规与条文储备榜' : `${CAMERA_PRESETS[activeCamera].label}法规储备榜`)
+                }}
+              </h2>
+              <span class="dk-link" @click="go(props.opsMode ? '/sites' : '/documents')">
+                {{ props.opsMode ? '源站列表 →' : '全部法规 →' }}
+              </span>
             </div>
             <div class="dk-country-scroll">
               <div
@@ -1002,16 +1043,19 @@ onUnmounted(() => {
                     {{ c.country_name_zh }}
                   </span>
                   <span class="dk-country-right">
-                    <strong>
+                    <strong v-if="props.opsMode">
+                      {{ c.laws_count }} 部 · {{ c.monitor_sites_count }} 站 · {{ c.country_code === 'CN' ? '母港国标' : (c.briefing_ready ? '简报就绪' : '待编简报') }}
+                    </strong>
+                    <strong v-else>
                       {{ c.laws_count }} 部 ·
                       {{ c.country_code === 'CN' && c.standards_count > 0 ? `${c.standards_count} 项国标` : `${c.clauses_count.toLocaleString()} 条` }}
                     </strong>
                     <button
                       type="button"
                       class="dk-jump-btn"
-                      @click.stop="go({ path: '/documents', query: { country: c.country_code } })"
+                      @click.stop="go(props.opsMode ? '/sites' : { path: '/documents', query: { country: c.country_code } })"
                     >
-                      查看 →
+                      {{ props.opsMode ? '维护 →' : '查看 →' }}
                     </button>
                   </span>
                 </div>
@@ -1027,10 +1071,10 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 超级管理员：企业治理、跨洲走廊与安全审计 -->
+          <!-- 超级管理员：企业治理、跨洲走廊与安全审计（超管专属权限） -->
           <div v-if="!props.opsMode" class="dk-card dk-flex1">
             <div class="dk-sec-head">
-              <h2>平台服务治理与运行审计</h2>
+              <h2>平台租户治理与安全审计监控</h2>
               <span class="dk-link" @click="go('/audit-logs')">审计记录 →</span>
             </div>
             <div class="dk-row dk-row-click" @click="go('/orgs')">
@@ -1049,9 +1093,9 @@ onUnmounted(() => {
               <span>在途跨洲数据合规走廊</span>
               <strong class="dk-done">{{ data.routes.length }} 条活跃路线</strong>
             </div>
-            <div class="dk-row dk-row-click" @click="go('/opinion')">
-              <span>海外监管与行业舆情收录</span>
-              <strong>{{ data.headline.opinion_items_total }} 条动态</strong>
+            <div class="dk-row dk-row-click" @click="go('/agent-studio')">
+              <span>合规评估执行核验轨迹</span>
+              <strong>{{ data.headline.doc_projects_total }} 个评估项目</strong>
             </div>
             <div class="dk-row dk-row-click" @click="go('/audit-logs')">
               <span>近 7 日不可变操作审计</span>
@@ -1059,10 +1103,10 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 运维管理员：法规巡检、文书模板与准入资料底座（100% 匹配运维权限边界） -->
+          <!-- 运维管理员：法规巡检、文书模板与准入资料底座（100% 匹配运维 13 项菜单权限） -->
           <div v-else class="dk-card dk-flex1">
             <div class="dk-sec-head">
-              <h2>采集巡检与文书模板底座</h2>
+              <h2>采集质控与文书模板底座</h2>
               <span class="dk-link" @click="go('/sites')">巡检管理 →</span>
             </div>
             <div class="dk-row dk-row-click" @click="go('/sites')">
@@ -1185,8 +1229,27 @@ onUnmounted(() => {
 .crown-pulse-row {
   display: flex;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 2px;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+
+.perm-scope-pill {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--ck-border);
+  background: var(--ck-inner);
+  white-space: nowrap;
+}
+.perm-scope-pill.super {
+  color: var(--ck-gold-tx);
+  border-color: rgba(245, 158, 11, 0.45);
+}
+.perm-scope-pill.ops {
+  color: var(--ck-accent);
+  border-color: rgba(56, 189, 248, 0.45);
 }
 
 .pulse-dot {

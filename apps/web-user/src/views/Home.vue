@@ -8,6 +8,7 @@ import {
   WORLD_COUNTRY_PATHS,
   buildRouteArcPath,
   canEdit,
+  canExport,
   COUNTRY_NAMES,
   getCountryHub,
   getCountryLabelOffset,
@@ -198,6 +199,7 @@ const loaded = ref(false)
 const hasAdmission = computed(() => admItems.value.length > 0)
 
 const editable = computed(() => canEdit(auth.user))
+const exportable = computed(() => canExport(auth.user))
 const isPortalTrial = computed(() => auth.user?.signup_source === 'portal')
 
 function setUserCamera(cam: UserMapCam) {
@@ -263,7 +265,9 @@ function admShort(a: AdmItem): { short: string; ok: boolean } {
 function docStatus(p: Progress | undefined): string {
   if (!p) return ''
   if (p.total > 0 && p.ready >= p.total && !p.missing && !p.issues) {
-    return `本次应出 ${p.total} 份，已全部就绪，可下载成稿`
+    return editable.value || exportable.value
+      ? `本次应出 ${p.total} 份，已全部就绪，可下载成稿`
+      : `本次应出 ${p.total} 份，已全部就绪，可在线审阅`
   }
   const parts = [`已就绪 ${p.ready}/${p.total} 份`]
   if (p.issues) parts.push(`发现 ${p.issues} 处填写不一致`)
@@ -628,6 +632,14 @@ const TODO_TAG: Record<string, string> = {
   missing_info: '待补信息',
 }
 
+const TODO_TAG_VIEWER: Record<string, string> = {
+  high_risk: '高风险（经办整改中）',
+  risk_stale: '待经办复评',
+  law_update: '法规更新查阅',
+  admission_pending: '准入推进中',
+  missing_info: '待经办补齐',
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   void loadHomeData()
@@ -654,34 +666,72 @@ const portalTrialCards = [
 
 <template>
   <div class="home-wrap">
-    <!-- 门户体验访客：纯净体验引导 + 全球 46 国法规能力全景矩阵（第一时间打动潜在采购企业） -->
-    <section v-if="isPortalTrial" class="portal-welcome" data-testid="home-portal-welcome">
+    <!-- 门户体验访客：同款旗舰视觉底座，但严格限定为“公开法规覆盖与个人体验权限”（零企业项目/零流向/零风险/零导出） -->
+    <section v-if="isPortalTrial" class="portal-welcome user-board" data-testid="home-portal-welcome">
       <div class="portal-head">
-        <span class="capability-kicker">车研数合 · 全球汽车跨境与属地准入一体化引擎</span>
+        <div class="portal-badge-row">
+          <span class="perm-role-chip portal">门户体验访客权限 · 仅限查阅公开法规库与个人问答（企业项目与导出已隔离）</span>
+        </div>
         <h1>欢迎体验车研数合汽车跨境数据合规服务平台</h1>
-        <p>当前为门户访客体验模式。您可以直接查阅各国汽车数据现行法规与国家合规简报、检索海外属地市场准入事项，或使用咨询助手开展法规问答（提问内容仅本人可见）。</p>
+        <p>当前为门户公开注册体验账号：您可免费查阅全球在册汽车数据法规、国家八维合规简报与海外属地准入事项库，或使用咨询助手开展法规问答（提问记录仅本人可见，不含企业评估项目创建与正式文书导出权限）。</p>
       </div>
 
-      <div v-if="kbSummary" class="capability-strip" aria-label="平台全球法规底座能力">
-        <div class="cap-item">
-          <strong>{{ kbSummary.covered_jurisdictions }} 国</strong>
-          <span>全球出海法域覆盖</span>
+      <div v-if="kbSummary" class="kpi-strip portal-kpi5" aria-label="平台公开法规底座能力">
+        <div class="kpi-tile">
+          <div class="kpi-head-row"><span class="kpi-label">公开法域覆盖</span><span class="kpi-chip">可查阅</span></div>
+          <div class="kpi-val-row"><strong>{{ kbSummary.covered_jurisdictions }}</strong><span class="kpi-unit">个国家与地区</span></div>
         </div>
-        <div class="cap-item">
-          <strong>{{ kbSummary.laws_in_force }} 部</strong>
-          <span>现行有效法规精译</span>
+        <div class="kpi-tile">
+          <div class="kpi-head-row"><span class="kpi-label">现行有效法规</span><span class="kpi-chip safe">双语对照</span></div>
+          <div class="kpi-val-row"><strong>{{ kbSummary.laws_in_force }}</strong><span class="kpi-unit">部</span></div>
         </div>
-        <div class="cap-item">
-          <strong>{{ kbSummary.standards_active }} 项</strong>
-          <span>中外汽车技术标准</span>
+        <div class="kpi-tile">
+          <div class="kpi-head-row"><span class="kpi-label">汽车技术标准</span><span class="kpi-chip gold">中外双轨</span></div>
+          <div class="kpi-val-row"><strong>{{ kbSummary.standards_active }}</strong><span class="kpi-unit">项</span></div>
         </div>
-        <div class="cap-item">
-          <strong>{{ kbSummary.briefings_ready }} 国</strong>
-          <span>八维国别合规简报</span>
+        <div class="kpi-tile">
+          <div class="kpi-head-row"><span class="kpi-label">国家合规简报</span><span class="kpi-chip safe">在线可读</span></div>
+          <div class="kpi-val-row"><strong>{{ kbSummary.briefings_ready }}</strong><span class="kpi-unit">国八维简报</span></div>
         </div>
-        <div class="cap-item">
-          <strong>{{ kbSummary.official_forms_total }} 套</strong>
-          <span>东道国官方原表直出</span>
+        <div class="kpi-tile">
+          <div class="kpi-head-row"><span class="kpi-label">属地准入事项</span><span class="kpi-chip">公开名录</span></div>
+          <div class="kpi-val-row"><strong>{{ kbSummary.admission_entries_total }}</strong><span class="kpi-unit">项法定事项</span></div>
+        </div>
+      </div>
+
+      <div v-if="kbSummary" class="portal-map-panel">
+        <div class="map-topbar">
+          <div>
+            <h2>平台公开法规与准入覆盖分布预览（访客体验视图）</h2>
+            <span class="map-sub">仅展示平台公开收录的 {{ kbSummary.covered_jurisdictions }} 个国家与地区法规底座，不包含任何企业项目或跨境传输路线</span>
+          </div>
+          <RouterLink to="/knowledge" class="mf-cta">进入法规知识库 →</RouterLink>
+        </div>
+        <div class="map-stage portal-map-stage">
+          <svg :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="公开法规法域覆盖分布图">
+            <g class="u-grid-lines" stroke-width="0.9">
+              <line x1="0" y1="110" x2="960" y2="110" />
+              <line x1="0" y1="220" x2="960" y2="220" />
+              <line x1="0" y1="330" x2="960" y2="330" />
+              <line x1="240" y1="0" x2="240" y2="440" />
+              <line x1="480" y1="0" x2="480" y2="440" />
+              <line x1="720" y1="0" x2="720" y2="440" />
+            </g>
+            <g class="land-bg">
+              <path v-for="[cc, d] in backgroundMapEntries" :key="`pbg-${cc}`" :d="d" />
+            </g>
+            <g class="land-global-overlay">
+              <path
+                v-for="gItem in globalOverlayEntries"
+                :key="`pgl-${gItem.code}`"
+                :d="gItem.d"
+                class="active-country"
+                :class="{ 'origin-cn': gItem.code === 'CN' }"
+              >
+                <title>{{ gItem.name }}（已收录 {{ gItem.laws }} 部现行法规）</title>
+              </path>
+            </g>
+          </svg>
         </div>
       </div>
 
@@ -707,11 +757,15 @@ const portalTrialCards = [
         <header class="hero-head">
           <div class="hero-title-group">
             <h1>欢迎，{{ userName(auth.user) }}</h1>
+            <span class="perm-role-chip" :class="editable ? 'member' : 'viewer'">
+              {{
+                editable
+                  ? '企业编辑权限 · 可新建、填报、修订与整包导出'
+                  : `企业只读权限 · 禁新建修改 · ${exportable ? '已授权导出成稿' : '禁止导出文件'}`
+              }}
+            </span>
             <span v-if="loaded && rows.length" class="posture-grade-pill" :class="postureGrade.tone">
               {{ postureGrade.badge }}
-            </span>
-            <span v-if="loaded && rows.length" class="hero-sub">
-              {{ editable ? '本单位跨境数据流向与项目推进实时状态' : '只读查看模式 · 本单位共享项目实时同步' }}
             </span>
           </div>
 
@@ -784,22 +838,30 @@ const portalTrialCards = [
 
         <!-- 企业旗舰态势主看板 -->
         <section v-else class="posture-screen" data-testid="user-posture-screen">
-          <!-- 商业护航能力价值带 -->
+          <!-- 商业护航能力价值带（按编辑/只读与导出开关精准区分提示） -->
           <div v-if="kbSummary" class="assurance-ribbon">
             <span class="assure-main">
               <strong>全球法规底座实时护航：</strong>已联动 {{ kbSummary.covered_jurisdictions }} 国 {{ kbSummary.laws_in_force }} 部现行法规（{{ kbSummary.clauses_total.toLocaleString() }} 条精译条文）、{{ kbSummary.standards_active }} 项汽车标准与 {{ kbSummary.official_forms_total }} 套东道国官方原表
             </span>
             <span class="assure-pills">
               <RouterLink to="/knowledge" class="assure-link">查阅国别简报 →</RouterLink>
-              <span class="assure-chip">支持中英双语整包导出</span>
+              <span class="assure-chip" :class="{ warn: !editable && !exportable }">
+                {{
+                  editable
+                    ? '支持新建评估与中英双语整包导出'
+                    : exportable
+                      ? '只读审阅权限 · 已授权导出成稿'
+                      : '受控只读权限 · 仅限在线审阅（禁止导出）'
+                }}
+              </span>
             </span>
           </div>
 
-          <!-- 4 大核心进度舱 -->
+          <!-- 4 大核心进度舱（按编辑实操 vs 只读审阅权限精确映射） -->
           <div class="kpi-strip">
             <div class="kpi-tile">
               <div class="kpi-head-row">
-                <span class="kpi-label">在办评估项目</span>
+                <span class="kpi-label">{{ editable ? '在办评估项目' : '本单位项目审阅' }}</span>
                 <span class="kpi-chip">齐套 {{ summaryMetrics.projReady }}/{{ summaryMetrics.projTotal }}</span>
               </div>
               <div class="kpi-val-row">
@@ -812,8 +874,10 @@ const portalTrialCards = [
 
             <div class="kpi-tile">
               <div class="kpi-head-row">
-                <span class="kpi-label">必备文件就绪</span>
-                <span class="kpi-chip safe">中英双语可导</span>
+                <span class="kpi-label">{{ editable ? '必备文件编撰进度' : '本单位文书齐套审阅' }}</span>
+                <span class="kpi-chip" :class="editable || exportable ? 'safe' : 'gold'">
+                  {{ editable ? '中英双语可导' : (exportable ? '允许导出成稿' : '仅限在线审阅') }}
+                </span>
               </div>
               <div class="kpi-val-row">
                 <strong>{{ summaryMetrics.docsReady }} / {{ summaryMetrics.docsReq }}</strong>
@@ -825,9 +889,9 @@ const portalTrialCards = [
 
             <div class="kpi-tile">
               <div class="kpi-head-row">
-                <span class="kpi-label">风险压降闭环</span>
+                <span class="kpi-label">{{ editable ? '风险压降闭环' : '本单位风险压降监督' }}</span>
                 <span class="kpi-chip" :class="summaryMetrics.curHigh === 0 ? 'safe' : 'danger'">
-                  {{ summaryMetrics.curHigh === 0 ? '高风险清零' : '待落实措施' }}
+                  {{ summaryMetrics.curHigh === 0 ? '高风险清零' : (editable ? '待落实措施' : '经办整改中') }}
                 </span>
               </div>
               <div class="kpi-val-row">
@@ -846,8 +910,8 @@ const portalTrialCards = [
 
             <div class="kpi-tile">
               <div class="kpi-head-row">
-                <span class="kpi-label">海外属地准入</span>
-                <span class="kpi-chip gold">官方原表套打</span>
+                <span class="kpi-label">{{ editable ? '海外属地准入' : '海外准入办理审阅' }}</span>
+                <span class="kpi-chip gold">{{ editable ? '官方原表套打' : '准入进度查阅' }}</span>
               </div>
               <div class="kpi-val-row">
                 <strong>{{ summaryMetrics.admTotal }}</strong>
@@ -1115,11 +1179,11 @@ const portalTrialCards = [
               </div>
             </div>
 
-            <!-- 右栏：最近项目与办理进度（上） + 待处理事项与期限提醒（下） -->
+            <!-- 右栏：按企业编辑权限 vs 只读审阅权限精准区分标题与动作 -->
             <div class="posture-col posture-right">
               <div class="p-panel p-panel-flex" data-testid="home-recent">
                 <div class="p-panel-head">
-                  <h2>最近项目与办理进度</h2>
+                  <h2>{{ editable ? '最近项目与办理进度' : '本单位共享项目审阅列表' }}</h2>
                   <span class="p-head-links">
                     <RouterLink to="/documents" data-testid="home-recent-all">评估列表</RouterLink>
                     <RouterLink v-if="hasAdmission" to="/admission" data-testid="home-recent-all-admission">准入列表</RouterLink>
@@ -1139,7 +1203,7 @@ const portalTrialCards = [
                       <span class="p-mod-tag">{{ r.module }}</span>
                       <RouterLink :to="r.to" class="p-proj-title" @click.stop>{{ r.title }}</RouterLink>
                       <RouterLink :to="r.to" class="p-proj-go" @click.stop>
-                        {{ (!editable || r.ok) ? '查看 →' : '继续 →' }}
+                        {{ !editable ? '审阅 →' : (r.ok ? '查看 →' : '继续 →') }}
                       </RouterLink>
                     </div>
                     <div class="p-proj-meta">
@@ -1166,7 +1230,7 @@ const portalTrialCards = [
 
               <div class="p-panel p-panel-flex" data-testid="home-risk-todos">
                 <div class="p-panel-head">
-                  <h2>待处理事项与期限提醒</h2>
+                  <h2>{{ editable ? '待处理事项与期限提醒' : '审阅关注点与效期动态（只读）' }}</h2>
                   <span>{{ (overview?.deadlines?.length || 0) + (overview?.todos?.length || 0) }} 项</span>
                 </div>
                 <div v-if="overview?.deadlines?.length || overview?.todos?.length" class="p-scroll-list">
@@ -1179,7 +1243,7 @@ const portalTrialCards = [
                     <div class="p-todo-top">
                       <span class="p-todo-badge" :class="dl.tone === 'danger' ? 'danger' : dl.tone === 'warn' ? 'warning' : 'info'">法定效期</span>
                       <strong class="p-todo-status">{{ dl.status }}</strong>
-                      <span class="p-proj-go">查看 →</span>
+                      <span class="p-proj-go">{{ editable ? '查看 →' : '在线审阅 →' }}</span>
                     </div>
                     <div class="p-todo-title">{{ dl.title }}</div>
                   </RouterLink>
@@ -1192,8 +1256,10 @@ const portalTrialCards = [
                     data-testid="home-todo-row"
                   >
                     <div class="p-todo-top">
-                      <span class="p-todo-badge" :class="t.level">{{ TODO_TAG[t.kind] || '待办提醒' }}</span>
-                      <span class="p-proj-go">{{ editable ? `${t.action_label} →` : '查看详情 →' }}</span>
+                      <span class="p-todo-badge" :class="t.level">
+                        {{ editable ? (TODO_TAG[t.kind] || '待办提醒') : (TODO_TAG_VIEWER[t.kind] || '进展动态') }}
+                      </span>
+                      <span class="p-proj-go">{{ editable ? `${t.action_label} →` : '在线审阅 →' }}</span>
                     </div>
                     <div class="p-todo-title">{{ t.title }}</div>
                     <div class="p-todo-detail">{{ t.detail }}</div>
@@ -1316,63 +1382,113 @@ const portalTrialCards = [
   color: #475569;
 }
 
-/* 门户体验访客引导页 */
+/* 角色权限范围显式标签 */
+.perm-role-chip {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.perm-role-chip.member {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+.perm-role-chip.viewer {
+  background: #fffbeb;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+.perm-role-chip.portal {
+  background: #09172b;
+  color: #fde68a;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+}
+
+/* 门户体验访客：同款旗舰深海受控看板（仅公开法规覆盖，零企业数据） */
 .portal-welcome {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
+  background: var(--ub-screen);
+  border: 1px solid var(--ub-border);
   border-radius: 12px;
-  padding: 24px 28px;
+  padding: 20px 22px;
+  color: var(--ub-tx-1);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
+}
+.portal-badge-row {
+  margin-bottom: 6px;
 }
 .portal-head h1 {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   font-size: 20px;
-  color: #0f172a;
+  color: var(--ub-tx-1);
 }
 .portal-head p {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.75;
-  color: #475569;
-  max-width: 880px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ub-tx-2);
+  max-width: 980px;
+}
+.portal-kpi5 {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+@media (max-width: 1180px) {
+  .portal-kpi5 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.portal-map-panel {
+  background: var(--ub-panel);
+  border: 1px solid var(--ub-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.portal-map-stage {
+  min-height: 220px;
+}
+.portal-map-stage .world-svg {
+  max-height: 310px;
 }
 .portal-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  gap: 12px;
 }
 .portal-card {
   display: flex;
   align-items: flex-start;
   gap: 14px;
-  padding: 18px 20px;
-  border: 1px solid #e2e8f0;
+  padding: 15px 18px;
+  border: 1px solid var(--ub-border);
   border-radius: 10px;
-  background: #f8fafc;
-  color: #0f172a;
+  background: var(--ub-panel);
+  color: var(--ub-tx-1);
   text-decoration: none;
 }
 .portal-card:hover {
-  border-color: #2563eb;
-  background: #eff6ff;
+  border-color: var(--ub-accent);
 }
 .portal-card-body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
 }
 .portal-card-body strong {
-  font-size: 16px;
-  color: #0f172a;
+  font-size: 15px;
+  color: var(--ub-tx-1);
 }
 .portal-card-body span {
   font-size: 13px;
-  line-height: 1.6;
-  color: #475569;
+  line-height: 1.55;
+  color: var(--ub-tx-2);
 }
 
 /* 顶部标题与全屏栏 */
@@ -1555,6 +1671,9 @@ const portalTrialCards = [
   border-radius: 6px;
   padding: 2px 8px;
   white-space: nowrap;
+}
+.assure-chip.warn {
+  color: var(--ub-gold-tx);
 }
 
 .kpi-strip {
