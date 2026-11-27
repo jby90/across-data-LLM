@@ -166,7 +166,6 @@ interface GlobalKbSummary {
 }
 
 type UserMapCam = 'WORLD' | 'EUR_MENA' | 'APAC'
-type UserDeckTheme = 'flagship' | 'clean'
 
 const USER_CAMERAS: Record<UserMapCam, { label: string; s: number; cx: number; cy: number }> = {
   WORLD: { label: '全球视图', s: 1, cx: 480, cy: 220 },
@@ -174,7 +173,6 @@ const USER_CAMERAS: Record<UserMapCam, { label: string; s: number; cx: number; c
   APAC: { label: '亚太东盟走廊', s: 2.3, cx: 752, cy: 175 },
 }
 
-const USER_THEME_KEY = 'cyshuhe.user.cockpit.theme'
 const COUNTRIES: Record<string, string> = COUNTRY_NAMES
 const FOLD_LIMIT = 5
 
@@ -183,7 +181,6 @@ const boardEl = ref<HTMLElement | null>(null)
 const selectedRouteKey = ref<string>('ALL')
 const showGlobalOverlay = ref(false)
 const activeCam = ref<UserMapCam>('WORLD')
-const userTheme = ref<UserDeckTheme>('flagship')
 
 const camScale = ref(1)
 const camTx = ref(0)
@@ -202,25 +199,6 @@ const hasAdmission = computed(() => admItems.value.length > 0)
 
 const editable = computed(() => canEdit(auth.user))
 const isPortalTrial = computed(() => auth.user?.signup_source === 'portal')
-
-function readInitialUserTheme(): UserDeckTheme {
-  try {
-    const saved = localStorage.getItem(USER_THEME_KEY)
-    if (saved === 'clean' || saved === 'flagship') return saved
-  } catch {
-    /* 忽略浏览器存储限制 */
-  }
-  return 'flagship'
-}
-
-function setUserTheme(next: UserDeckTheme) {
-  userTheme.value = next
-  try {
-    localStorage.setItem(USER_THEME_KEY, next)
-  } catch {
-    /* 忽略浏览器存储限制 */
-  }
-}
 
 function setUserCamera(cam: UserMapCam) {
   activeCam.value = cam
@@ -651,7 +629,6 @@ const TODO_TAG: Record<string, string> = {
 }
 
 onMounted(() => {
-  userTheme.value = readInitialUserTheme()
   window.addEventListener('keydown', onKeydown)
   void loadHomeData()
 })
@@ -725,7 +702,7 @@ const portalTrialCards = [
       <div
         ref="boardEl"
         class="user-board"
-        :class="[`utheme-${userTheme}`, { 'is-fullscreen': isFullscreen, 'has-projects': loaded && rows.length > 0 }]"
+        :class="{ 'is-fullscreen': isFullscreen, 'has-projects': loaded && rows.length > 0 }"
       >
         <header class="hero-head">
           <div class="hero-title-group">
@@ -739,24 +716,6 @@ const portalTrialCards = [
           </div>
 
           <div class="hero-actions">
-            <div v-if="loaded && rows.length" class="utheme-switch" role="group" aria-label="看板外观切换">
-              <button
-                type="button"
-                class="utheme-btn"
-                :class="{ active: userTheme === 'flagship' }"
-                @click="setUserTheme('flagship')"
-              >
-                深海旗舰舱
-              </button>
-              <button
-                type="button"
-                class="utheme-btn"
-                :class="{ active: userTheme === 'clean' }"
-                @click="setUserTheme('clean')"
-              >
-                公文清爽舱
-              </button>
-            </div>
             <button
               v-if="loaded && rows.length"
               type="button"
@@ -1290,8 +1249,8 @@ const portalTrialCards = [
   font-weight: 600;
 }
 
-/* 企业端双主题变量（深海旗舰舱 vs 公文清爽舱：严守白底零阴影、零渐变、>=13px、字重仅 400/600） */
-.user-board.utheme-flagship {
+/* 唯一旗舰深海态势配色规范（无阴影、无花哨渐变、>=13px、字重仅 400/600） */
+.user-board {
   --ub-screen: #071324;
   --ub-panel: #0d1e36;
   --ub-inner: #09172b;
@@ -1314,31 +1273,6 @@ const portalTrialCards = [
   --ub-overlay: #1a3b63;
   --ub-active-land: #1d5ca8;
   --ub-lbl-stroke: #060e1c;
-}
-
-.user-board.utheme-clean {
-  --ub-screen: #f1f5f9;
-  --ub-panel: #ffffff;
-  --ub-inner: #f8fafc;
-  --ub-border: #cbd5e1;
-  --ub-accent: #1d4ed8;
-  --ub-link: #1d4ed8;
-  --ub-emerald: #059669;
-  --ub-emerald-tx: #047857;
-  --ub-gold: #b45309;
-  --ub-gold-tx: #b45309;
-  --ub-danger: #dc2626;
-  --ub-danger-tx: #b91c1c;
-  --ub-tx-1: #0f172a;
-  --ub-tx-2: #334155;
-  --ub-tx-muted: #64748b;
-  --ub-ocean: #e8eff8;
-  --ub-grid: #d4e0ee;
-  --ub-land: #dce4ee;
-  --ub-land-stroke: #b9c7d8;
-  --ub-overlay: #bfdbfe;
-  --ub-active-land: #2563eb;
-  --ub-lbl-stroke: #ffffff;
 }
 
 /* 门户体验访客与空态能力矩阵带 */
@@ -1508,30 +1442,6 @@ const portalTrialCards = [
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-}
-
-.utheme-switch {
-  display: inline-flex;
-  background: #f1f5f9;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 2px;
-  gap: 2px;
-}
-.utheme-btn {
-  border: none;
-  background: transparent;
-  color: #475569;
-  font-size: 13px;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.utheme-btn.active {
-  background: #1d4ed8;
-  color: #ffffff;
-  font-weight: 600;
 }
 
 .fs-btn {
@@ -2076,9 +1986,6 @@ const portalTrialCards = [
   stroke-dasharray: 5 5;
   opacity: 0.92;
   animation: routeFlow 2.4s linear infinite;
-}
-.user-board.utheme-clean .arc-dash {
-  stroke: #1d4ed8;
 }
 @media (prefers-reduced-motion: reduce) {
   .arc-dash {

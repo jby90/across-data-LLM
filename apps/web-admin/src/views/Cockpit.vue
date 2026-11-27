@@ -91,8 +91,6 @@ interface CockpitOverview {
 }
 
 type CameraKey = 'WORLD' | 'EUROPE' | 'ASIA' | 'MENA' | 'AMER'
-type DeckTheme = 'command' | 'ministry'
-type DeckFocus = 'foundation' | 'governance'
 
 const CAMERA_PRESETS: Record<CameraKey, { label: string; s: number; cx: number; cy: number }> = {
   WORLD: { label: '全球全景', s: 1, cx: 480, cy: 220 },
@@ -105,7 +103,7 @@ const CAMERA_PRESETS: Record<CameraKey, { label: string; s: number; cx: number; 
 const REGION_CODES: Record<Exclude<CameraKey, 'WORLD'>, Set<string>> = {
   EUROPE: new Set([
     'EU', 'DE', 'FR', 'IT', 'ES', 'NL', 'SE', 'PL', 'PT', 'BE', 'AT', 'IE', 'DK', 'FI',
-    'NO', 'CH', 'GB', 'CZ', 'HU', 'RO', 'GR', 'SK', 'SI', 'BG', 'HR', 'LT', 'LV', 'EE',
+    'NO', 'CH', 'GB', 'CZ', 'HU', 'RO', 'GR', 'AZ', 'SK', 'SI', 'BG', 'HR', 'LT', 'LV', 'EE',
     'LU', 'RU', 'TR', 'UA', 'BY', 'RS',
   ]),
   ASIA: new Set([
@@ -121,16 +119,12 @@ const ANCHOR_LABEL_CODES = new Set([
   'CN', 'SG', 'EU', 'DE', 'FR', 'MA', 'TN', 'EG', 'SA', 'AE', 'JP', 'US', 'CA', 'MX', 'BR', 'AR', 'AU', 'ZA', 'RU', 'IN', 'TH',
 ])
 
-const THEME_STORAGE_KEY = 'cyshuhe.admin.cockpit.theme'
-
 const route = useRoute()
 const router = useRouter()
 const boardRef = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const selectedGeoCode = ref<string>('ALL')
 const activeCamera = ref<CameraKey>('WORLD')
-const deckFocus = ref<DeckFocus>('foundation')
-const deckTheme = ref<DeckTheme>('command')
 const isFullscreen = ref(!props.opsMode && route.query.fullscreen === '1')
 const data = ref<CockpitOverview | null>(null)
 
@@ -138,25 +132,6 @@ const camScale = ref(1)
 const camTx = ref(0)
 const camTy = ref(0)
 let camAnimId: number | null = null
-
-function readInitialTheme(): DeckTheme {
-  try {
-    const saved = localStorage.getItem(THEME_STORAGE_KEY)
-    if (saved === 'ministry' || saved === 'command') return saved
-  } catch {
-    /* 忽略浏览器存储限制 */
-  }
-  return 'command'
-}
-
-function setTheme(next: DeckTheme) {
-  deckTheme.value = next
-  try {
-    localStorage.setItem(THEME_STORAGE_KEY, next)
-  } catch {
-    /* 忽略浏览器存储限制 */
-  }
-}
 
 function setCamera(cam: CameraKey) {
   activeCamera.value = cam
@@ -429,9 +404,9 @@ const executiveTakeaway = computed(() => {
   if (!d) return ''
   const hl = d.headline
   const trPct = hl.translation_coverage_pct !== null ? hl.translation_coverage_pct : 100
-  if (deckFocus.value === 'governance' && !props.opsMode) {
+  if (!props.opsMode) {
     const totalProj = hl.doc_projects_total + hl.admission_projects_total
-    return `平台治理实绩：当前服务 ${hl.active_organizations} 家活跃车企单位，在途跨境合规评估与海外准入共 ${totalProj} 个项目、打通 ${d.routes.length} 条跨洲数据流向；近 7 日累计安全留痕 ${d.operations.audit_events_7d} 条，入库质控与国家简报待更新保持零积压。`
+    return `全球法规底座与治理实况：已覆盖五大洲 ${hl.covered_jurisdictions} 个出海法域、收录现行有效法规 ${hl.laws_in_force} 部（${hl.clauses_total.toLocaleString()} 条可用条文，外文精译率 ${trPct}%）与中外标准 ${hl.standards_active} 项，支撑 ${hl.briefings_ready} 国合规简报、${hl.official_forms_total} 套法定原表及 ${totalProj} 个企业评估与准入项目闭环。`
   }
   return `全球法规底座实况：已覆盖五大洲 ${hl.covered_jurisdictions} 个汽车出海法域，收录现行有效法规 ${hl.laws_in_force} 部（${hl.clauses_total.toLocaleString()} 条可用条文）与中外标准 ${hl.standards_active} 项；外文条文中文精译率 ${trPct}%，全面支撑 ${hl.briefings_ready} 国八维合规简报与 ${hl.official_forms_total} 套东道国法定原表套打。`
 })
@@ -475,7 +450,6 @@ watch(
 )
 
 onMounted(() => {
-  deckTheme.value = readInitialTheme()
   window.addEventListener('keydown', onFullscreenKeydown)
   void load()
 })
@@ -492,11 +466,11 @@ onUnmounted(() => {
   <div
     ref="boardRef"
     class="cockpit-board"
-    :class="[`theme-${deckTheme}`, { 'is-fullscreen': isFullscreen }]"
+    :class="{ 'is-fullscreen': isFullscreen }"
     v-loading="loading"
     :data-testid="props.opsMode ? 'ops-admin-cockpit' : 'super-admin-cockpit'"
   >
-    <!-- 1. 领导汇报冠冕顶栏：实时在线脉冲 + 视角与主题秒切 -->
+    <!-- 1. 领导汇报冠冕顶栏 -->
     <header class="cockpit-header">
       <div class="crown-left">
         <div class="crown-mark" aria-hidden="true">数合</div>
@@ -513,44 +487,6 @@ onUnmounted(() => {
       </div>
 
       <div class="cockpit-actions">
-        <div v-if="!props.opsMode" class="seg-group" role="group" aria-label="汇报视角切换">
-          <button
-            type="button"
-            class="seg-btn"
-            :class="{ active: deckFocus === 'foundation' }"
-            @click="deckFocus = 'foundation'"
-          >
-            全局法规底座
-          </button>
-          <button
-            type="button"
-            class="seg-btn"
-            :class="{ active: deckFocus === 'governance' }"
-            @click="deckFocus = 'governance'"
-          >
-            车企治理实绩
-          </button>
-        </div>
-
-        <div class="seg-group" role="group" aria-label="展示底色切换">
-          <button
-            type="button"
-            class="seg-btn"
-            :class="{ active: deckTheme === 'command' }"
-            @click="setTheme('command')"
-          >
-            深海指挥大屏
-          </button>
-          <button
-            type="button"
-            class="seg-btn"
-            :class="{ active: deckTheme === 'ministry' }"
-            @click="setTheme('ministry')"
-          >
-            政务白底评审
-          </button>
-        </div>
-
         <el-button
           type="primary"
           :data-testid="props.opsMode ? 'ops-cockpit-fullscreen-toggle' : 'cockpit-fullscreen-toggle'"
@@ -1165,8 +1101,8 @@ onUnmounted(() => {
   }
 }
 
-/* 主题变量：默认深海指挥大屏，支持一键切换政务白底评审态（无阴影、无花哨渐变、全站 >=13px、字重仅 400/600） */
-.cockpit-board.theme-command {
+/* 唯一旗舰深海指挥大屏配色规范（无阴影、无花哨渐变、全站 >=13px、字重仅 400/600） */
+.cockpit-board {
   --ck-bg: #060d1b;
   --ck-header: #091428;
   --ck-card: #0b1629;
@@ -1189,34 +1125,7 @@ onUnmounted(() => {
   --ck-tier-high: #0ea5e9;
   --ck-tier-cn: #d97706;
   --ck-lbl-stroke: #050b17;
-}
 
-.cockpit-board.theme-ministry {
-  --ck-bg: #f1f5f9;
-  --ck-header: #ffffff;
-  --ck-card: #ffffff;
-  --ck-inner: #f8fafc;
-  --ck-border: #cbd5e1;
-  --ck-accent: #1d4ed8;
-  --ck-emerald: #059669;
-  --ck-emerald-tx: #047857;
-  --ck-gold: #b45309;
-  --ck-gold-tx: #b45309;
-  --ck-tx-1: #0f172a;
-  --ck-tx-2: #334155;
-  --ck-tx-muted: #64748b;
-  --ck-ocean: #e8eff8;
-  --ck-grid: #d5e1ef;
-  --ck-land: #dce4ee;
-  --ck-land-stroke: #b8c6d8;
-  --ck-tier-base: #93c5fd;
-  --ck-tier-mid: #3b82f6;
-  --ck-tier-high: #1d4ed8;
-  --ck-tier-cn: #d97706;
-  --ck-lbl-stroke: #ffffff;
-}
-
-.cockpit-board {
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1309,35 +1218,6 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-}
-
-.seg-group {
-  display: inline-flex;
-  background: var(--ck-inner);
-  border: 1px solid var(--ck-border);
-  border-radius: 6px;
-  padding: 2px;
-  gap: 2px;
-}
-
-.seg-btn {
-  border: none;
-  background: transparent;
-  color: var(--ck-tx-2);
-  font-size: 13px;
-  font-weight: 400;
-  padding: 5px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.seg-btn:hover {
-  color: var(--ck-tx-1);
-}
-.seg-btn.active {
-  background: var(--ck-accent);
-  color: #ffffff;
-  font-weight: 600;
 }
 
 .takeaway-ribbon {
