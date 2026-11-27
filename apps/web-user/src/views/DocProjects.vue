@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { canEdit, canExport, localTime } from '@cyshuhe/shared'
+import {
+  HOST_REPORT_LANGUAGES,
+  canEdit,
+  canExport,
+  inferHostLanguage,
+  localTime,
+  type HostReportLang,
+  type ReportOutputLang,
+} from '@cyshuhe/shared'
 import { useAuth } from '../auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
@@ -271,10 +279,26 @@ async function fetchFile(url: string, fallback: string) {
   document.body.appendChild(a); a.click(); a.remove()
   window.setTimeout(() => URL.revokeObjectURL(href), 30000)
 }
-async function download(d: DocView, kind: 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview') {
+type DocDlCmd = 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview' | 'i18n-docx' | 'i18n-pdf' | 'i18n-preview'
+const hostLang = ref<HostReportLang>('fr')
+const hostLangMeta = computed(() => HOST_REPORT_LANGUAGES.find((l) => l.code === hostLang.value) || HOST_REPORT_LANGUAGES[0])
+
+watch(
+  () => [project.value?.id, project.value?.route?.recipient_country, project.value?.route?.source_country] as const,
+  ([, rcp, src]) => {
+    if (rcp || src) hostLang.value = inferHostLanguage(rcp, src)
+  },
+  { immediate: true },
+)
+
+async function download(d: DocView, kind: DocDlCmd) {
   if (!project.value) return
   if (kind === 'en-preview') {
-    await openPreviewEn(d)
+    await openPreviewForeign(d, 'en')
+    return
+  }
+  if (kind === 'i18n-preview') {
+    await openPreviewForeign(d, hostLang.value)
     return
   }
   if (!downloadable.value) return
@@ -286,12 +310,21 @@ async function download(d: DocView, kind: 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 
     } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
     return
   }
+  if (kind === 'i18n-docx' || kind === 'i18n-pdf') {
+    const ext = kind === 'i18n-docx' ? 'docx' : 'pdf'
+    const lg = hostLang.value
+    busy.value = `dl-${d.code}-${lg}-${ext}`
+    try {
+      await fetchFile(`/api/analysis/tasks/${project.value.id}/documents/${d.code}/export-i18n.${ext}?lang=${lg}&draft=${d.state !== 'ready'}`, `${d.code}_${lg.toUpperCase()}.${ext}`)
+    } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
+    return
+  }
   busy.value = kind === 'docx' ? `dl-${d.code}` : `dl-${d.code}-${kind}`
   try {
     await fetchFile(`/api/analysis/tasks/${project.value.id}/documents/${d.code}/export.${kind}?draft=${d.state !== 'ready'}`, `${d.name}.${kind}`)
   } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
 }
-async function openPreviewEn(d: DocView) {
+async function openPreviewForeign(d: DocView, lg: 'en' | HostReportLang) {
   if (!project.value) return
   previewCode.value = d.code
   previewDraft.value = d.state !== 'ready'
@@ -300,15 +333,18 @@ async function openPreviewEn(d: DocView) {
   previewEditMode.value = false
   previewEdits.value = []
   showEditHistory.value = false
-  previewTitle.value = `${d.name}（英文版预览）`
+  const lgLabel = lg === 'en' ? '英文版' : `${hostLangMeta.value.nameZh}版`
+  previewTitle.value = `${d.name}（${lgLabel}预览）`
   previewBlocks.value = []
   previewVisible.value = true
   previewLoading.value = true
   try {
-    const res = await api.get<{ name: string; kind: 'edited' | 'official_docx' | 'standard'; blocks: PreviewBlock[] }>(
-      `/api/analysis/tasks/${project.value.id}/documents/${d.code}/preview-en?draft=${d.state !== 'ready'}`,
-    )
-    previewTitle.value = `${d.name} · ${res.name || 'English Edition'}`
+    const ep =
+      lg === 'en'
+        ? `/api/analysis/tasks/${project.value.id}/documents/${d.code}/preview-en?draft=${d.state !== 'ready'}`
+        : `/api/analysis/tasks/${project.value.id}/documents/${d.code}/preview-i18n?lang=${lg}&draft=${d.state !== 'ready'}`
+    const res = await api.get<{ name: string; kind: 'edited' | 'official_docx' | 'standard'; blocks: PreviewBlock[] }>(ep)
+    previewTitle.value = `${d.name} · ${res.name || lgLabel}`
     previewKind.value = res.kind
     previewBlocks.value = res.blocks || []
   } catch (e) {
@@ -352,10 +388,10 @@ async function openPreviewEdpbEn(d: DocView) {
     previewLoading.value = false
   }
 }
-async function downloadAll(draft: boolean, fmt: 'docx' | 'pdf' | 'xlsx' = 'docx', lang: 'zh' | 'en' = 'zh') {
+async function downloadAll(draft: boolean, fmt: 'docx' | 'pdf' | 'xlsx' = 'docx', lang: ReportOutputLang = 'zh') {
   if (!project.value || !downloadable.value) return
   busy.value = 'zip'
-  const suffix = lang === 'en' ? '_EN' : ''
+  const suffix = lang === 'zh' ? '' : `_${lang.toUpperCase()}`
   try { await fetchFile(`/api/analysis/doc-projects/${project.value.id}/export.zip?fmt=${fmt}&draft=${draft}&lang=${lang}`, `${project.value.title}${suffix}.zip`) } catch (e) { ElMessage.error((e as Error).message) } finally { busy.value = '' }
 }
 async function writePaper(d: DocView) {
@@ -1491,7 +1527,21 @@ function jumpFromCompare(id: string) {
               <div class="head-actions">
               <el-button v-if="editable && !locked" data-testid="doc-open-copilot" @click="openCopilot">辅助填写</el-button>
               <el-button v-if="editable && !locked && !allReady && queue.length" type="primary" data-testid="doc-continue" @click="continueFill">继续填写</el-button>
-              <el-dropdown v-if="downloadable" trigger="click" placement="bottom-end" @command="(c: string) => { const [kind, f, lg] = c.split(':'); void downloadAll(kind === 'draft', f as 'docx' | 'pdf' | 'xlsx', (lg === 'en' ? 'en' : 'zh')) }">
+              <el-select
+                v-if="downloadable"
+                v-model="hostLang"
+                style="width: 176px"
+                aria-label="属地报告输出语种"
+                data-testid="doc-host-lang-select"
+              >
+                <el-option
+                  v-for="lg in HOST_REPORT_LANGUAGES"
+                  :key="lg.code"
+                  :label="`属地语种：${lg.nameZh}`"
+                  :value="lg.code"
+                />
+              </el-select>
+              <el-dropdown v-if="downloadable" trigger="click" placement="bottom-end" @command="(c: string) => { const [kind, f, lg] = c.split(':'); void downloadAll(kind === 'draft', f as 'docx' | 'pdf' | 'xlsx', (lg as ReportOutputLang) || 'zh') }">
                 <el-button :type="allReady || !editable ? 'primary' : 'default'" :loading="busy === 'zip'" data-testid="doc-zip-menu">下载</el-button>
                 <template #dropdown><el-dropdown-menu>
                   <el-dropdown-item command="draft:docx:zh" data-testid="doc-zip-draft">全部初稿 · 中文 Word（ZIP）</el-dropdown-item>
@@ -1499,11 +1549,15 @@ function jumpFromCompare(id: string) {
                   <el-dropdown-item command="draft:xlsx:zh" data-testid="doc-zip-draft-xlsx">全部初稿 · 中文 Excel（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="draft:docx:en" data-testid="doc-zip-draft-en">全部初稿 · 英文 Word（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="draft:pdf:en">全部初稿 · 英文 PDF（ZIP）</el-dropdown-item>
+                  <el-dropdown-item :command="`draft:docx:${hostLang}`" data-testid="doc-zip-draft-i18n">全部初稿 · {{ hostLangMeta.nameZh }} Word（ZIP）</el-dropdown-item>
+                  <el-dropdown-item :command="`draft:pdf:${hostLang}`">全部初稿 · {{ hostLangMeta.nameZh }} PDF（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:docx:zh" :disabled="!allReady" divided data-testid="doc-zip-final">全部成稿 · 中文 Word（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:pdf:zh" :disabled="!allReady">全部成稿 · 中文 PDF（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:xlsx:zh" :disabled="!allReady" data-testid="doc-zip-final-xlsx">全部成稿 · 中文 Excel（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:docx:en" :disabled="!allReady" data-testid="doc-zip-final-en">全部成稿 · 英文 Word（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:pdf:en" :disabled="!allReady">全部成稿 · 英文 PDF（ZIP）</el-dropdown-item>
+                  <el-dropdown-item :command="`final:docx:${hostLang}`" :disabled="!allReady" data-testid="doc-zip-final-i18n">全部成稿 · {{ hostLangMeta.nameZh }} Word（ZIP）</el-dropdown-item>
+                  <el-dropdown-item :command="`final:pdf:${hostLang}`" :disabled="!allReady">全部成稿 · {{ hostLangMeta.nameZh }} PDF（ZIP）</el-dropdown-item>
                 </el-dropdown-menu></template>
               </el-dropdown>
               <el-tooltip v-else content="当前只读账号未开通导出权限" placement="top">
@@ -1802,8 +1856,8 @@ function jumpFromCompare(id: string) {
                 <AdmissionLaunch v-if="d.code === 'admission' && editable" :task-id="project.id" :disabled="locked" label="去办理" />
                 <el-button v-if="d.narrative && d.state === 'needs_paper' && d.paper?.state !== 'running'" size="small" type="primary" plain :disabled="locked" @click="writePaper(d)">生成论述</el-button>
                 <el-button v-if="!officialOnly(d)" size="small" :data-testid="`preview-${d.code}`" @click="openPreview(d)">{{ d.has_edpb_en ? '预览中文稿' : '预览' }}</el-button>
-                <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview') => download(d, f)">
-                  <el-button size="small" :loading="busy.startsWith(`dl-${d.code}`)" :data-testid="`dl-${d.code}`">{{ d.has_edpb_en ? '下载中文版' : '下载（中/英）' }}</el-button>
+                <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: DocDlCmd) => download(d, f)">
+                  <el-button size="small" :loading="busy.startsWith(`dl-${d.code}`)" :data-testid="`dl-${d.code}`">{{ d.has_edpb_en ? '下载中文/多语版' : '下载（中/英/属地语）' }}</el-button>
                   <template #dropdown><el-dropdown-menu>
                     <el-dropdown-item command="docx" :data-testid="`dl-${d.code}-word`">{{ d.state === 'ready' ? '中文版 · Word' : '中文初稿 · Word' }}</el-dropdown-item>
                     <el-dropdown-item command="pdf" :data-testid="`dl-${d.code}-pdf`">{{ d.state === 'ready' ? '中文版 · PDF' : '中文初稿 · PDF' }}</el-dropdown-item>
@@ -1813,6 +1867,9 @@ function jumpFromCompare(id: string) {
                       <el-dropdown-item command="en-docx" :data-testid="`dl-${d.code}-en-word`">{{ d.state === 'ready' ? '英文版 · Word' : '英文初稿 · Word' }}</el-dropdown-item>
                       <el-dropdown-item command="en-pdf" :data-testid="`dl-${d.code}-en-pdf`">{{ d.state === 'ready' ? '英文版 · PDF' : '英文初稿 · PDF' }}</el-dropdown-item>
                     </template>
+                    <el-dropdown-item command="i18n-preview" divided :data-testid="`preview-${d.code}-i18n`">预览{{ hostLangMeta.nameZh }}版（{{ hostLangMeta.native }}）</el-dropdown-item>
+                    <el-dropdown-item command="i18n-docx" :data-testid="`dl-${d.code}-i18n-word`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · Word` : `${hostLangMeta.nameZh}初稿 · Word` }}</el-dropdown-item>
+                    <el-dropdown-item command="i18n-pdf" :data-testid="`dl-${d.code}-i18n-pdf`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · PDF` : `${hostLangMeta.nameZh}初稿 · PDF` }}</el-dropdown-item>
                   </el-dropdown-menu></template>
                 </el-dropdown>
                 <el-tooltip v-else-if="!officialOnly(d)" content="当前只读账号未开通导出权限" placement="top">
@@ -1865,8 +1922,8 @@ function jumpFromCompare(id: string) {
                     <AdmissionLaunch v-if="d.code === 'admission' && editable" :task-id="project.id" :disabled="locked" label="去办理" />
                     <el-button v-if="d.narrative && d.state === 'needs_paper' && d.paper?.state !== 'running'" size="small" :disabled="locked" @click="writePaper(d)">生成论述</el-button>
                     <el-button v-if="!officialOnly(d)" size="small" :data-testid="`preview-${d.code}`" @click="openPreview(d)">预览</el-button>
-                    <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview') => download(d, f)">
-                      <el-button size="small" :loading="busy.startsWith(`dl-${d.code}`)" :data-testid="`dl-${d.code}`">下载（中/英）</el-button>
+                    <el-dropdown v-if="!officialOnly(d) && downloadable" trigger="click" @command="(f: DocDlCmd) => download(d, f)">
+                      <el-button size="small" :loading="busy.startsWith(`dl-${d.code}`)" :data-testid="`dl-${d.code}`">下载（中/英/属地语）</el-button>
                       <template #dropdown><el-dropdown-menu>
                         <el-dropdown-item command="docx" :data-testid="`dl-${d.code}-word`">{{ d.state === 'ready' ? '中文版 · Word' : '中文初稿 · Word' }}</el-dropdown-item>
                         <el-dropdown-item command="pdf" :data-testid="`dl-${d.code}-pdf`">{{ d.state === 'ready' ? '中文版 · PDF' : '中文初稿 · PDF' }}</el-dropdown-item>
@@ -1874,6 +1931,9 @@ function jumpFromCompare(id: string) {
                         <el-dropdown-item command="en-preview" divided :data-testid="`preview-${d.code}-en`">预览英文版</el-dropdown-item>
                         <el-dropdown-item command="en-docx" :data-testid="`dl-${d.code}-en-word`">{{ d.state === 'ready' ? '英文版 · Word' : '英文初稿 · Word' }}</el-dropdown-item>
                         <el-dropdown-item command="en-pdf" :data-testid="`dl-${d.code}-en-pdf`">{{ d.state === 'ready' ? '英文版 · PDF' : '英文初稿 · PDF' }}</el-dropdown-item>
+                        <el-dropdown-item command="i18n-preview" divided :data-testid="`preview-${d.code}-i18n`">预览{{ hostLangMeta.nameZh }}版（{{ hostLangMeta.native }}）</el-dropdown-item>
+                        <el-dropdown-item command="i18n-docx" :data-testid="`dl-${d.code}-i18n-word`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · Word` : `${hostLangMeta.nameZh}初稿 · Word` }}</el-dropdown-item>
+                        <el-dropdown-item command="i18n-pdf" :data-testid="`dl-${d.code}-i18n-pdf`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · PDF` : `${hostLangMeta.nameZh}初稿 · PDF` }}</el-dropdown-item>
                       </el-dropdown-menu></template>
                     </el-dropdown>
                     <el-tooltip v-else-if="!officialOnly(d)" content="当前只读账号未开通导出权限" placement="top">

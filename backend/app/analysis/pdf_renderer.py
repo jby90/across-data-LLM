@@ -341,7 +341,7 @@ def report_html(
           font-size:10.5pt;color:#000000;line-height:1.5;hyphens:none}}
         body.rtl-doc{{direction:rtl;text-align:right}}
         body.rtl-doc table{{direction:rtl}}
-        body.rtl-doc th{{text-align:right}}
+        body.rtl-doc th,body.rtl-doc td,body.rtl-doc th p,body.rtl-doc td p{{text-align:right}}
         header{{position:running(reportHeader);font-size:8pt;color:#64748b}}
         h1{{font-size:20pt;line-height:1.4;color:{head_col}}} h2{{font-size:14pt;color:{head_col}}}
         h3{{font-size:12pt;color:{head_col}}} h1,h2,h3{{break-after:avoid}}
@@ -398,15 +398,24 @@ def render_pdf(task, rv, **kwargs):
                 info.pop(k.encode(), None)
 
     with _RENDER_LOCK:
-        raw_pdf = HTML(
-            string=report_html(task, rv, **kwargs),
-            url_fetcher=OfflineFonts(
-                allowed_protocols={"file"},
-                fail_on_errors=True,
-            ),
-        ).write_pdf(
-            font_config=FontConfiguration(),
-            full_fonts=False,
-            finisher=_clear_pdf_info,
-        )
+        html_str = report_html(task, rv, **kwargs)
+        fc = FontConfiguration()
+        try:
+            raw_pdf = HTML(
+                string=html_str,
+                url_fetcher=OfflineFonts(
+                    allowed_protocols={"file"},
+                    fail_on_errors=True,
+                ),
+            ).write_pdf(
+                font_config=fc,
+                full_fonts=False,
+                finisher=_clear_pdf_info,
+            )
+        finally:
+            del fc
+            if any(ext_fam in html_str for ext_fam in _EXTENDED_SCRIPT_PATTERNS):
+                import gc
+
+                gc.collect()
     return sanitize_pdf_metadata(raw_pdf)

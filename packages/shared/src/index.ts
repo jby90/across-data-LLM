@@ -393,3 +393,69 @@ export function localTime(value: string | null | undefined, only?: 'date'): stri
   const day = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
   return only === 'date' ? day : `${day} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
+
+export type HostReportLang =
+  | 'fr'
+  | 'de'
+  | 'es'
+  | 'pt'
+  | 'it'
+  | 'nl'
+  | 'id'
+  | 'tr'
+  | 'pl'
+  | 'ja'
+  | 'ko'
+  | 'th'
+  | 'vi'
+  | 'ar'
+  | 'ru'
+
+export type ForeignReportLang = 'en' | HostReportLang
+export type ReportOutputLang = 'zh' | ForeignReportLang
+
+export const HOST_REPORT_LANGUAGES: Array<{ code: HostReportLang; nameZh: string; native: string }> = [
+  { code: 'fr', nameZh: '法语', native: 'Français' },
+  { code: 'de', nameZh: '德语', native: 'Deutsch' },
+  { code: 'es', nameZh: '西班牙语', native: 'Español' },
+  { code: 'pt', nameZh: '葡萄牙语', native: 'Português' },
+  { code: 'it', nameZh: '意大利语', native: 'Italiano' },
+  { code: 'nl', nameZh: '荷兰语', native: 'Nederlands' },
+  { code: 'id', nameZh: '印尼语', native: 'Bahasa Indonesia' },
+  { code: 'tr', nameZh: '土耳其语', native: 'Türkçe' },
+  { code: 'pl', nameZh: '波兰语', native: 'Polski' },
+  { code: 'ja', nameZh: '日语', native: '日本語' },
+  { code: 'ko', nameZh: '韩语', native: '한국어' },
+  { code: 'th', nameZh: '泰语', native: 'ภาษาไทย' },
+  { code: 'vi', nameZh: '越南语', native: 'Tiếng Việt' },
+  { code: 'ar', nameZh: '阿拉伯语', native: 'العربية' },
+  { code: 'ru', nameZh: '俄语', native: 'Русский' },
+]
+
+const HOST_LANG_BY_KEY: Record<string, HostReportLang> = {
+  FR: 'fr', 法国: 'fr', MA: 'fr', 摩洛哥: 'fr', BE: 'fr', 比利时: 'fr', LU: 'fr', 卢森堡: 'fr', CA: 'fr', 加拿大: 'fr',
+  DE: 'de', 德国: 'de', AT: 'de', 奥地利: 'de', CH: 'de', 瑞士: 'de',
+  ES: 'es', 西班牙: 'es', MX: 'es', 墨西哥: 'es', AR: 'es', 阿根廷: 'es', CL: 'es', 智利: 'es', CO: 'es', 哥伦比亚: 'es', PE: 'es', 秘鲁: 'es', UY: 'es', 乌拉圭: 'es',
+  PT: 'pt', 葡萄牙: 'pt', BR: 'pt', 巴西: 'pt',
+  IT: 'it', 意大利: 'it',
+  NL: 'nl', 荷兰: 'nl',
+  ID: 'id', 印度尼西亚: 'id', 印尼: 'id', MY: 'id', 马来西亚: 'id',
+  TR: 'tr', 土耳其: 'tr',
+  PL: 'pl', 波兰: 'pl',
+  JP: 'ja', 日本: 'ja',
+  KR: 'ko', 韩国: 'ko',
+  TH: 'th', 泰国: 'th',
+  VN: 'vi', 越南: 'vi',
+  AR_LANG: 'ar', TN: 'ar', 突尼斯: 'ar', EG: 'ar', 埃及: 'ar', LB: 'ar', 黎巴嫩: 'ar', AE: 'ar', 阿联酋: 'ar', SA: 'ar', 沙特阿拉伯: 'ar', 沙特: 'ar', QA: 'ar', 卡塔尔: 'ar', KW: 'ar', 科威特: 'ar', OM: 'ar', 阿曼: 'ar', BH: 'ar', 巴林: 'ar', JO: 'ar', 约旦: 'ar', DZ: 'ar', 阿尔及利亚: 'ar',
+  RU: 'ru', 俄罗斯: 'ru', KZ: 'ru', 哈萨克斯坦: 'ru', BY: 'ru', 白俄罗斯: 'ru',
+}
+
+export function inferHostLanguage(recipient?: string | null, source?: string | null): HostReportLang {
+  for (const raw of [recipient, source]) {
+    const key = String(raw || '').trim()
+    if (!key) continue
+    const hit = HOST_LANG_BY_KEY[key.toUpperCase()] || HOST_LANG_BY_KEY[key]
+    if (hit) return hit
+  }
+  return 'fr'
+}

@@ -3074,7 +3074,7 @@ async def export_delivery_aid(
 async def export_all(
     project_id: uuid.UUID, user: UserDep, session: SessionDep,
     fmt: Literal["docx", "pdf", "xlsx"] = "docx", draft: bool = True,
-    lang: Literal["zh", "en"] = "zh",
+    lang: Literal["zh", "en", "fr", "de", "es", "pt", "it", "nl", "id", "tr", "pl", "ja", "ko", "th", "vi", "ar", "ru"] = "zh",
 ) -> Response:
     """All eight documents in one package. As a draft, what is unanswered reads “【待补充】”."""
     task = await _project(session, project_id, user)
@@ -3141,22 +3141,27 @@ async def export_all(
                     originals.append((f"{prefix}{named(task_title, label_part, ext='pdf')}", raw_form))
             if official_only(code, values.get("source_country", ""), forms):
                 continue  # 发出国有官方表：申报表就是官方原表，不再放通用申报表
-        if lang == "en" and fmt in ("docx", "pdf"):
+        if lang != "zh" and fmt in ("docx", "pdf"):
             try:
                 from app.analysis.english_report import strip_and_translate_cjk
+                from app.analysis.multilingual_report import clean_and_gate_target_text
 
-                en_blocks, label_en, header_en = await D._build_en_doc(session, task, code, user, draft)
-                task_en = strip_and_translate_cjk(task_title, fallback="Compliance_Project")
+                tr_blocks, label_tr, header_tr = await D._build_foreign_doc(session, task, code, user, draft, lang=lang)
+                task_tr = (
+                    strip_and_translate_cjk(task_title, fallback="Compliance_Project")
+                    if lang == "en"
+                    else clean_and_gate_target_text(task_title, lang, fallback="Compliance_Project")
+                )
                 if via_word or fmt == "docx":
-                    en_bytes = await asyncio.to_thread(
-                        build_docx, Rendered(blocks=en_blocks), header_en, foreign=True, table_style="formal_black"
+                    tr_bytes = await asyncio.to_thread(
+                        build_docx, Rendered(blocks=tr_blocks), header_tr, foreign=True, table_style="formal_black"
                     )
-                    made.append((f"{i:02d}_{named(task_en, label_en, ext='docx')}", en_bytes))
+                    made.append((f"{i:02d}_{named(task_tr, label_tr, ext='docx')}", tr_bytes))
                 else:
-                    en_pdf = await asyncio.to_thread(
-                        build_pdf, Rendered(blocks=en_blocks), header_en, foreign=True, table_style="formal_black"
+                    tr_pdf = await asyncio.to_thread(
+                        build_pdf, Rendered(blocks=tr_blocks), header_tr, foreign=True, table_style="formal_black"
                     )
-                    originals.append((f"{i:02d}_{named(task_en, label_en, ext='pdf')}", en_pdf))
+                    originals.append((f"{i:02d}_{named(task_tr, label_tr, ext='pdf')}", tr_pdf))
             except HTTPException as exc:
                 skipped.append(f"{code}：{exc.detail}")
             continue

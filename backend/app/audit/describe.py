@@ -129,6 +129,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("GET", "/api/analysis/tasks/{task_id}/documents/{code}/export.pdf"): "下载合规文件（PDF）",
     ("GET", "/api/analysis/tasks/{task_id}/documents/{code}/export-en.docx"): "下载合规文件英文版（Word）",
     ("GET", "/api/analysis/tasks/{task_id}/documents/{code}/export-en.pdf"): "下载合规文件英文版（PDF）",
+    ("GET", "/api/analysis/tasks/{task_id}/documents/{code}/export-i18n.docx"): "下载合规文件属地语种版（Word）",
+    ("GET", "/api/analysis/tasks/{task_id}/documents/{code}/export-i18n.pdf"): "下载合规文件属地语种版（PDF）",
     ("GET", "/api/analysis/tasks/{task_id}/documents/dpia/export-edpb-en.docx"): "下载欧盟标准英文范本（Word）",
     ("GET", "/api/analysis/tasks/{task_id}/documents/dpia/export-edpb-en.pdf"): "下载欧盟标准英文范本（PDF）",
     ("POST", "/api/analysis/tasks/{task_id}/documents/{code}/saved"): "保存合规文件",

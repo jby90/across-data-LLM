@@ -1888,7 +1888,7 @@ async def export_user_report(
     user: UserDep,
     session: SessionDep,
     dimension: Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"] | None = None,
-    lang: Literal["zh", "en"] = "zh",
+    lang: Literal["zh", "en", "fr", "de", "es", "pt", "it", "nl", "id", "tr", "pl", "ja", "ko", "th", "vi", "ar", "ru"] = "zh",
 ) -> Response:
     task = await session.get(AnalysisTask, task_id)
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
@@ -1929,35 +1929,35 @@ async def export_user_report(
     # Native PDF shaping must not block chat progress or SSE heartbeats.
     started = perf_counter()
     cache_hit = False
-    if lang == "en":
+    if lang != "zh":
         import io
         import zipfile
 
         from app.analysis.document_templates import Rendered, build_docx, build_pdf
-        from app.analysis.english_report import build_english_consulting_report_blocks
+        from app.analysis.multilingual_report import build_multilingual_consulting_report_blocks
 
         if ext == "zip":
-            def _build_en_zip() -> bytes:
+            def _build_i18n_zip() -> bytes:
                 buf = io.BytesIO()
                 with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    full_blks, full_stem, full_hdr = build_english_consulting_report_blocks(task, export_view, None)
+                    full_blks, full_stem, full_hdr = build_multilingual_consulting_report_blocks(task, export_view, None, lang=lang)
                     zf.writestr(f"00_{full_stem}.docx", build_docx(Rendered(blocks=full_blks), full_hdr, foreign=True, table_style="formal_black"))
                     for d_idx in range(1, 9):
                         d_code = f"D{d_idx}"
-                        d_blks, d_stem, d_hdr = build_english_consulting_report_blocks(task, export_view, d_code)
+                        d_blks, d_stem, d_hdr = build_multilingual_consulting_report_blocks(task, export_view, d_code, lang=lang)
                         zf.writestr(f"{d_idx:02d}_{d_stem}.docx", build_docx(Rendered(blocks=d_blks), d_hdr, foreign=True, table_style="formal_black"))
                 return buf.getvalue()
 
-            data = await run_in_threadpool(_build_en_zip)
-            _, en_stem, _ = build_english_consulting_report_blocks(task, export_view, None)
-            out_fname = f"{en_stem}.zip"
+            data = await run_in_threadpool(_build_i18n_zip)
+            _, i18n_stem, _ = build_multilingual_consulting_report_blocks(task, export_view, None, lang=lang)
+            out_fname = f"{i18n_stem}.zip"
         else:
-            en_blks, en_stem, en_hdr = build_english_consulting_report_blocks(task, export_view, dimension)
+            i18n_blks, i18n_stem, i18n_hdr = build_multilingual_consulting_report_blocks(task, export_view, dimension, lang=lang)
             builder_fn = build_docx if ext == "docx" else build_pdf
             data = await run_in_threadpool(
-                builder_fn, Rendered(blocks=en_blks), en_hdr, foreign=True, table_style="formal_black"
+                builder_fn, Rendered(blocks=i18n_blks), i18n_hdr, foreign=True, table_style="formal_black"
             )
-            out_fname = f"{en_stem}.{ext}"
+            out_fname = f"{i18n_stem}.{ext}"
     elif ext == "zip":
         data = await run_in_threadpool(build_report_zip, task, export_view)
         out_fname = export_filename(task, rv, ext, dimension)

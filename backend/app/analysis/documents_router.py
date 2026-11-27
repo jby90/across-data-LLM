@@ -9,7 +9,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -1633,14 +1633,31 @@ async def preview_edpb_en(
     }
 
 
-async def _build_en_doc(
+ForeignReportLangLiteral = Literal[
+    "en", "fr", "de", "es", "pt", "it", "nl", "id", "tr", "pl", "ja", "ko", "th", "vi", "ar", "ru"
+]
+
+
+@user_router.get("/report-languages")
+async def get_report_languages(
+    user: UserDep,
+    source_country: str = "",
+    recipient_country: str = "",
+) -> dict:
+    from app.analysis.multilingual_report import list_supported_report_languages
+
+    return list_supported_report_languages(source_country, recipient_country)
+
+
+async def _build_foreign_doc(
     session: AsyncSession,
     task: AnalysisTask,
     code: str,
     user: Principal,
     draft: bool,
+    lang: str = "en",
 ) -> tuple[list[dict], str, str]:
-    from app.analysis.english_report import build_english_doc_blocks
+    from app.analysis.multilingual_report import build_multilingual_doc_blocks
     from app.iam.models import Role
 
     zh_blocks, _name_zh, _ctx_zh = await _export_source(session, task, code, draft)
@@ -1651,16 +1668,123 @@ async def _build_en_doc(
         if k.startswith(DOC_FACT_PREFIX) and isinstance(v, str) and v.strip()
     }
     merged_vals = {**answered, **{k: v for k, v in values.items() if v}}
-    return await build_english_doc_blocks(
+    return await build_multilingual_doc_blocks(
         session,
         task,
         code,
         zh_blocks,
         merged_vals,
         citations,
+        lang=lang,
         draft=draft,
         read_only_viewer=(user.role == Role.VIEWER),
     )
+
+
+async def _build_en_doc(
+    session: AsyncSession,
+    task: AnalysisTask,
+    code: str,
+    user: Principal,
+    draft: bool,
+) -> tuple[list[dict], str, str]:
+    return await _build_foreign_doc(session, task, code, user, draft, lang="en")
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/export-i18n.docx")
+async def export_document_i18n_docx(
+    task_id: uuid.UUID,
+    code: str,
+    user: UserDep,
+    session: SessionDep,
+    lang: ForeignReportLangLiteral = "en",
+    draft: bool = False,
+) -> Response:
+    if not user.can_export:
+        raise HTTPException(403, "当前账号无导出文件权限")
+    if lang == "en":
+        return await export_document_en_docx(task_id=task_id, code=code, user=user, session=session, draft=draft)
+
+    from app.analysis.multilingual_report import clean_and_gate_target_text
+
+    task = await _task(session, task_id, user)
+    task_title_raw = task.title
+    tr_blocks, label_tr, header_tr = await _build_foreign_doc(session, task, code, user, draft, lang=lang)
+    task_tr = clean_and_gate_target_text(task_title_raw, lang, fallback="Compliance_Project")
+    await session.close()
+    docx_bytes = await asyncio.to_thread(
+        build_docx,
+        Rendered(blocks=tr_blocks),
+        header_tr,
+        foreign=True,
+        table_style="formal_black",
+    )
+    return Response(
+        docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": content_disposition(named(task_tr, label_tr, ext="docx"))},
+    )
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/export-i18n.pdf")
+async def export_document_i18n_pdf(
+    task_id: uuid.UUID,
+    code: str,
+    user: UserDep,
+    session: SessionDep,
+    lang: ForeignReportLangLiteral = "en",
+    draft: bool = False,
+) -> Response:
+    if not user.can_export:
+        raise HTTPException(403, "当前账号无导出文件权限")
+    if lang == "en":
+        return await export_document_en_pdf(task_id=task_id, code=code, user=user, session=session, draft=draft)
+
+    from app.analysis.multilingual_report import clean_and_gate_target_text
+
+    task = await _task(session, task_id, user)
+    task_title_raw = task.title
+    tr_blocks, label_tr, header_tr = await _build_foreign_doc(session, task, code, user, draft, lang=lang)
+    task_tr = clean_and_gate_target_text(task_title_raw, lang, fallback="Compliance_Project")
+    await session.close()
+    pdf_bytes = await asyncio.to_thread(
+        build_pdf,
+        Rendered(blocks=tr_blocks),
+        header_tr,
+        foreign=True,
+        table_style="formal_black",
+    )
+    return Response(
+        pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": content_disposition(named(task_tr, label_tr, ext="pdf"))},
+    )
+
+
+@user_router.get("/tasks/{task_id}/documents/{code}/preview-i18n")
+async def preview_document_i18n(
+    task_id: uuid.UUID,
+    code: str,
+    user: UserDep,
+    session: SessionDep,
+    lang: ForeignReportLangLiteral = "en",
+    draft: bool = True,
+) -> dict:
+    if lang == "en":
+        res_en = await preview_document_en(task_id=task_id, code=code, user=user, session=session, draft=draft)
+        return {**res_en, "lang": "en"}
+
+    from app.analysis.multilingual_report import LANGUAGE_META
+
+    task = await _task(session, task_id, user)
+    tr_blocks, label_tr, _header_tr = await _build_foreign_doc(session, task, code, user, draft, lang=lang)
+    meta = LANGUAGE_META.get(lang, {})
+    return {
+        "lang": lang,
+        "name": f"{meta.get('name_zh', lang)} ({meta.get('native', lang)}) · {label_tr.replace('_', ' ')}",
+        "kind": "standard",
+        "blocks": tr_blocks,
+    }
 
 
 @user_router.get("/tasks/{task_id}/documents/{code}/export-en.docx")

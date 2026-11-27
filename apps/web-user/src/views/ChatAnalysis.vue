@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { startProgressStream, type StreamState, canEdit, canExport, localTime } from '@cyshuhe/shared'
+import {
+  HOST_REPORT_LANGUAGES,
+  startProgressStream,
+  type StreamState,
+  canEdit,
+  canExport,
+  inferHostLanguage,
+  localTime,
+  type HostReportLang,
+  type ReportOutputLang,
+} from '@cyshuhe/shared'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
@@ -953,7 +963,18 @@ function serverFilename(res: Response): string | null {
   return /filename="([^"]+)"/i.exec(header)?.[1] ?? null
 }
 
-async function download(ext: 'docx' | 'pdf' | 'zip', dimension?: string, lang: 'zh' | 'en' = 'zh') {
+const reportHostLang = ref<HostReportLang>('fr')
+const reportHostMeta = computed(() => HOST_REPORT_LANGUAGES.find((l) => l.code === reportHostLang.value) || HOST_REPORT_LANGUAGES[0])
+
+watch(
+  () => detail.value?.country_code,
+  (cc) => {
+    if (cc) reportHostLang.value = inferHostLanguage(cc)
+  },
+  { immediate: true },
+)
+
+async function download(ext: 'docx' | 'pdf' | 'zip', dimension?: string, lang: ReportOutputLang = 'zh') {
   if (!downloadable.value || !detail.value || !report.value || exportJob.value) return
   if (report.value.source_integrity_alerts?.length) {
     ElMessage.error('报告引用的原文来源异常，已停止导出，请核实来源后重新分析')
@@ -962,12 +983,13 @@ async function download(ext: 'docx' | 'pdf' | 'zip', dimension?: string, lang: '
   const id = detail.value.id
   const country = detail.value.country_code
   const ver = report.value.version_no
-  const label = `${dimension ? `${dimensionName(dimension)}章节` : '完整报告'}${lang === 'en' ? '（英文版）' : ''} · ${ext.toUpperCase()}`
+  const langTag = lang === 'zh' ? '' : lang === 'en' ? '（英文版）' : `（${HOST_REPORT_LANGUAGES.find((l) => l.code === lang)?.nameZh || lang}版）`
+  const label = `${dimension ? `${dimensionName(dimension)}章节` : '完整报告'}${langTag} · ${ext.toUpperCase()}`
   exportJob.value = {taskId: id, label, started: Date.now(), phase: 'preparing', received: 0, total: null}
   try {
     const q = new URLSearchParams()
     if (dimension) q.set('dimension', dimension)
-    if (lang === 'en') q.set('lang', 'en')
+    if (lang !== 'zh') q.set('lang', lang)
     const qs = q.toString()
     const res = await fetch(`/api/analysis/tasks/${id}/reports/${ver}/export.${ext}${qs ? '?' + qs : ''}`, {
       headers: { Authorization: `Bearer ${api.token()}` },
@@ -1334,6 +1356,21 @@ onUnmounted(() => {
                   :value="r.version_no"
                 />
               </el-select>
+              <el-select
+                v-if="downloadable"
+                v-model="reportHostLang"
+                size="small"
+                style="width: 156px"
+                aria-label="属地报告语种"
+                data-testid="chat-host-lang-select"
+              >
+                <el-option
+                  v-for="lg in HOST_REPORT_LANGUAGES"
+                  :key="lg.code"
+                  :label="`属地语种：${lg.nameZh}`"
+                  :value="lg.code"
+                />
+              </el-select>
               <el-dropdown v-if="downloadable" trigger="click"
                 ><el-button size="small" :loading="!!currentExport" :disabled="!!exportJob || report.status === 'analysis_failed'">{{ currentExport ? '正在导出' : '导出报告' }}</el-button
                 ><template #dropdown
@@ -1350,6 +1387,12 @@ onUnmounted(() => {
                       >英文报告 · PDF</el-dropdown-item
                     ><el-dropdown-item data-testid="btn-export-en-zip" @click="download('zip', undefined, 'en')"
                       >英文整份与八章 Word 压缩包</el-dropdown-item
+                    ><el-dropdown-item divided data-testid="btn-export-host-docx" @click="download('docx', undefined, reportHostLang)"
+                      >{{ reportHostMeta.nameZh }}报告 · Word</el-dropdown-item
+                    ><el-dropdown-item data-testid="btn-export-host-pdf" @click="download('pdf', undefined, reportHostLang)"
+                      >{{ reportHostMeta.nameZh }}报告 · PDF</el-dropdown-item
+                    ><el-dropdown-item data-testid="btn-export-host-zip" @click="download('zip', undefined, reportHostLang)"
+                      >{{ reportHostMeta.nameZh }}整份与八章 Word 压缩包</el-dropdown-item
                     ></el-dropdown-menu
                   ></template
                 ></el-dropdown
