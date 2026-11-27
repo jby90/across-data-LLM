@@ -3500,3 +3500,269 @@ async def list_public_standards(
             for r in rows
         ],
     }
+
+
+@admin_router.get("/posture", summary="全球法规知识底座与采集巡检态势概览（运维与超管共用底座视图，不含租户与审计数据）")
+async def admin_knowledge_posture(
+    _: AdminSideDep,
+    session: SessionDep,
+) -> dict[str, Any]:
+    """Return global regulatory, translation, knowledge-graph, briefing, official-form, and source-patrol
+    posture metrics without touching tenant organizations, accounts, enterprise projects, or audit logs."""
+    from sqlalchemy import text as sql_text
+
+    from app.analysis.documents_router import _CN_OFFICIAL
+    from app.analysis.workflow_engine import country_name_zh
+    from app.forms import service as forms_service
+    from app.iam.cockpit_router import _kb_posture, _safe_pct
+    from app.sources.attention import attention_of
+
+    now = datetime.now(UTC)
+    kb = await _kb_posture(session)
+    docs_by_cc = kb["docs_by_cc"]
+    clauses_by_cc = kb["clauses_by_cc"]
+    foreign_clauses_by_cc = kb["foreign_clauses_by_cc"]
+    translated_by_cc = kb["translated_by_cc"]
+    approved_tr_by_cc = kb["approved_tr_by_cc"]
+    kg_nodes_by_cc = kb["kg_nodes_by_cc"]
+    kg_by_type = kb["kg_by_type"]
+    kg_edges_by_cc = kb["kg_edges_by_cc"]
+    standards_by_cc = kb["standards_by_cc"]
+    wp_by_cc = kb["wp_by_cc"]
+    whitepapers_outdated = kb["whitepapers_outdated"]
+    adm_entries_by_cc = kb["adm_entries_by_cc"]
+    quality_unpassed = kb["quality_unpassed"]
+
+    forms_by_cc: dict[str, int] = {}
+    for f in [*_CN_OFFICIAL, *forms_service.catalog().values()]:
+        cc = str(f.get("country") or f.get("country_code") or "").upper()
+        if cc:
+            forms_by_cc[cc] = forms_by_cc.get(cc, 0) + 1
+
+    site_rows = await session.execute(select(SourceSite).where(SourceSite.enabled.is_(True)))
+    monitor_sites = list(site_rows.scalars().all())
+    sites_total_by_cc: dict[str, int] = {}
+    sites_attention_by_cc: dict[str, int] = {}
+    attention_sites_total = 0
+    for s in monitor_sites:
+        cc = s.country_code
+        sites_total_by_cc[cc] = sites_total_by_cc.get(cc, 0) + 1
+        att = attention_of(
+            enabled=s.enabled,
+            terms_status=s.terms_status,
+            consecutive_failures=s.consecutive_failures,
+            last_run_at=s.last_run_at,
+            interval_hours=s.interval_hours,
+            now=now,
+        )
+        if s.enabled and att:
+            sites_attention_by_cc[cc] = sites_attention_by_cc.get(cc, 0) + 1
+            attention_sites_total += 1
+
+    pending_updates = int(
+        (
+            await session.execute(
+                sql_text("SELECT count(DISTINCT change_id) FROM update_impacts WHERE state = 'open'")
+            )
+        ).scalar_one()
+        or 0
+    )
+    opinion_total = int(
+        (await session.execute(sql_text("SELECT count(*) FROM opinion_items"))).scalar_one() or 0
+    )
+
+    non_sovereign = {"ZZ", "INTL", "--", ""}
+    candidate_codes = (
+        set(docs_by_cc)
+        | set(clauses_by_cc)
+        | set(kg_nodes_by_cc)
+        | set(standards_by_cc)
+        | set(wp_by_cc)
+        | set(adm_entries_by_cc)
+        | set(forms_by_cc)
+    ) - non_sovereign
+    all_codes = sorted(
+        (c for c in candidate_codes if docs_by_cc.get(c, 0) > 0 or standards_by_cc.get(c, 0) > 0),
+        key=lambda c: (
+            0 if c in ("CN", "SG", "EU", "DE", "MA", "TN", "EG") else 1,
+            -docs_by_cc.get(c, 0),
+            -clauses_by_cc.get(c, 0),
+            c,
+        ),
+    )
+
+    countries: list[dict[str, Any]] = []
+    for cc in all_codes:
+        f_total = foreign_clauses_by_cc.get(cc, 0)
+        f_trans = translated_by_cc.get(cc, 0)
+        is_zh_native = cc == "CN" and f_total == 0
+        wp_info = wp_by_cc.get(cc, {"ready": False, "updated_at": None})
+        countries.append(
+            {
+                "country_code": cc,
+                "country_name_zh": country_name_zh(cc),
+                "is_origin_country": cc == "CN",
+                "laws_count": docs_by_cc.get(cc, 0),
+                "clauses_count": clauses_by_cc.get(cc, 0),
+                "is_zh_native": is_zh_native,
+                "foreign_clauses_count": f_total,
+                "translated_clauses_count": f_trans,
+                "approved_clauses_count": approved_tr_by_cc.get(cc, 0),
+                "translation_pct": (
+                    100.0 if is_zh_native and clauses_by_cc.get(cc, 0) > 0 else _safe_pct(f_trans, f_total)
+                ),
+                "standards_count": standards_by_cc.get(cc, 0),
+                "kg_nodes_count": kg_nodes_by_cc.get(cc, 0),
+                "kg_edges_count": kg_edges_by_cc.get(cc, 0),
+                "briefing_ready": bool(wp_info["ready"]),
+                "briefing_updated_at": wp_info["updated_at"],
+                "admission_entries_count": adm_entries_by_cc.get(cc, 0),
+                "official_forms_count": forms_by_cc.get(cc, 0),
+                "monitor_sites_count": sites_total_by_cc.get(cc, 0),
+                "attention_sites_count": sites_attention_by_cc.get(cc, 0),
+                "enterprise_projects_count": 0,
+            }
+        )
+
+    total_foreign = sum(foreign_clauses_by_cc.values())
+    total_translated = sum(translated_by_cc.values())
+    intl_standards_count = sum(v for k, v in standards_by_cc.items() if k in ("ZZ", "INTL"))
+    national_standards_count = sum(v for k, v in standards_by_cc.items() if k not in ("ZZ", "INTL"))
+    covered_count = len([c for c in countries if c["laws_count"] > 0 or c["standards_count"] > 0])
+
+    return {
+        "generated_at": now.isoformat(),
+        "headline": {
+            "covered_jurisdictions": covered_count,
+            "laws_in_force": sum(docs_by_cc.values()),
+            "laws_total": kb["laws_total"],
+            "laws_archived_total": kb["laws_archived_total"],
+            "clauses_total": sum(clauses_by_cc.values()),
+            "foreign_clauses_total": total_foreign,
+            "translated_clauses_total": total_translated,
+            "translation_coverage_pct": _safe_pct(total_translated, total_foreign),
+            "standards_active": sum(standards_by_cc.values()),
+            "intl_standards_count": intl_standards_count,
+            "national_standards_count": national_standards_count,
+            "standards_cn": standards_by_cc.get("CN", national_standards_count),
+            "standards_intl": intl_standards_count,
+            "standards_international": intl_standards_count,
+            "kg_nodes_total": sum(kg_nodes_by_cc.values()),
+            "kg_edges_total": sum(kg_edges_by_cc.values()),
+            "briefings_ready": sum(
+                1 for k, v in wp_by_cc.items() if k not in ("CN", "ZZ", "INTL") and v["ready"]
+            ),
+            "whitepapers_outdated": whitepapers_outdated,
+            "admission_entries_total": sum(adm_entries_by_cc.values()),
+            "official_forms_total": sum(forms_by_cc.values()),
+            "official_forms_eu": forms_by_cc.get("EU", 0),
+            "active_organizations": 0,
+            "doc_projects_total": 0,
+            "admission_projects_total": 0,
+            "consulting_chats_total": 0,
+            "opinion_items_total": opinion_total,
+        },
+        "kg_node_breakdown": [
+            {"label": "国家与地区", "count": kg_by_type.get("COUNTRY", 0)},
+            {"label": "监管机构", "count": kg_by_type.get("REGULATOR", 0)},
+            {"label": "法规文件", "count": kg_by_type.get("INSTRUMENT", 0)},
+            {"label": "数据类型", "count": kg_by_type.get("DATA_CATEGORY", 0)},
+            {"label": "合规义务", "count": kg_by_type.get("OBLIGATION", 0)},
+            {"label": "违规罚则", "count": kg_by_type.get("PENALTY", 0)},
+        ],
+        "account_summary": {
+            "super_admins": 0,
+            "ops_admins": 0,
+            "enterprise_members": 0,
+            "ordinary_viewers": 0,
+            "portal_onboarded": 0,
+            "trial_visitors": 0,
+        },
+        "operations": {
+            "monitor_sites_total": len(monitor_sites),
+            "attention_sites_total": attention_sites_total,
+            "pending_updates": pending_updates,
+            "quality_unpassed": quality_unpassed,
+            "whitepapers_outdated": whitepapers_outdated,
+            "audit_events_7d": 0,
+        },
+        "routes": [],
+        "countries": countries,
+    }
+
+
+@user_router.get("/posture-summary", summary="用户端全球法规与准入底座能力概览（纯公共法规知识计数，零跨租户数据）")
+async def user_knowledge_posture_summary(
+    _: UserDep,
+    session: SessionDep,
+) -> dict[str, Any]:
+    """Public knowledge-base coverage summary for enterprise users, read-only viewers, and portal trial visitors."""
+    from app.analysis.documents_router import _CN_OFFICIAL
+    from app.analysis.workflow_engine import country_name_zh
+    from app.forms import service as forms_service
+    from app.iam.cockpit_router import _kb_posture, _safe_pct
+
+    kb = await _kb_posture(session)
+    docs_by_cc = kb["docs_by_cc"]
+    clauses_by_cc = kb["clauses_by_cc"]
+    foreign_clauses_by_cc = kb["foreign_clauses_by_cc"]
+    translated_by_cc = kb["translated_by_cc"]
+    standards_by_cc = kb["standards_by_cc"]
+    wp_by_cc = kb["wp_by_cc"]
+    adm_entries_by_cc = kb["adm_entries_by_cc"]
+
+    forms_by_cc: dict[str, int] = {}
+    for f in [*_CN_OFFICIAL, *forms_service.catalog().values()]:
+        cc = str(f.get("country") or f.get("country_code") or "").upper()
+        if cc:
+            forms_by_cc[cc] = forms_by_cc.get(cc, 0) + 1
+
+    non_sovereign = {"ZZ", "INTL", "--", ""}
+    candidate_codes = (
+        set(docs_by_cc)
+        | set(clauses_by_cc)
+        | set(standards_by_cc)
+        | set(wp_by_cc)
+        | set(adm_entries_by_cc)
+        | set(forms_by_cc)
+    ) - non_sovereign
+    all_codes = sorted(
+        (c for c in candidate_codes if docs_by_cc.get(c, 0) > 0 or standards_by_cc.get(c, 0) > 0),
+        key=lambda c: (-docs_by_cc.get(c, 0), -clauses_by_cc.get(c, 0), c),
+    )
+
+    countries = [
+        {
+            "country_code": cc,
+            "country_name_zh": country_name_zh(cc),
+            "laws_count": docs_by_cc.get(cc, 0),
+            "clauses_count": clauses_by_cc.get(cc, 0),
+            "standards_count": standards_by_cc.get(cc, 0),
+            "briefing_ready": bool(wp_by_cc.get(cc, {}).get("ready")),
+            "admission_entries_count": adm_entries_by_cc.get(cc, 0),
+            "official_forms_count": forms_by_cc.get(cc, 0),
+        }
+        for cc in all_codes
+    ]
+    total_foreign = sum(foreign_clauses_by_cc.values())
+    total_translated = sum(translated_by_cc.values())
+    intl_std = sum(v for k, v in standards_by_cc.items() if k in ("ZZ", "INTL"))
+    cn_std = standards_by_cc.get("CN", sum(v for k, v in standards_by_cc.items() if k not in ("ZZ", "INTL")))
+
+    return {
+        "covered_jurisdictions": len(countries),
+        "laws_in_force": sum(docs_by_cc.values()),
+        "clauses_total": sum(clauses_by_cc.values()),
+        "translation_coverage_pct": _safe_pct(total_translated, total_foreign) or 100.0,
+        "standards_active": sum(standards_by_cc.values()),
+        "standards_cn": cn_std,
+        "standards_intl": intl_std,
+        "kg_nodes_total": sum(kb["kg_nodes_by_cc"].values()),
+        "kg_edges_total": sum(kb["kg_edges_by_cc"].values()),
+        "briefings_ready": sum(
+            1 for k, v in wp_by_cc.items() if k not in ("CN", "ZZ", "INTL") and v["ready"]
+        ),
+        "admission_entries_total": sum(adm_entries_by_cc.values()),
+        "official_forms_total": sum(forms_by_cc.values()),
+        "countries": countries,
+    }

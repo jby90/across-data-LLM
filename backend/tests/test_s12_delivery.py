@@ -64,7 +64,9 @@ def test_pdf_selectable_multilingual_and_snapshot_unchanged():
     assert any("\u0600" <= c <= "\u06ff" for c in text)
     assert "D3" in text and "v3" in text and "待核对" in text
     assert rv.dimensions_json == before
-    assert len(verified_fonts()) == 3
+    assert len(verified_fonts()) == 7 and {"inter", "notosanssc", "notonaskharabic"} <= set(
+        verified_fonts()
+    )
     assert build_report_docx(task, rv, "D3").startswith(b"PK")
 
 

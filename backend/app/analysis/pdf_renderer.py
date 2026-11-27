@@ -223,6 +223,28 @@ def _localize_inline_enums(value: object) -> str:
     )
 
 
+_CORE_FONT_FAMILIES: tuple[str, ...] = ("notosanssc", "notonaskharabic", "inter")
+_EXTENDED_SCRIPT_PATTERNS: dict[str, re.Pattern[str]] = {
+    "notosanskr": re.compile(r"[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]"),
+    "notosansthai": re.compile(r"[\u0e00-\u0e7f]"),
+    "notosansbengali": re.compile(r"[\u0980-\u09ff]"),
+    "notosanshebrew": re.compile(r"[\u0590-\u05ff\ufb1d-\ufb4f]"),
+}
+
+
+def _active_fonts_for_html(fonts: dict[str, str], body_html: str) -> dict[str, str]:
+    """Emit @font-face for the 3 core families always, plus extended script fonts only when needed."""
+    selected: dict[str, str] = {}
+    for name, uri in fonts.items():
+        if name in _CORE_FONT_FAMILIES:
+            selected[name] = uri
+            continue
+        pat = _EXTENDED_SCRIPT_PATTERNS.get(name)
+        if pat is None or pat.search(body_html):
+            selected[name] = uri
+    return selected
+
+
 def report_html(
     task,
     rv,
@@ -236,24 +258,86 @@ def report_html(
     rtl: bool = False,
 ):
     fonts = verified_fonts()
-    css_fonts = "\n".join(
-        f"@font-face{{font-family:'{name}';src:url('{uri}');font-weight:100 900}}"
-        for name, uri in fonts.items()
-    )
     bdr_col = "#0a105d" if table_style == "edpb" else "#000000"
     head_col = "#0a105d" if table_style == "edpb" else "#000000"
     outer_w = "0.5pt" if table_style == "edpb" else "0.75pt"
     html_lang = "ar" if rtl else "zh-CN"
     body_attr = " dir='rtl' class='rtl-doc'" if rtl else ""
     top_slot = "@top-right" if rtl else "@top-left"
-    parts = [
+    body_parts = [
+        f"<header>{_text(context)}" + (f"<br>{_text(notices[0])}" if notices else "") + "</header>",
+    ]
+    if blocks is not None:
+        body_parts.append(_blocks_html(blocks))
+    else:
+        body_parts += [
+            f"<h1>{_text(country)} 汽车数据跨境合规评估报告 {_text(dimension or '八维度')}</h1>",
+            _p(f"任务：{task.title} | v{rv.version_no} | 车型：{task.vehicle_model}", "meta"),
+            *[_p(n, "notice") for n in notices],
+            _p(review_overview(rv.dimensions_json)),
+            _p(f"生成时引用策略：{policy_label(rv.citation_policy)}", "meta"),
+            "<h2>一、执行摘要</h2>",
+            _rp(rv.executive_summary),
+            "<h2>二、合规分析判定矩阵</h2>",
+        ]
+        for idx, finding in enumerate(task.findings_json or [], 1):
+            body_parts.extend(
+                [
+                    '<section class="finding">',
+                    _rp(f"[{idx}] {finding.get('business_fact', '')}"),
+                    _p(
+                        f"{finding.get('document_title', '')} {finding.get('clause_number', '')} "
+                        f"(v{finding.get('version_no', 1)}) | 风险：{_risk_zh(finding.get('risk_level', ''))}"
+                    ),
+                    _rp(f"义务：{finding.get('compliance_obligation', '')}"),
+                    _p(finding.get("basis_quote", ""), "citation"),
+                    "</section>",
+                ]
+            )
+        if not task.findings_json:
+            body_parts.append(_p("该版本未保存判定矩阵快照，请查看本章引用；未借用当前任务数据。"))
+        body_parts.append("<h2>三、评估章节</h2>")
+        for dim in rv.dimensions_json:
+            body_parts.append(
+                f"<h3>{_text(dim.get('dimension_code'))} "
+                f"{_text(dim.get('dimension_title'))} / {_text(_risk_zh(dim.get('risk_level')))}</h3>"
+            )
+            if dim.get("missing_gap_note"):
+                body_parts.append(_p("核查缺口：" + dim["missing_gap_note"], "notice"))
+            body_parts.append(_rp(_localize_inline_enums(dim.get("content_markdown"))))
+            for cite in dim.get("citations", []) or []:
+                body_parts.extend(
+                    [
+                        '<aside class="citation-block">',
+                        _p(
+                            f"引用 {cite.get('citation_tag', '')}：{cite.get('document_title', '')} "
+                            f"{cite.get('clause_number', '')} (v{cite.get('version_no', 1)})",
+                            "citation",
+                        ),
+                        _p(cite.get("source_notice"), "meta") if cite.get("source_notice") else "",
+                        _p(cite.get("quote_original")),
+                        _p(cite.get("quote_zh")) if cite.get("quote_zh") else "",
+                        _p(f"来源：{cite.get('source_url') or '未提供'}", "meta"),
+                        _p(f"人工复核：{review_label(cite)}；{review_detail(cite)}", "meta"),
+                        "</aside>",
+                    ]
+                )
+    body_html = "".join(body_parts)
+    active_fonts = _active_fonts_for_html(fonts, body_html)
+    css_fonts = "\n".join(
+        f"@font-face{{font-family:'{name}';src:url('{uri}');font-weight:100 900}}"
+        for name, uri in active_fonts.items()
+    )
+    ext_stack = ",".join(k for k in active_fonts if k not in _CORE_FONT_FAMILIES)
+    font_stack = f"inter,notosanssc,{ext_stack + ',' if ext_stack else ''}notonaskharabic,sans-serif"
+    head_parts = [
         f"<!doctype html><html lang='{html_lang}'><meta charset='utf-8'><style>",
         css_fonts,
         f"""
         @page {{size:A4; margin:28mm 18mm 22mm;
           {top_slot} {{content:element(reportHeader)}}
           @bottom-center {{content:counter(page) ' / ' counter(pages);font-size:9pt}}}}
-        body{{font-family:inter,notosanssc,notosanskr,notosansthai,notosansbengali,notosanshebrew,notonaskharabic,sans-serif;
+        body{{font-family:{font_stack};
           font-size:10.5pt;color:#000000;line-height:1.5;hyphens:none}}
         body.rtl-doc{{direction:rtl;text-align:right}}
         body.rtl-doc table{{direction:rtl}}
@@ -285,63 +369,8 @@ def report_html(
         table.grid td{{font-size:9.5pt}} table.grid td.blank{{border:0}}
         .ref .refhead{{font-weight:700;font-size:9.5pt}}
         </style><body{body_attr}>""",
-        f"<header>{_text(context)}" + (f"<br>{_text(notices[0])}" if notices else "") + "</header>",
     ]
-    if blocks is not None:
-        return "".join(parts) + _blocks_html(blocks) + "</body></html>"
-    parts += [
-        f"<h1>{_text(country)} 汽车数据跨境合规评估报告 {_text(dimension or '八维度')}</h1>",
-        _p(f"任务：{task.title} | v{rv.version_no} | 车型：{task.vehicle_model}", "meta"),
-        *[_p(n, "notice") for n in notices],
-        _p(review_overview(rv.dimensions_json)),
-        _p(f"生成时引用策略：{policy_label(rv.citation_policy)}", "meta"),
-        "<h2>一、执行摘要</h2>",
-        _rp(rv.executive_summary),
-        "<h2>二、合规分析判定矩阵</h2>",
-    ]
-    for idx, finding in enumerate(task.findings_json or [], 1):
-        parts.extend(
-            [
-                '<section class="finding">',
-                _rp(f"[{idx}] {finding.get('business_fact', '')}"),
-                _p(
-                    f"{finding.get('document_title', '')} {finding.get('clause_number', '')} "
-                    f"(v{finding.get('version_no', 1)}) | 风险：{_risk_zh(finding.get('risk_level', ''))}"
-                ),
-                _rp(f"义务：{finding.get('compliance_obligation', '')}"),
-                _p(finding.get("basis_quote", ""), "citation"),
-                "</section>",
-            ]
-        )
-    if not task.findings_json:
-        parts.append(_p("该版本未保存判定矩阵快照，请查看本章引用；未借用当前任务数据。"))
-    parts.append("<h2>三、评估章节</h2>")
-    for dim in rv.dimensions_json:
-        parts.append(
-            f"<h3>{_text(dim.get('dimension_code'))} "
-            f"{_text(dim.get('dimension_title'))} / {_text(_risk_zh(dim.get('risk_level')))}</h3>"
-        )
-        if dim.get("missing_gap_note"):
-            parts.append(_p("核查缺口：" + dim["missing_gap_note"], "notice"))
-        parts.append(_rp(_localize_inline_enums(dim.get("content_markdown"))))
-        for cite in dim.get("citations", []) or []:
-            parts.extend(
-                [
-                    '<aside class="citation-block">',
-                    _p(
-                        f"引用 {cite.get('citation_tag', '')}：{cite.get('document_title', '')} "
-                        f"{cite.get('clause_number', '')} (v{cite.get('version_no', 1)})",
-                        "citation",
-                    ),
-                    _p(cite.get("source_notice"), "meta") if cite.get("source_notice") else "",
-                    _p(cite.get("quote_original")),
-                    _p(cite.get("quote_zh")) if cite.get("quote_zh") else "",
-                    _p(f"来源：{cite.get('source_url') or '未提供'}", "meta"),
-                    _p(f"人工复核：{review_label(cite)}；{review_detail(cite)}", "meta"),
-                    "</aside>",
-                ]
-            )
-    return "".join(parts) + "</body></html>"
+    return "".join(head_parts) + body_html + "</body></html>"
 
 
 def render_pdf(task, rv, **kwargs):

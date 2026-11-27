@@ -234,6 +234,8 @@ async def _generate(factory: async_sessionmaker, code: str) -> None:
                     blocks, meta = await wp.write_whitepaper(session, code)
                     await wp.save(session, code, blocks, meta)
                     await session.commit()
+    except wp.WhitepaperError as exc:
+        log.warning("白皮书生成未完成：%s — %s", code, exc)
     except Exception:  # noqa: BLE001 - 后台任务：失败只记录，用户端仍看到上一版
         log.exception("白皮书生成失败：%s", code)
     finally:
@@ -263,7 +265,7 @@ async def update_whitepaper(
 
 
 class SyncDimensionsIn(BaseModel):
-    dimensions: list[str] = Field(default_factory=lambda: ["D1", "D3"], min_length=1, max_length=8)
+    dimensions: list[str] = Field(..., min_length=1, max_length=8)
 
 
 async def _sync_dims_job(factory: async_sessionmaker, code: str, dims: list[str]) -> None:
@@ -277,6 +279,8 @@ async def _sync_dims_job(factory: async_sessionmaker, code: str, dims: list[str]
                     blocks, meta = await wp.sync_dimensions(session, code, dims)
                     await wp.save(session, code, blocks, meta)
                     await session.commit()
+    except wp.WhitepaperError as exc:
+        log.warning("白皮书受影响维度增量同步未完成：%s %s — %s", code, dims, exc)
     except Exception:  # noqa: BLE001
         log.exception("白皮书受影响维度增量同步失败：%s %s", code, dims)
     finally:

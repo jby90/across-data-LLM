@@ -61,6 +61,7 @@ interface Row {
   status: string
   short: string
   ok: boolean
+  pct: number
   at: string
   routeKey: string
   to: { path: string; query: Record<string, string> }
@@ -138,16 +139,61 @@ interface ComplianceOverview {
   todos: OverviewTodo[]
 }
 
+interface GlobalKbCountry {
+  country_code: string
+  country_name_zh: string
+  laws_count: number
+  clauses_count: number
+  standards_count: number
+  briefing_ready: boolean
+  admission_entries_count: number
+  official_forms_count: number
+}
+interface GlobalKbSummary {
+  covered_jurisdictions: number
+  laws_in_force: number
+  clauses_total: number
+  translation_coverage_pct: number
+  standards_active: number
+  standards_cn: number
+  standards_intl: number
+  kg_nodes_total: number
+  kg_edges_total: number
+  briefings_ready: number
+  admission_entries_total: number
+  official_forms_total: number
+  countries: GlobalKbCountry[]
+}
+
+type UserMapCam = 'WORLD' | 'EUR_MENA' | 'APAC'
+type UserDeckTheme = 'flagship' | 'clean'
+
+const USER_CAMERAS: Record<UserMapCam, { label: string; s: number; cx: number; cy: number }> = {
+  WORLD: { label: '全球视图', s: 1, cx: 480, cy: 220 },
+  EUR_MENA: { label: '欧非中东走廊', s: 2.25, cx: 520, cy: 145 },
+  APAC: { label: '亚太东盟走廊', s: 2.3, cx: 752, cy: 175 },
+}
+
+const USER_THEME_KEY = 'cyshuhe.user.cockpit.theme'
 const COUNTRIES: Record<string, string> = COUNTRY_NAMES
 const FOLD_LIMIT = 5
 
 const isFullscreen = ref(false)
 const boardEl = ref<HTMLElement | null>(null)
 const selectedRouteKey = ref<string>('ALL')
+const showGlobalOverlay = ref(false)
+const activeCam = ref<UserMapCam>('WORLD')
+const userTheme = ref<UserDeckTheme>('flagship')
+
+const camScale = ref(1)
+const camTx = ref(0)
+const camTy = ref(0)
+let camAnimId: number | null = null
 
 const recentExpanded = ref(false)
 const todosExpanded = ref(false)
 const overview = ref<ComplianceOverview | null>(null)
+const kbSummary = ref<GlobalKbSummary | null>(null)
 const docItems = ref<DocItem[]>([])
 const progress = ref<Record<string, Progress>>({})
 const admItems = ref<AdmItem[]>([])
@@ -156,6 +202,56 @@ const hasAdmission = computed(() => admItems.value.length > 0)
 
 const editable = computed(() => canEdit(auth.user))
 const isPortalTrial = computed(() => auth.user?.signup_source === 'portal')
+
+function readInitialUserTheme(): UserDeckTheme {
+  try {
+    const saved = localStorage.getItem(USER_THEME_KEY)
+    if (saved === 'clean' || saved === 'flagship') return saved
+  } catch {
+    /* 忽略浏览器存储限制 */
+  }
+  return 'flagship'
+}
+
+function setUserTheme(next: UserDeckTheme) {
+  userTheme.value = next
+  try {
+    localStorage.setItem(USER_THEME_KEY, next)
+  } catch {
+    /* 忽略浏览器存储限制 */
+  }
+}
+
+function setUserCamera(cam: UserMapCam) {
+  activeCam.value = cam
+  const preset = USER_CAMERAS[cam]
+  const targetS = preset.s
+  const targetTx = 480 - preset.cx * targetS
+  const targetTy = 220 - preset.cy * targetS
+  if (camAnimId !== null) {
+    cancelAnimationFrame(camAnimId)
+    camAnimId = null
+  }
+  const startS = camScale.value
+  const startTx = camTx.value
+  const startTy = camTy.value
+  const t0 = performance.now()
+  const dur = 300
+  const tick = (now: number) => {
+    const p = Math.min(1, (now - t0) / dur)
+    const ease = 1 - Math.pow(1 - p, 3)
+    camScale.value = startS + (targetS - startS) * ease
+    camTx.value = startTx + (targetTx - startTx) * ease
+    camTy.value = startTy + (targetTy - startTy) * ease
+    if (p < 1) camAnimId = requestAnimationFrame(tick)
+    else camAnimId = null
+  }
+  camAnimId = requestAnimationFrame(tick)
+}
+
+const mapCameraTransform = computed(
+  () => `translate(${camTx.value.toFixed(2)} ${camTy.value.toFixed(2)}) scale(${camScale.value.toFixed(4)})`,
+)
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && isFullscreen.value) {
@@ -227,6 +323,7 @@ const rows = computed<Row[]>(() => {
       const st = docShort(p)
       const mr = mapRouteByProject.value.get(d.id)
       const rKey = mr && mr.source_code && mr.recipient_code ? `${mr.source_code}->${mr.recipient_code}` : ''
+      const pct = p && p.total > 0 ? Math.min(100, Math.round((p.ready / p.total) * 100)) : st.ok ? 100 : 35
       return {
         key: `d-${d.id}`,
         projectId: d.id,
@@ -236,6 +333,7 @@ const rows = computed<Row[]>(() => {
         status: docStatus(p),
         short: st.short,
         ok: st.ok,
+        pct,
         at: d.updated_at || d.created_at || '',
         routeKey: rKey,
         to: { path: '/documents', query: { project: d.id } },
@@ -252,6 +350,7 @@ const rows = computed<Row[]>(() => {
         status: admStatus(a),
         short: st.short,
         ok: st.ok,
+        pct: st.ok || a.ready ? 100 : 55,
         at: a.updated_at,
         routeKey: a.country_code ? `ADM:${a.country_code}` : '',
         to: { path: '/admission', query: { project: a.id } },
@@ -339,23 +438,79 @@ const activeCountryCodes = computed(() => {
   return codes
 })
 
+const globalLibraryCodes = computed(() => {
+  const s = new Set<string>()
+  for (const c of kbSummary.value?.countries || []) {
+    if (WORLD_COUNTRY_PATHS[c.country_code] && !activeCountryCodes.value.has(c.country_code)) {
+      s.add(c.country_code)
+    }
+  }
+  return s
+})
+
 const backgroundMapEntries = computed(() =>
-  Object.entries(WORLD_COUNTRY_PATHS).filter(([cc]) => !activeCountryCodes.value.has(cc)),
+  Object.entries(WORLD_COUNTRY_PATHS).filter(
+    ([cc]) => !activeCountryCodes.value.has(cc) && !(showGlobalOverlay.value && globalLibraryCodes.value.has(cc)),
+  ),
 )
 
+const globalOverlayEntries = computed(() => {
+  if (!showGlobalOverlay.value) return []
+  return (kbSummary.value?.countries || [])
+    .filter((c) => WORLD_COUNTRY_PATHS[c.country_code] && !activeCountryCodes.value.has(c.country_code))
+    .map((c) => ({
+      code: c.country_code,
+      d: WORLD_COUNTRY_PATHS[c.country_code] || '',
+      name: c.country_name_zh,
+      laws: c.laws_count,
+    }))
+})
+
 const activeMapEntries = computed(() =>
-  [...activeCountryCodes.value].map((cc) => {
-    const hub = getCountryHub(cc)
-    const lbl = hub ? getCountryLabelOffset(cc, hub) : null
-    return {
-      code: cc,
-      d: WORLD_COUNTRY_PATHS[cc] || '',
-      hub,
-      lbl,
-      name: COUNTRIES[cc] || cc,
-    }
-  }),
+  [...activeCountryCodes.value].map((cc) => ({
+    code: cc,
+    d: WORLD_COUNTRY_PATHS[cc] || '',
+    name: COUNTRIES[cc] || cc,
+    isCn: cc === 'CN',
+  })),
 )
+
+const screenHubNodes = computed(() => {
+  const s = camScale.value
+  const tx = camTx.value
+  const ty = camTy.value
+  const placed: Array<{ x: number; y: number }> = []
+  return [...activeCountryCodes.value]
+    .map((cc) => {
+      const hub = getCountryHub(cc)
+      if (!hub) return null
+      const sx = hub[0] * s + tx
+      const sy = hub[1] * s + ty
+      if (sx < 14 || sx > 946 || sy < 14 || sy > 426) return null
+      const baseLbl = getCountryLabelOffset(cc, hub)
+      const lx = Math.max(24, Math.min(936, sx + (baseLbl.x - hub[0])))
+      const ly = Math.max(18, Math.min(424, sy + (baseLbl.y - hub[1])))
+      const highlighted = isCountryHighlighted(cc)
+      let showLabel = true
+      if (!highlighted && placed.some((p) => Math.abs(p.x - lx) < 72 && Math.abs(p.y - ly) < 16)) {
+        showLabel = false
+      }
+      if (showLabel) placed.push({ x: lx, y: ly })
+      return {
+        code: cc,
+        name: COUNTRIES[cc] || cc,
+        isCn: cc === 'CN',
+        sx,
+        sy,
+        lx,
+        ly,
+        anchor: baseLbl.anchor,
+        highlighted,
+        showLabel,
+      }
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+})
 
 const selectedArc = computed(() => arcGroups.value.find((g) => g.key === selectedRouteKey.value) || null)
 const selectedAdmCountry = computed(() => {
@@ -405,7 +560,29 @@ const summaryMetrics = computed(() => {
   const clearedHigh = rs?.high_cleared ?? s?.high_risk_cleared_total ?? 0
   const admTotal = s?.admission_total ?? admItems.value.length
   const admReady = s?.admission_ready_or_approved ?? admItems.value.filter((x) => x.ready).length
-  return { projTotal, projReady, docsReady, docsReq, curHigh, clearedHigh, admTotal, admReady }
+  const projPct = projTotal > 0 ? Math.round((projReady / projTotal) * 100) : 0
+  const docsPct = docsReq > 0 ? Math.round((docsReady / docsReq) * 100) : 100
+  const admPct = admTotal > 0 ? Math.round((admReady / admTotal) * 100) : 100
+  return { projTotal, projReady, docsReady, docsReq, curHigh, clearedHigh, admTotal, admReady, projPct, docsPct, admPct }
+})
+
+const postureGrade = computed(() => {
+  if (summaryMetrics.value.curHigh > 0) {
+    return {
+      tone: 'warn',
+      badge: `风险重点管控 · ${summaryMetrics.value.curHigh} 项高风险待闭环`,
+    }
+  }
+  if (summaryMetrics.value.docsPct >= 85) {
+    return {
+      tone: 'safe',
+      badge: '高风险动态清零 · 合规受控放行态',
+    }
+  }
+  return {
+    tone: 'info',
+    badge: '高风险已清零 · 法定文书齐套推进中',
+  }
 })
 
 const legalDistribution = computed<RouteBucket[]>(() => {
@@ -422,27 +599,47 @@ const legalDistribution = computed<RouteBucket[]>(() => {
 
 const maxLegalCount = computed(() => Math.max(1, ...legalDistribution.value.map((x) => x.count)))
 
+const riskMaxScale = computed(() => {
+  const rs = overview.value?.risk_summary
+  if (!rs) return 1
+  return Math.max(1, rs.init_high, rs.current_high, rs.init_medium, rs.current_medium, rs.init_low, rs.current_low)
+})
+
 async function loadHomeData() {
   try {
     localStorage.removeItem('home-doc-progress-v2')
   } catch {
     /* 忽略浏览器存储限制 */
   }
+
+  const kbPromise = api.get<GlobalKbSummary>('/api/knowledge/posture-summary').catch(() => null)
+
   if (isPortalTrial.value) {
+    kbSummary.value = await kbPromise
     loaded.value = true
     return
   }
   try {
-    const res = await api.get<ComplianceOverview>('/api/analysis/doc-projects/compliance-overview')
+    const [res, kbRes] = await Promise.all([
+      api.get<ComplianceOverview>('/api/analysis/doc-projects/compliance-overview'),
+      kbPromise,
+    ])
     overview.value = res
+    kbSummary.value = kbRes
     docItems.value = Array.isArray(res.recent_docs) ? res.recent_docs : []
     progress.value = res.recent_progress || {}
     admItems.value = Array.isArray(res.recent_admissions) ? res.recent_admissions : []
   } catch {
     overview.value = null
+    kbSummary.value = await kbPromise
   } finally {
     loaded.value = true
   }
+}
+
+function resetAllRoutes() {
+  selectedRouteKey.value = 'ALL'
+  if (activeCam.value !== 'WORLD') setUserCamera('WORLD')
 }
 
 const TODO_TAG: Record<string, string> = {
@@ -454,19 +651,21 @@ const TODO_TAG: Record<string, string> = {
 }
 
 onMounted(() => {
+  userTheme.value = readInitialUserTheme()
   window.addEventListener('keydown', onKeydown)
   void loadHomeData()
 })
 
 onUnmounted(() => {
+  if (camAnimId !== null) cancelAnimationFrame(camAnimId)
   document.body.style.overflow = ''
   window.removeEventListener('keydown', onKeydown)
 })
 
 const visibleCards = [
-  { path: '/knowledge', icon: 'book', title: '法规知识库' },
-  { path: '/documents', icon: 'shield', title: '合规评估' },
-  { path: '/admission', icon: 'flow', title: '海外属地准入' },
+  { path: '/knowledge', icon: 'book', title: '法规知识库', sub: '现行法规双语对照与八维简报' },
+  { path: '/documents', icon: 'shield', title: '合规评估', sub: '法定路径研判与中英双语文书' },
+  { path: '/admission', icon: 'flow', title: '海外属地准入', sub: '目标国准入事项与官方原表套打' },
 ]
 
 const portalTrialCards = [
@@ -478,12 +677,37 @@ const portalTrialCards = [
 
 <template>
   <div class="home-wrap">
-    <!-- 门户体验访客：独立纯净引导视图，不混入企业空间空态 -->
+    <!-- 门户体验访客：纯净体验引导 + 全球 46 国法规能力全景矩阵（第一时间打动潜在采购企业） -->
     <section v-if="isPortalTrial" class="portal-welcome" data-testid="home-portal-welcome">
       <div class="portal-head">
+        <span class="capability-kicker">车研数合 · 全球汽车跨境与属地准入一体化引擎</span>
         <h1>欢迎体验车研数合汽车跨境数据合规服务平台</h1>
         <p>当前为门户访客体验模式。您可以直接查阅各国汽车数据现行法规与国家合规简报、检索海外属地市场准入事项，或使用咨询助手开展法规问答（提问内容仅本人可见）。</p>
       </div>
+
+      <div v-if="kbSummary" class="capability-strip" aria-label="平台全球法规底座能力">
+        <div class="cap-item">
+          <strong>{{ kbSummary.covered_jurisdictions }} 国</strong>
+          <span>全球出海法域覆盖</span>
+        </div>
+        <div class="cap-item">
+          <strong>{{ kbSummary.laws_in_force }} 部</strong>
+          <span>现行有效法规精译</span>
+        </div>
+        <div class="cap-item">
+          <strong>{{ kbSummary.standards_active }} 项</strong>
+          <span>中外汽车技术标准</span>
+        </div>
+        <div class="cap-item">
+          <strong>{{ kbSummary.briefings_ready }} 国</strong>
+          <span>八维国别合规简报</span>
+        </div>
+        <div class="cap-item">
+          <strong>{{ kbSummary.official_forms_total }} 套</strong>
+          <span>东道国官方原表直出</span>
+        </div>
+      </div>
+
       <div class="portal-grid">
         <RouterLink v-for="c in portalTrialCards" :key="c.path" :to="c.path" class="portal-card">
           <span class="feature-icon"><AppIcon :name="c.icon" /></span>
@@ -498,16 +722,41 @@ const portalTrialCards = [
 
     <!-- 企业账号（企业经办人 member / 本单位普通查看者 viewer） -->
     <template v-else>
-      <div ref="boardEl" class="user-board" :class="{ 'is-fullscreen': isFullscreen, 'has-projects': loaded && rows.length > 0 }">
+      <div
+        ref="boardEl"
+        class="user-board"
+        :class="[`utheme-${userTheme}`, { 'is-fullscreen': isFullscreen, 'has-projects': loaded && rows.length > 0 }]"
+      >
         <header class="hero-head">
           <div class="hero-title-group">
             <h1>欢迎，{{ userName(auth.user) }}</h1>
+            <span v-if="loaded && rows.length" class="posture-grade-pill" :class="postureGrade.tone">
+              {{ postureGrade.badge }}
+            </span>
             <span v-if="loaded && rows.length" class="hero-sub">
               {{ editable ? '本单位跨境数据流向与项目推进实时状态' : '只读查看模式 · 本单位共享项目实时同步' }}
             </span>
           </div>
 
           <div class="hero-actions">
+            <div v-if="loaded && rows.length" class="utheme-switch" role="group" aria-label="看板外观切换">
+              <button
+                type="button"
+                class="utheme-btn"
+                :class="{ active: userTheme === 'flagship' }"
+                @click="setUserTheme('flagship')"
+              >
+                深海旗舰舱
+              </button>
+              <button
+                type="button"
+                class="utheme-btn"
+                :class="{ active: userTheme === 'clean' }"
+                @click="setUserTheme('clean')"
+              >
+                公文清爽舱
+              </button>
+            </div>
             <button
               v-if="loaded && rows.length"
               type="button"
@@ -525,55 +774,133 @@ const portalTrialCards = [
 
         <div v-if="!loaded" v-loading="true" class="recent-loading" data-testid="home-recent-loading" />
 
-        <!-- 空企业状态：无项目时不展示空地图，给出清晰新建引导或只读说明 -->
+        <!-- 空企业状态：保留新建引导与只读说明，同时直观展示平台全球底座能力 -->
         <div v-else-if="!rows.length" class="empty-org-card" data-testid="home-recent-empty">
           <template v-if="editable">
+            <span class="capability-kicker">自助合规评估 · 中英双语报告 · 东道国法定原表一键齐套</span>
             <h2>开始本单位首个汽车数据跨境合规评估</h2>
             <p>选定数据发出国、数据接收国与车载业务场景后，平台将自动研判法定出境路径、筛选必备合规文件清单并同步呈现跨境流向状态。</p>
-            <RouterLink to="/documents"><el-button type="primary" data-testid="home-new">新建合规评估项目</el-button></RouterLink>
-          </template>
-          <p v-else class="viewer-empty">当前暂无本单位共享项目，您可以先查阅法规知识库或使用咨询助手提问查法。</p>
-        </div>
-
-        <!-- 工作概览态势主视图 -->
-        <section v-else class="posture-screen" data-testid="user-posture-screen">
-          <div class="kpi-strip">
-            <div class="kpi-tile">
-              <span class="kpi-label">在办评估项目</span>
-              <div class="kpi-val-row">
-                <strong>{{ summaryMetrics.projTotal }}</strong>
-                <span class="kpi-unit">个</span>
-                <span class="kpi-sub">已齐套 {{ summaryMetrics.projReady }} 个</span>
+            <div v-if="kbSummary" class="capability-strip empty-cap-strip">
+              <div class="cap-item">
+                <strong>{{ kbSummary.covered_jurisdictions }} 国</strong>
+                <span>目标法域覆盖</span>
+              </div>
+              <div class="cap-item">
+                <strong>{{ kbSummary.laws_in_force }} 部</strong>
+                <span>现行有效法规</span>
+              </div>
+              <div class="cap-item">
+                <strong>{{ kbSummary.standards_active }} 项</strong>
+                <span>汽车技术标准</span>
+              </div>
+              <div class="cap-item">
+                <strong>{{ kbSummary.official_forms_total }} 套</strong>
+                <span>法定申报原表</span>
               </div>
             </div>
+            <RouterLink to="/documents"><el-button type="primary" data-testid="home-new">新建合规评估项目</el-button></RouterLink>
+          </template>
+          <template v-else>
+            <p class="viewer-empty">当前暂无本单位共享项目，您可以先查阅法规知识库或使用咨询助手提问查法。</p>
+            <div v-if="kbSummary" class="capability-strip empty-cap-strip">
+              <div class="cap-item">
+                <strong>{{ kbSummary.covered_jurisdictions }} 国</strong>
+                <span>目标法域覆盖</span>
+              </div>
+              <div class="cap-item">
+                <strong>{{ kbSummary.laws_in_force }} 部</strong>
+                <span>现行有效法规</span>
+              </div>
+              <div class="cap-item">
+                <strong>{{ kbSummary.briefings_ready }} 国</strong>
+                <span>八维合规简报</span>
+              </div>
+              <div class="cap-item">
+                <strong>{{ kbSummary.official_forms_total }} 套</strong>
+                <span>法定申报原表</span>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- 企业旗舰态势主看板 -->
+        <section v-else class="posture-screen" data-testid="user-posture-screen">
+          <!-- 商业护航能力价值带 -->
+          <div v-if="kbSummary" class="assurance-ribbon">
+            <span class="assure-main">
+              <strong>全球法规底座实时护航：</strong>已联动 {{ kbSummary.covered_jurisdictions }} 国 {{ kbSummary.laws_in_force }} 部现行法规（{{ kbSummary.clauses_total.toLocaleString() }} 条精译条文）、{{ kbSummary.standards_active }} 项汽车标准与 {{ kbSummary.official_forms_total }} 套东道国官方原表
+            </span>
+            <span class="assure-pills">
+              <RouterLink to="/knowledge" class="assure-link">查阅国别简报 →</RouterLink>
+              <span class="assure-chip">支持中英双语整包导出</span>
+            </span>
+          </div>
+
+          <!-- 4 大核心进度舱 -->
+          <div class="kpi-strip">
             <div class="kpi-tile">
-              <span class="kpi-label">必备文件就绪</span>
+              <div class="kpi-head-row">
+                <span class="kpi-label">在办评估项目</span>
+                <span class="kpi-chip">齐套 {{ summaryMetrics.projReady }}/{{ summaryMetrics.projTotal }}</span>
+              </div>
+              <div class="kpi-val-row">
+                <strong>{{ summaryMetrics.projTotal }}</strong>
+                <span class="kpi-unit">个项目</span>
+                <span class="kpi-sub">齐套率 {{ summaryMetrics.projPct }}%</span>
+              </div>
+              <div class="kpi-bar"><div class="kpi-bar-fill" :style="{ width: `${Math.max(8, summaryMetrics.projPct)}%` }" /></div>
+            </div>
+
+            <div class="kpi-tile">
+              <div class="kpi-head-row">
+                <span class="kpi-label">必备文件就绪</span>
+                <span class="kpi-chip safe">中英双语可导</span>
+              </div>
               <div class="kpi-val-row">
                 <strong>{{ summaryMetrics.docsReady }} / {{ summaryMetrics.docsReq }}</strong>
                 <span class="kpi-unit">份</span>
-                <span class="kpi-sub">{{ summaryMetrics.docsReq ? `完成率 ${Math.round((summaryMetrics.docsReady / summaryMetrics.docsReq) * 100)}%` : '按流向核定' }}</span>
+                <span class="kpi-sub">{{ summaryMetrics.docsReq ? `完成率 ${summaryMetrics.docsPct}%` : '按流向核定' }}</span>
               </div>
+              <div class="kpi-bar"><div class="kpi-bar-fill safe" :style="{ width: `${Math.max(8, summaryMetrics.docsPct)}%` }" /></div>
             </div>
+
             <div class="kpi-tile">
-              <span class="kpi-label">风险压降闭环</span>
+              <div class="kpi-head-row">
+                <span class="kpi-label">风险压降闭环</span>
+                <span class="kpi-chip" :class="summaryMetrics.curHigh === 0 ? 'safe' : 'danger'">
+                  {{ summaryMetrics.curHigh === 0 ? '高风险清零' : '待落实措施' }}
+                </span>
+              </div>
               <div class="kpi-val-row">
                 <strong :class="{ 'is-danger': summaryMetrics.curHigh > 0, 'is-safe': summaryMetrics.curHigh === 0 }">{{ summaryMetrics.curHigh }}</strong>
                 <span class="kpi-unit">项当前高风险</span>
                 <span class="kpi-sub">已化解高风险 {{ summaryMetrics.clearedHigh }} 项</span>
               </div>
+              <div class="kpi-bar">
+                <div
+                  class="kpi-bar-fill"
+                  :class="summaryMetrics.curHigh === 0 ? 'safe' : 'danger'"
+                  :style="{ width: summaryMetrics.curHigh === 0 ? '100%' : '45%' }"
+                />
+              </div>
             </div>
+
             <div class="kpi-tile">
-              <span class="kpi-label">海外属地准入</span>
+              <div class="kpi-head-row">
+                <span class="kpi-label">海外属地准入</span>
+                <span class="kpi-chip gold">官方原表套打</span>
+              </div>
               <div class="kpi-val-row">
                 <strong>{{ summaryMetrics.admTotal }}</strong>
                 <span class="kpi-unit">项</span>
                 <span class="kpi-sub">已备齐或获批 {{ summaryMetrics.admReady }} 项</span>
               </div>
+              <div class="kpi-bar"><div class="kpi-bar-fill gold" :style="{ width: `${Math.max(8, summaryMetrics.admPct)}%` }" /></div>
             </div>
           </div>
 
           <div class="posture-grid">
-            <!-- 左栏：法定路径与风险前后演变 -->
+            <!-- 左栏：法定路径与风险前后演变可视化对比 -->
             <div class="posture-col posture-left">
               <div class="p-panel">
                 <div class="p-panel-head">
@@ -587,7 +914,7 @@ const portalTrialCards = [
                       <span class="bar-num">{{ item.count }} 项 · 文件 {{ item.docs_ready }}/{{ item.docs_total }}</span>
                     </div>
                     <div class="bar-track">
-                      <div class="bar-fill" :style="{ width: `${Math.max(10, Math.round((item.count / maxLegalCount) * 100))}%` }" />
+                      <div class="bar-fill" :style="{ width: `${Math.max(12, Math.round((item.count / maxLegalCount) * 100))}%` }" />
                     </div>
                   </div>
                 </div>
@@ -596,55 +923,106 @@ const portalTrialCards = [
 
               <div class="p-panel p-panel-flex">
                 <div class="p-panel-head">
-                  <h2>风险初评与当前对比</h2>
+                  <h2>风险初评与当前压降对比</h2>
                   <span>动态复评同步</span>
                 </div>
                 <div v-if="overview?.risk_summary" class="risk-compare">
-                  <div class="rc-row">
-                    <span class="rc-grade danger">高风险</span>
-                    <span class="rc-pair">初评 {{ overview.risk_summary.init_high }} → <b>当前 {{ overview.risk_summary.current_high }}</b></span>
+                  <div class="rc-card">
+                    <div class="rc-row">
+                      <span class="rc-grade danger">高风险</span>
+                      <span class="rc-pair">初评 {{ overview.risk_summary.init_high }} → <b>当前 {{ overview.risk_summary.current_high }}</b></span>
+                    </div>
+                    <div class="rc-dual-bars">
+                      <div class="rc-bar init-danger" :style="{ width: `${Math.max(6, Math.round((overview.risk_summary.init_high / riskMaxScale) * 100))}%` }" />
+                      <div class="rc-bar cur-safe" :style="{ width: `${overview.risk_summary.current_high > 0 ? Math.max(8, Math.round((overview.risk_summary.current_high / riskMaxScale) * 100)) : 0}%` }" />
+                    </div>
                   </div>
-                  <div class="rc-row">
-                    <span class="rc-grade warn">中风险</span>
-                    <span class="rc-pair">初评 {{ overview.risk_summary.init_medium }} → <b>当前 {{ overview.risk_summary.current_medium }}</b></span>
+
+                  <div class="rc-card">
+                    <div class="rc-row">
+                      <span class="rc-grade warn">中风险</span>
+                      <span class="rc-pair">初评 {{ overview.risk_summary.init_medium }} → <b>当前 {{ overview.risk_summary.current_medium }}</b></span>
+                    </div>
+                    <div class="rc-dual-bars">
+                      <div class="rc-bar init-warn" :style="{ width: `${Math.max(6, Math.round((overview.risk_summary.init_medium / riskMaxScale) * 100))}%` }" />
+                      <div class="rc-bar cur-cyan" :style="{ width: `${overview.risk_summary.current_medium > 0 ? Math.max(8, Math.round((overview.risk_summary.current_medium / riskMaxScale) * 100)) : 0}%` }" />
+                    </div>
                   </div>
-                  <div class="rc-row">
-                    <span class="rc-grade safe">低风险</span>
-                    <span class="rc-pair">初评 {{ overview.risk_summary.init_low }} → <b>当前 {{ overview.risk_summary.current_low }}</b></span>
+
+                  <div class="rc-card">
+                    <div class="rc-row">
+                      <span class="rc-grade safe">低风险</span>
+                      <span class="rc-pair">初评 {{ overview.risk_summary.init_low }} → <b>当前 {{ overview.risk_summary.current_low }}</b></span>
+                    </div>
+                    <div class="rc-dual-bars">
+                      <div class="rc-bar cur-safe" :style="{ width: `${overview.risk_summary.current_low > 0 ? Math.max(8, Math.round((overview.risk_summary.current_low / riskMaxScale) * 100)) : 6}%` }" />
+                    </div>
                   </div>
-                  <div class="rc-foot">
-                    <span>已降级 {{ overview.risk_summary.downgraded }} 项</span>
-                    <span>已完成整改 {{ overview.risk_summary.mitigated }} 项</span>
+
+                  <div class="rc-foot-boxes">
+                    <div class="rc-stat-box">
+                      <span>已降级风险</span>
+                      <strong>{{ overview.risk_summary.downgraded }} 项</strong>
+                    </div>
+                    <div class="rc-stat-box">
+                      <span>已完成整改</span>
+                      <strong>{{ overview.risk_summary.mitigated }} 项</strong>
+                    </div>
                   </div>
                 </div>
                 <p v-else class="p-empty">项目完成风险定级后自动汇总</p>
               </div>
             </div>
 
-            <!-- 中栏：本单位真实跨境流向矢量地图（默认展示本单位全部跨境流向） -->
+            <!-- 中栏：本单位真实跨境流向矢量地图 + 区域变焦 + 46国法规底座叠加 -->
             <div class="posture-col posture-center">
               <div class="map-card">
                 <div class="map-topbar">
                   <div>
-                    <h2>本单位跨境数据流向与准入节点</h2>
-                    <span class="map-sub">仅点亮本单位在办项目涉及的发出国、接收国与属地准入目标国</span>
+                    <h2>本单位跨境数据流向与准入节点沙盘</h2>
+                    <span class="map-sub">点亮本单位在办发出国、接收国与准入目标国；支持叠加查看平台全球法规覆盖网</span>
                   </div>
                   <div class="map-pills">
                     <button
                       type="button"
                       class="map-pill"
-                      :class="{ active: selectedRouteKey === 'ALL' }"
+                      :class="{ active: selectedRouteKey === 'ALL' && activeCam === 'WORLD' }"
                       data-testid="user-map-reset-all"
-                      @click="selectedRouteKey = 'ALL'"
+                      @click="resetAllRoutes"
                     >
                       全部流向（{{ arcGroups.length }}）
+                    </button>
+                    <button
+                      type="button"
+                      class="map-pill"
+                      :class="{ active: activeCam === 'EUR_MENA' }"
+                      @click="setUserCamera(activeCam === 'EUR_MENA' ? 'WORLD' : 'EUR_MENA')"
+                    >
+                      欧非走廊
+                    </button>
+                    <button
+                      type="button"
+                      class="map-pill"
+                      :class="{ active: activeCam === 'APAC' }"
+                      @click="setUserCamera(activeCam === 'APAC' ? 'WORLD' : 'APAC')"
+                    >
+                      亚太走廊
+                    </button>
+                    <button
+                      v-if="kbSummary"
+                      type="button"
+                      class="map-pill overlay-pill"
+                      :class="{ active: showGlobalOverlay }"
+                      @click="showGlobalOverlay = !showGlobalOverlay"
+                    >
+                      {{ showGlobalOverlay ? '已叠 46 国底座' : '叠加 46 国法规网' }}
                     </button>
                   </div>
                 </div>
 
                 <div class="map-stage">
                   <svg :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="本单位跨境数据流向图">
-                    <g stroke="#131e33" stroke-width="1">
+                    <g class="u-grid-lines" stroke-width="0.9">
                       <line x1="0" y1="110" x2="960" y2="110" />
                       <line x1="0" y1="220" x2="960" y2="220" />
                       <line x1="0" y1="330" x2="960" y2="330" />
@@ -653,63 +1031,87 @@ const portalTrialCards = [
                       <line x1="720" y1="0" x2="720" y2="440" />
                     </g>
 
-                    <g class="land-bg">
-                      <path v-for="[cc, d] in backgroundMapEntries" :key="`bg-${cc}`" :d="d" />
-                    </g>
-
-                    <g class="land-active">
-                      <path
-                        v-for="item in activeMapEntries"
-                        :key="`act-${item.code}`"
-                        :d="item.d"
-                        class="active-country"
-                        :class="{ dimmed: !isCountryHighlighted(item.code) }"
-                        @click="selectCountryOnMap(item.code)"
-                      >
-                        <title>{{ item.name }}</title>
-                      </path>
-                    </g>
-
-                    <g class="route-arcs">
-                      <g
-                        v-for="arc in arcGroups"
-                        :key="arc.key"
-                        class="arc-item"
-                        :class="{
-                          selected: selectedRouteKey === arc.key,
-                          dimmed: selectedRouteKey !== 'ALL' && selectedRouteKey !== arc.key,
-                        }"
-                        @click="selectedRouteKey = selectedRouteKey === arc.key ? 'ALL' : arc.key"
-                      >
+                    <g :transform="mapCameraTransform">
+                      <g class="land-bg">
                         <path
-                          :d="arc.path"
-                          class="arc-base"
-                          :stroke="arc.tone === 'danger' ? '#f87171' : arc.tone === 'warn' ? '#fbbf24' : '#38bdf8'"
+                          v-for="[cc, d] in backgroundMapEntries"
+                          :key="`bg-${cc}`"
+                          :d="d"
+                          vector-effect="non-scaling-stroke"
                         />
-                        <path :d="arc.path" class="arc-dash" />
+                      </g>
+
+                      <g v-if="showGlobalOverlay" class="land-global-overlay">
+                        <path
+                          v-for="gItem in globalOverlayEntries"
+                          :key="`gl-${gItem.code}`"
+                          :d="gItem.d"
+                          class="overlay-country"
+                          vector-effect="non-scaling-stroke"
+                        >
+                          <title>{{ gItem.name }}（平台已收录 {{ gItem.laws }} 部现行法规，随时可建项目）</title>
+                        </path>
+                      </g>
+
+                      <g class="land-active">
+                        <path
+                          v-for="item in activeMapEntries"
+                          :key="`act-${item.code}`"
+                          :d="item.d"
+                          class="active-country"
+                          :class="{ 'origin-cn': item.isCn, dimmed: !isCountryHighlighted(item.code) }"
+                          vector-effect="non-scaling-stroke"
+                          @click="selectCountryOnMap(item.code)"
+                        >
+                          <title>{{ item.name }}</title>
+                        </path>
+                      </g>
+
+                      <g class="route-arcs">
+                        <g
+                          v-for="arc in arcGroups"
+                          :key="arc.key"
+                          class="arc-item"
+                          :class="{
+                            selected: selectedRouteKey === arc.key,
+                            dimmed: selectedRouteKey !== 'ALL' && selectedRouteKey !== arc.key,
+                          }"
+                          @click="selectedRouteKey = selectedRouteKey === arc.key ? 'ALL' : arc.key"
+                        >
+                          <path
+                            :d="arc.path"
+                            class="arc-base"
+                            vector-effect="non-scaling-stroke"
+                            :stroke="arc.tone === 'danger' ? '#f87171' : arc.tone === 'warn' ? '#fbbf24' : '#34d399'"
+                          />
+                          <path :d="arc.path" class="arc-dash" vector-effect="non-scaling-stroke" />
+                        </g>
                       </g>
                     </g>
 
+                    <!-- 屏幕空间恒定 13px 清晰节点标签 -->
                     <g class="country-hubs">
                       <g
-                        v-for="item in activeMapEntries"
-                        :key="`hub-${item.code}`"
+                        v-for="node in screenHubNodes"
+                        :key="`hub-${node.code}`"
                         class="hub-node"
-                        :class="{ dimmed: !isCountryHighlighted(item.code) }"
-                        @click="selectCountryOnMap(item.code)"
+                        :class="{ dimmed: !node.highlighted }"
+                        @click="selectCountryOnMap(node.code)"
                       >
-                        <template v-if="item.hub && item.lbl">
-                          <circle :cx="item.hub[0]" :cy="item.hub[1]" r="7" class="hub-ring" />
-                          <circle :cx="item.hub[0]" :cy="item.hub[1]" r="3.4" class="hub-dot" />
-                          <text
-                            :x="item.lbl.x"
-                            :y="item.lbl.y"
-                            :text-anchor="item.lbl.anchor"
-                            class="hub-label"
-                          >
-                            {{ item.name }}
-                          </text>
-                        </template>
+                        <circle :cx="node.sx" :cy="node.sy" :r="node.isCn ? 8.5 : 7" class="hub-ring" :class="{ gold: node.isCn }" />
+                        <circle :cx="node.sx" :cy="node.sy" :r="node.isCn ? 4.4 : 3.6" class="hub-dot" :class="{ gold: node.isCn }" />
+                        <text
+                          v-if="node.showLabel"
+                          :x="node.lx"
+                          :y="node.ly"
+                          :text-anchor="node.anchor"
+                          class="hub-label"
+                          :class="{ gold: node.isCn }"
+                          font-size="13"
+                          font-weight="600"
+                        >
+                          {{ node.isCn ? `★${node.name}` : node.name }}
+                        </text>
                       </g>
                     </g>
                   </svg>
@@ -787,6 +1189,9 @@ const portalTrialCards = [
                       </span>
                       <span class="p-proj-sub">{{ r.status || r.code }}</span>
                     </div>
+                    <div class="p-proj-bar">
+                      <div class="p-proj-bar-fill" :class="{ ok: r.ok }" :style="{ width: `${r.pct}%` }" />
+                    </div>
                   </div>
                 </div>
                 <button
@@ -854,7 +1259,10 @@ const portalTrialCards = [
       <nav v-if="!isFullscreen" class="quick-links" aria-label="常用功能" data-testid="home-quick">
         <RouterLink v-for="card in visibleCards" :key="card.path" :to="card.path" class="quick-link">
           <span class="feature-icon"><AppIcon :name="card.icon" /></span>
-          <strong>{{ card.title }}</strong>
+          <div class="quick-link-text">
+            <strong>{{ card.title }}</strong>
+            <span>{{ card.sub }}</span>
+          </div>
           <AppIcon name="arrow" />
         </RouterLink>
       </nav>
@@ -864,180 +1272,1176 @@ const portalTrialCards = [
 
 <style scoped>
 @keyframes routeFlow {
-  to { stroke-dashoffset: -36; }
+  to {
+    stroke-dashoffset: -36;
+  }
 }
 
-.home-wrap { display: flex; flex-direction: column; gap: 14px; }
-.home-wrap strong, .home-wrap b, .home-wrap h1, .home-wrap h2 { font-weight: 600; }
+.home-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-weight: 400;
+}
+.home-wrap strong,
+.home-wrap b,
+.home-wrap h1,
+.home-wrap h2 {
+  font-weight: 600;
+}
+
+/* 企业端双主题变量（深海旗舰舱 vs 公文清爽舱：严守白底零阴影、零渐变、>=13px、字重仅 400/600） */
+.user-board.utheme-flagship {
+  --ub-screen: #071324;
+  --ub-panel: #0d1e36;
+  --ub-inner: #09172b;
+  --ub-border: #1d385c;
+  --ub-accent: #38bdf8;
+  --ub-link: #60a5fa;
+  --ub-emerald: #10b981;
+  --ub-emerald-tx: #6ee7b7;
+  --ub-gold: #f59e0b;
+  --ub-gold-tx: #fde68a;
+  --ub-danger: #ef4444;
+  --ub-danger-tx: #fca5a5;
+  --ub-tx-1: #f8fafc;
+  --ub-tx-2: #cbd5e1;
+  --ub-tx-muted: #94a3b8;
+  --ub-ocean: #060e1c;
+  --ub-grid: #102038;
+  --ub-land: #15243b;
+  --ub-land-stroke: #253b5e;
+  --ub-overlay: #1a3b63;
+  --ub-active-land: #1d5ca8;
+  --ub-lbl-stroke: #060e1c;
+}
+
+.user-board.utheme-clean {
+  --ub-screen: #f1f5f9;
+  --ub-panel: #ffffff;
+  --ub-inner: #f8fafc;
+  --ub-border: #cbd5e1;
+  --ub-accent: #1d4ed8;
+  --ub-link: #1d4ed8;
+  --ub-emerald: #059669;
+  --ub-emerald-tx: #047857;
+  --ub-gold: #b45309;
+  --ub-gold-tx: #b45309;
+  --ub-danger: #dc2626;
+  --ub-danger-tx: #b91c1c;
+  --ub-tx-1: #0f172a;
+  --ub-tx-2: #334155;
+  --ub-tx-muted: #64748b;
+  --ub-ocean: #e8eff8;
+  --ub-grid: #d4e0ee;
+  --ub-land: #dce4ee;
+  --ub-land-stroke: #b9c7d8;
+  --ub-overlay: #bfdbfe;
+  --ub-active-land: #2563eb;
+  --ub-lbl-stroke: #ffffff;
+}
+
+/* 门户体验访客与空态能力矩阵带 */
+.capability-kicker {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  padding: 3px 10px;
+  margin-bottom: 6px;
+}
+
+.capability-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.empty-cap-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  max-width: 780px;
+}
+.cap-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cap-item strong {
+  font-size: 20px;
+  color: #0f172a;
+}
+.cap-item span {
+  font-size: 13px;
+  color: #475569;
+}
 
 /* 门户体验访客引导页 */
-.portal-welcome { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px 28px; display: flex; flex-direction: column; gap: 18px; }
-.portal-head h1 { margin: 0 0 8px; font-size: 20px; color: #0f172a; }
-.portal-head p { margin: 0; font-size: 14px; line-height: 1.75; color: #475569; max-width: 880px; }
-.portal-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-.portal-card { display: flex; align-items: flex-start; gap: 14px; padding: 18px 20px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; color: #0f172a; text-decoration: none; }
-.portal-card:hover { border-color: #2563eb; background: #eff6ff; }
-.portal-card-body { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.portal-card-body strong { font-size: 16px; color: #0f172a; }
-.portal-card-body span { font-size: 13px; line-height: 1.6; color: #475569; }
+.portal-welcome {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.portal-head h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  color: #0f172a;
+}
+.portal-head p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: #475569;
+  max-width: 880px;
+}
+.portal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.portal-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #0f172a;
+  text-decoration: none;
+}
+.portal-card:hover {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+.portal-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.portal-card-body strong {
+  font-size: 16px;
+  color: #0f172a;
+}
+.portal-card-body span {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #475569;
+}
 
 /* 顶部标题与全屏栏 */
-.user-board { display: flex; flex-direction: column; gap: 12px; }
-.user-board.is-fullscreen { position: fixed; inset: 0; z-index: 2000; padding: 18px 24px; overflow-y: auto; background: #071120; }
-.user-board.is-fullscreen .hero-title-group h1 { color: #f8fafc; }
-.user-board.is-fullscreen .hero-sub { color: #94a3b8; }
+.user-board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.user-board.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  padding: 18px 24px;
+  overflow-y: auto;
+  background: var(--ub-screen);
+}
+.user-board.is-fullscreen .hero-title-group h1 {
+  color: var(--ub-tx-1);
+}
+.user-board.is-fullscreen .hero-sub {
+  color: var(--ub-tx-muted);
+}
 
-.hero-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 16px; flex-wrap: wrap; }
-.hero-title-group { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.hero-title-group h1 { margin: 0; font-size: 20px; color: #0f172a; }
-.hero-sub { font-size: 13px; color: #64748b; }
-.hero-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.hero-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  flex-wrap: wrap;
+}
+.hero-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.hero-title-group h1 {
+  margin: 0;
+  font-size: 20px;
+  color: #0f172a;
+}
+.posture-grade-pill {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #a7f3d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+.posture-grade-pill.warn {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+.posture-grade-pill.info {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.hero-sub {
+  font-size: 13px;
+  color: #64748b;
+}
+.hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 
-.fs-btn { border: 1px solid #cbd5e1; background: #fff; color: #1e293b; font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
-.fs-btn:hover { border-color: #2563eb; color: #1d4ed8; }
+.utheme-switch {
+  display: inline-flex;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+.utheme-btn {
+  border: none;
+  background: transparent;
+  color: #475569;
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.utheme-btn.active {
+  background: #1d4ed8;
+  color: #ffffff;
+  font-weight: 600;
+}
 
-.recent-loading { min-height: 220px; border-radius: 10px; background: #ffffff; border: 1px solid #e2e8f0; }
+.fs-btn {
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fs-btn:hover {
+  border-color: #2563eb;
+  color: #1d4ed8;
+}
+
+.recent-loading {
+  min-height: 220px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+}
 
 /* 空企业引导卡 */
-.empty-org-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 28px 30px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
-.empty-org-card h2 { margin: 0; font-size: 18px; color: #0f172a; }
-.empty-org-card p { margin: 0; font-size: 14px; line-height: 1.7; color: #475569; max-width: 760px; }
-.viewer-empty { margin: 0; color: #64748b; font-size: 14px; }
+.empty-org-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 28px 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.empty-org-card h2 {
+  margin: 0;
+  font-size: 18px;
+  color: #0f172a;
+}
+.empty-org-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #475569;
+  max-width: 780px;
+}
+.viewer-empty {
+  margin: 0;
+  color: #64748b;
+  font-size: 14px;
+}
 
 /* 工作概览主看板 */
-.posture-screen { background: #081426; border: 1px solid #1e3a5f; border-radius: 10px; padding: 14px 16px; color: #e2e8f0; display: flex; flex-direction: column; gap: 12px; font-variant-numeric: tabular-nums; }
-.kpi-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.kpi-tile { background: #0f213a; border: 1px solid #1e3a5f; border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 4px; }
-.kpi-label { font-size: 13px; color: #94a3b8; }
-.kpi-val-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
-.kpi-val-row strong { font-size: 22px; color: #f8fafc; }
-.kpi-val-row strong.is-danger { color: #f87171; }
-.kpi-val-row strong.is-safe { color: #34d399; }
-.kpi-unit { font-size: 13px; color: #cbd5e1; }
-.kpi-sub { margin-left: auto; font-size: 13px; color: #94a3b8; }
+.posture-screen {
+  background: var(--ub-screen);
+  border: 1px solid var(--ub-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: var(--ub-tx-1);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.assurance-ribbon {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  background: var(--ub-panel);
+  border: 1px solid var(--ub-border);
+  border-left: 4px solid var(--ub-gold);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 13px;
+}
+.assure-main {
+  color: var(--ub-tx-2);
+  line-height: 1.5;
+  flex: 1 1 480px;
+}
+.assure-main strong {
+  color: var(--ub-tx-1);
+}
+.assure-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.assure-link {
+  color: var(--ub-link);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.assure-link:hover {
+  text-decoration: underline;
+}
+.assure-chip {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ub-emerald-tx);
+  background: var(--ub-inner);
+  border: 1px solid var(--ub-border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.kpi-tile {
+  background: var(--ub-panel);
+  border: 1px solid var(--ub-border);
+  border-radius: 8px;
+  padding: 11px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kpi-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+.kpi-label {
+  font-size: 13px;
+  color: var(--ub-tx-muted);
+}
+.kpi-chip {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ub-link);
+  background: var(--ub-inner);
+  border: 1px solid var(--ub-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.kpi-chip.safe {
+  color: var(--ub-emerald-tx);
+}
+.kpi-chip.gold {
+  color: var(--ub-gold-tx);
+}
+.kpi-chip.danger {
+  color: var(--ub-danger-tx);
+}
+
+.kpi-val-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.kpi-val-row strong {
+  font-size: 22px;
+  color: var(--ub-tx-1);
+}
+.kpi-val-row strong.is-danger {
+  color: var(--ub-danger-tx);
+}
+.kpi-val-row strong.is-safe {
+  color: var(--ub-emerald-tx);
+}
+.kpi-unit {
+  font-size: 13px;
+  color: var(--ub-tx-2);
+}
+.kpi-sub {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--ub-tx-muted);
+}
+.kpi-bar {
+  height: 5px;
+  background: var(--ub-inner);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.kpi-bar-fill {
+  height: 100%;
+  background: var(--ub-accent);
+  border-radius: 999px;
+}
+.kpi-bar-fill.safe {
+  background: var(--ub-emerald);
+}
+.kpi-bar-fill.gold {
+  background: var(--ub-gold);
+}
+.kpi-bar-fill.danger {
+  background: var(--ub-danger);
+}
 
 /* 宽屏或全屏时左中右三栏；1280/1440 带左侧菜单栏时自动变为上地图、下双栏，零挤压零截断 */
-.posture-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: stretch; }
-.posture-center { grid-column: 1 / -1; order: -1; }
+.posture-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+.posture-center {
+  grid-column: 1 / -1;
+  order: -1;
+}
 @media (min-width: 1560px) {
-  .posture-grid { grid-template-columns: 256px minmax(0, 1fr) 348px; }
-  .posture-center { grid-column: auto; order: 0; }
+  .posture-grid {
+    grid-template-columns: 264px minmax(0, 1fr) 352px;
+  }
+  .posture-center {
+    grid-column: auto;
+    order: 0;
+  }
 }
-.user-board.is-fullscreen .posture-grid { grid-template-columns: 264px minmax(0, 1fr) 360px; }
-.user-board.is-fullscreen .posture-center { grid-column: auto; order: 0; }
+.user-board.is-fullscreen .posture-grid {
+  grid-template-columns: 272px minmax(0, 1fr) 364px;
+}
+.user-board.is-fullscreen .posture-center {
+  grid-column: auto;
+  order: 0;
+}
 
-.posture-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.p-panel { background: #0f213a; border: 1px solid #1e3a5f; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
-.p-panel-flex { flex: 1; min-height: 0; }
-.p-panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.p-panel-head h2 { margin: 0; font-size: 14px; color: #f8fafc; }
-.p-panel-head span { font-size: 13px; color: #94a3b8; }
-.p-head-links { display: inline-flex; gap: 10px; flex-wrap: wrap; }
-.p-head-links a { color: #60a5fa; text-decoration: none; font-size: 13px; }
-.p-head-links a:hover { text-decoration: underline; }
-.p-empty { margin: 0; font-size: 13px; color: #94a3b8; line-height: 1.6; }
-.p-empty-ok { color: #6ee7b7; }
+.posture-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.p-panel {
+  background: var(--ub-panel);
+  border: 1px solid var(--ub-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.p-panel-flex {
+  flex: 1;
+  min-height: 0;
+}
+.p-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.p-panel-head h2 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ub-tx-1);
+}
+.p-panel-head span {
+  font-size: 13px;
+  color: var(--ub-tx-muted);
+}
+.p-head-links {
+  display: inline-flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.p-head-links a {
+  color: var(--ub-link);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+.p-head-links a:hover {
+  text-decoration: underline;
+}
+.p-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ub-tx-muted);
+  line-height: 1.6;
+}
+.p-empty-ok {
+  color: var(--ub-emerald-tx);
+}
 
-.bar-list { display: flex; flex-direction: column; gap: 10px; }
-.bar-row { display: flex; flex-direction: column; gap: 4px; }
-.bar-top { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
-.bar-name { color: #e2e8f0; }
-.bar-num { color: #94a3b8; white-space: nowrap; }
-.bar-track { height: 6px; background: #172e4d; border-radius: 999px; overflow: hidden; }
-.bar-fill { height: 100%; background: #38bdf8; border-radius: 999px; }
+.bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bar-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bar-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.bar-name {
+  color: var(--ub-tx-1);
+}
+.bar-num {
+  color: var(--ub-tx-muted);
+  white-space: nowrap;
+}
+.bar-track {
+  height: 6px;
+  background: var(--ub-inner);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  background: var(--ub-accent);
+  border-radius: 999px;
+}
 
-.risk-compare { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
-.rc-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px; background: #0a182c; border-radius: 6px; }
-.rc-grade { font-weight: 600; }
-.rc-grade.danger { color: #fca5a5; }
-.rc-grade.warn { color: #fde68a; }
-.rc-grade.safe { color: #6ee7b7; }
-.rc-pair { color: #cbd5e1; }
-.rc-pair b { color: #f8fafc; }
-.rc-foot { display: flex; justify-content: space-between; gap: 8px; color: #94a3b8; font-size: 13px; padding-top: 2px; }
+.risk-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+.rc-card {
+  background: var(--ub-inner);
+  border: 1px solid var(--ub-border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.rc-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.rc-grade {
+  font-weight: 600;
+}
+.rc-grade.danger {
+  color: var(--ub-danger-tx);
+}
+.rc-grade.warn {
+  color: var(--ub-gold-tx);
+}
+.rc-grade.safe {
+  color: var(--ub-emerald-tx);
+}
+.rc-pair {
+  color: var(--ub-tx-2);
+}
+.rc-pair b {
+  color: var(--ub-tx-1);
+}
+.rc-dual-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rc-bar {
+  height: 4px;
+  border-radius: 999px;
+}
+.rc-bar.init-danger {
+  background: var(--ub-danger);
+  opacity: 0.55;
+}
+.rc-bar.init-warn {
+  background: var(--ub-gold);
+  opacity: 0.55;
+}
+.rc-bar.cur-safe {
+  background: var(--ub-emerald);
+}
+.rc-bar.cur-cyan {
+  background: var(--ub-accent);
+}
+.rc-foot-boxes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding-top: 2px;
+}
+.rc-stat-box {
+  background: var(--ub-inner);
+  border: 1px solid var(--ub-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rc-stat-box span {
+  font-size: 13px;
+  color: var(--ub-tx-muted);
+}
+.rc-stat-box strong {
+  font-size: 14px;
+  color: var(--ub-emerald-tx);
+}
 
-.map-card { flex: 1; background: #0a182c; border: 1px solid #1e3a5f; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; min-height: 400px; }
-.map-topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
-.map-topbar h2 { margin: 0 0 2px; font-size: 15px; color: #f8fafc; }
-.map-sub { font-size: 13px; color: #94a3b8; }
-.map-pills { display: inline-flex; gap: 6px; }
-.map-pill { border: 1px solid #294d78; background: #102542; color: #cbd5e1; font-size: 13px; padding: 4px 10px; border-radius: 999px; cursor: pointer; }
-.map-pill.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; font-weight: 600; }
+.map-card {
+  flex: 1;
+  background: var(--ub-panel);
+  border: 1px solid var(--ub-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 400px;
+}
+.map-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.map-topbar h2 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  color: var(--ub-tx-1);
+}
+.map-sub {
+  font-size: 13px;
+  color: var(--ub-tx-muted);
+}
+.map-pills {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.map-pill {
+  border: 1px solid var(--ub-border);
+  background: var(--ub-inner);
+  color: var(--ub-tx-2);
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.map-pill:hover {
+  border-color: var(--ub-accent);
+  color: var(--ub-tx-1);
+}
+.map-pill.active {
+  background: var(--ub-accent);
+  border-color: var(--ub-accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+.map-pill.overlay-pill.active {
+  background: var(--ub-emerald);
+  border-color: var(--ub-emerald);
+}
 
-.map-stage { flex: 1; display: flex; align-items: center; justify-content: center; background: #09101d; border-radius: 8px; overflow: hidden; min-height: 270px; }
-.world-svg { width: 100%; height: auto; max-height: 360px; display: block; }
-.land-bg path { fill: #162238; stroke: #263859; stroke-width: 0.7; }
-.active-country { fill: #1e4b7a; stroke: #60a5fa; stroke-width: 0.9; cursor: pointer; transition: opacity 0.2s, fill 0.2s; }
-.active-country:hover { fill: #2563eb; }
-.active-country.dimmed { opacity: 0.35; }
-.arc-item { cursor: pointer; transition: opacity 0.2s; }
-.arc-item.dimmed { opacity: 0.22; }
-.arc-base { fill: none; stroke-width: 2; stroke-linecap: round; opacity: 0.45; }
-.arc-item.selected .arc-base { stroke-width: 3.2; opacity: 0.85; }
-.arc-dash { fill: none; stroke: #e0f2fe; stroke-width: 1.6; stroke-dasharray: 5 5; opacity: 0.9; animation: routeFlow 2.4s linear infinite; }
+.map-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ub-ocean);
+  border: 1px solid var(--ub-border);
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 270px;
+}
+.world-svg {
+  width: 100%;
+  height: auto;
+  max-height: 368px;
+  display: block;
+}
+.u-grid-lines {
+  stroke: var(--ub-grid);
+}
+.land-bg path {
+  fill: var(--ub-land);
+  stroke: var(--ub-land-stroke);
+  stroke-width: 0.7;
+}
+.overlay-country {
+  fill: var(--ub-overlay);
+  fill-opacity: 0.52;
+  stroke: var(--ub-accent);
+  stroke-width: 0.65;
+}
+.active-country {
+  fill: var(--ub-active-land);
+  fill-opacity: 0.82;
+  stroke: var(--ub-accent);
+  stroke-width: 1.05;
+  cursor: pointer;
+  transition: opacity 0.2s, fill 0.2s;
+}
+.active-country.origin-cn {
+  fill: #d97706;
+  fill-opacity: 0.86;
+  stroke: #fbbf24;
+}
+.active-country:hover {
+  fill-opacity: 0.96;
+}
+.active-country.dimmed {
+  opacity: 0.35;
+}
+.arc-item {
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.arc-item.dimmed {
+  opacity: 0.22;
+}
+.arc-base {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  opacity: 0.42;
+}
+.arc-item.selected .arc-base {
+  stroke-width: 3.6;
+  opacity: 0.86;
+}
+.arc-dash {
+  fill: none;
+  stroke: #e0f2fe;
+  stroke-width: 1.6;
+  stroke-dasharray: 5 5;
+  opacity: 0.92;
+  animation: routeFlow 2.4s linear infinite;
+}
+.user-board.utheme-clean .arc-dash {
+  stroke: #1d4ed8;
+}
 @media (prefers-reduced-motion: reduce) {
-  .arc-dash { animation: none; }
+  .arc-dash {
+    animation: none;
+  }
 }
-.hub-node { cursor: pointer; transition: opacity 0.2s; }
-.hub-node.dimmed { opacity: 0.32; }
-.hub-ring { fill: rgba(56, 189, 248, 0.22); stroke: #38bdf8; stroke-width: 1; }
-.hub-dot { fill: #f8fafc; }
-.hub-label { fill: #f8fafc; font-size: 13px; font-weight: 600; paint-order: stroke; stroke: #071222; stroke-width: 3px; }
+.hub-node {
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.hub-node.dimmed {
+  opacity: 0.32;
+}
+.hub-ring {
+  fill: var(--ub-accent);
+  fill-opacity: 0.24;
+  stroke: var(--ub-accent);
+  stroke-width: 1;
+}
+.hub-ring.gold {
+  fill: var(--ub-gold);
+  fill-opacity: 0.3;
+  stroke: var(--ub-gold);
+}
+.hub-dot {
+  fill: #ffffff;
+  stroke: var(--ub-accent);
+  stroke-width: 1.2;
+}
+.hub-dot.gold {
+  fill: var(--ub-gold);
+  stroke: #ffffff;
+}
+.hub-label {
+  fill: var(--ub-tx-1);
+  paint-order: stroke;
+  stroke: var(--ub-lbl-stroke);
+  stroke-width: 3.2px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.hub-label.gold {
+  fill: var(--ub-gold-tx);
+}
 
-.map-focus-bar { background: #0f213a; border: 1px solid #1e3a5f; border-radius: 8px; padding: 9px 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px 14px; flex-wrap: wrap; font-size: 13px; }
-.mf-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 280px; }
-.mf-main strong { color: #f8fafc; font-size: 13px; }
-.mf-main span { color: #cbd5e1; font-size: 13px; line-height: 1.5; }
-.mf-actions { display: inline-flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.mf-link { border: 0; background: none; color: #93c5fd; font-size: 13px; cursor: pointer; padding: 0; }
-.mf-link:hover { text-decoration: underline; }
-.mf-cta { background: #2563eb; color: #fff; text-decoration: none; padding: 4px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.mf-cta:hover { background: #1d4ed8; }
-.mf-legend { display: inline-flex; gap: 12px; flex-wrap: wrap; color: #cbd5e1; font-size: 13px; }
-.mf-legend .lg::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
-.mf-legend .lg.safe::before { background: #34d399; }
-.mf-legend .lg.warn::before { background: #fbbf24; }
-.mf-legend .lg.danger::before { background: #f87171; }
+.map-focus-bar {
+  background: var(--ub-inner);
+  border: 1px solid var(--ub-border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.mf-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 280px;
+}
+.mf-main strong {
+  color: var(--ub-tx-1);
+  font-size: 13px;
+}
+.mf-main span {
+  color: var(--ub-tx-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.mf-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.mf-link {
+  border: 0;
+  background: none;
+  color: var(--ub-link);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+.mf-link:hover {
+  text-decoration: underline;
+}
+.mf-cta {
+  background: #2563eb;
+  color: #ffffff;
+  text-decoration: none;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.mf-cta:hover {
+  background: #1d4ed8;
+}
+.mf-legend {
+  display: inline-flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--ub-tx-2);
+  font-size: 13px;
+}
+.mf-legend .lg::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: 1px;
+}
+.mf-legend .lg.safe::before {
+  background: #34d399;
+}
+.mf-legend .lg.warn::before {
+  background: #fbbf24;
+}
+.mf-legend .lg.danger::before {
+  background: #f87171;
+}
 
-.p-scroll-list { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; padding-right: 2px; }
-.p-proj-row { background: #0a182c; border: 1px solid #1b3556; border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; cursor: pointer; }
-.p-proj-row:hover, .p-proj-row.active { border-color: #38bdf8; background: #102542; }
-.p-proj-top { display: flex; align-items: flex-start; gap: 6px; }
-.p-mod-tag { font-size: 13px; color: #93c5fd; background: #172e4d; border-radius: 4px; padding: 1px 6px; white-space: nowrap; flex-shrink: 0; }
-.p-proj-title { flex: 1; min-width: 0; color: #f8fafc; font-weight: 600; font-size: 13px; line-height: 1.45; text-decoration: none; word-break: break-word; }
-.p-proj-title:hover { color: #60a5fa; text-decoration: underline; }
-.p-proj-go { color: #60a5fa; font-size: 13px; text-decoration: none; white-space: nowrap; flex-shrink: 0; }
-.p-proj-go:hover { text-decoration: underline; }
-.p-proj-meta { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; min-width: 0; }
-.p-status-chip { font-size: 13px; font-weight: 600; border-radius: 999px; padding: 1px 8px; white-space: nowrap; flex-shrink: 0; }
-.p-status-chip.is-ok { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
-.p-status-chip.is-pending { background: rgba(245, 158, 11, 0.2); color: #fde68a; }
-.p-proj-sub { color: #94a3b8; line-height: 1.45; min-width: 0; word-break: break-word; }
+.p-scroll-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 248px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.p-proj-row {
+  background: var(--ub-inner);
+  border: 1px solid var(--ub-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+.p-proj-row:hover,
+.p-proj-row.active {
+  border-color: var(--ub-accent);
+}
+.p-proj-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.p-mod-tag {
+  font-size: 13px;
+  color: var(--ub-link);
+  background: var(--ub-panel);
+  border: 1px solid var(--ub-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.p-proj-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--ub-tx-1);
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.45;
+  text-decoration: none;
+  word-break: break-word;
+}
+.p-proj-title:hover {
+  color: var(--ub-link);
+  text-decoration: underline;
+}
+.p-proj-go {
+  color: var(--ub-link);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.p-proj-go:hover {
+  text-decoration: underline;
+}
+.p-proj-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  min-width: 0;
+}
+.p-status-chip {
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.p-status-chip.is-ok {
+  background: rgba(16, 185, 129, 0.16);
+  color: var(--ub-emerald-tx);
+}
+.p-status-chip.is-pending {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--ub-gold-tx);
+}
+.p-proj-sub {
+  color: var(--ub-tx-muted);
+  line-height: 1.45;
+  min-width: 0;
+  word-break: break-word;
+}
+.p-proj-bar {
+  height: 4px;
+  background: var(--ub-panel);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.p-proj-bar-fill {
+  height: 100%;
+  background: var(--ub-accent);
+  border-radius: 999px;
+}
+.p-proj-bar-fill.ok {
+  background: var(--ub-emerald);
+}
 
-.p-todo-row { background: #0a182c; border: 1px solid #1b3556; border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; text-decoration: none; color: #e2e8f0; }
-.p-todo-row:hover { border-color: #38bdf8; }
-.p-todo-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.p-todo-badge { font-size: 13px; font-weight: 600; border-radius: 999px; padding: 1px 8px; }
-.p-todo-badge.danger { background: rgba(239, 68, 68, 0.22); color: #fca5a5; }
-.p-todo-badge.warning { background: rgba(245, 158, 11, 0.22); color: #fde68a; }
-.p-todo-badge.info { background: rgba(59, 130, 246, 0.22); color: #93c5fd; }
-.p-todo-status { color: #fde68a; font-size: 13px; margin-right: auto; }
-.p-todo-title { font-size: 13px; font-weight: 600; color: #f8fafc; line-height: 1.45; }
-.p-todo-detail { font-size: 13px; color: #94a3b8; line-height: 1.45; }
-.p-fold-btn { border: 1px solid #23436b; background: #0a182c; color: #93c5fd; border-radius: 6px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
-.p-fold-btn:hover { border-color: #38bdf8; }
+.p-todo-row {
+  background: var(--ub-inner);
+  border: 1px solid var(--ub-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-decoration: none;
+  color: var(--ub-tx-2);
+}
+.p-todo-row:hover {
+  border-color: var(--ub-accent);
+}
+.p-todo-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.p-todo-badge {
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.p-todo-badge.danger {
+  background: rgba(239, 68, 68, 0.18);
+  color: var(--ub-danger-tx);
+}
+.p-todo-badge.warning {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--ub-gold-tx);
+}
+.p-todo-badge.info {
+  background: rgba(59, 130, 246, 0.18);
+  color: var(--ub-link);
+}
+.p-todo-status {
+  color: var(--ub-gold-tx);
+  font-size: 13px;
+  margin-right: auto;
+}
+.p-todo-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ub-tx-1);
+  line-height: 1.45;
+}
+.p-todo-detail {
+  font-size: 13px;
+  color: var(--ub-tx-muted);
+  line-height: 1.45;
+}
+.p-fold-btn {
+  border: 1px solid var(--ub-border);
+  background: var(--ub-inner);
+  color: var(--ub-link);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.p-fold-btn:hover {
+  border-color: var(--ub-accent);
+}
 
-.quick-links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-.quick-link { display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #fff; border: 1px solid var(--cy-line); border-radius: 10px; color: var(--cy-text-1); text-decoration: none; }
-.quick-link strong { flex: 1; font-size: 16px; }
-.quick-link:hover { border-color: var(--el-color-primary-light-5); color: var(--el-color-primary); }
-.quick-link .feature-icon { width: 36px; height: 36px; margin: 0; }
+.quick-links {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.quick-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  background: #ffffff;
+  border: 1px solid var(--cy-line);
+  border-radius: 10px;
+  color: var(--cy-text-1);
+  text-decoration: none;
+}
+.quick-link-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.quick-link-text strong {
+  font-size: 16px;
+}
+.quick-link-text span {
+  font-size: 13px;
+  color: #64748b;
+}
+.quick-link:hover {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+.quick-link .feature-icon {
+  width: 36px;
+  height: 36px;
+  margin: 0;
+}
 
 @media (max-width: 1240px) {
-  .kpi-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .capability-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 860px) {
-  .posture-grid, .portal-grid, .kpi-strip, .quick-links { grid-template-columns: 1fr; }
+  .posture-grid,
+  .user-board.is-fullscreen .posture-grid,
+  .portal-grid,
+  .kpi-strip,
+  .quick-links,
+  .capability-strip,
+  .empty-cap-strip {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

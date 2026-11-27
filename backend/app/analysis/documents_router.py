@@ -1059,6 +1059,9 @@ async def _write_paper(
 _PAPER_WRITE_LOCKS: dict[tuple[int, str, str], object] = {}
 
 
+_UNMAPPED_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
 def sanitize_custom_tag(val: object, *, max_len: int = 40) -> str:
     """Clean a preset scenario key or a user-entered custom scenario label safely."""
     raw = str(val or "")
@@ -1069,6 +1072,14 @@ def sanitize_custom_tag(val: object, *, max_len: int = 40) -> str:
     return cleaned[:max_len]
 
 
+def _is_valid_scenario_entry(tag: str) -> bool:
+    if not tag:
+        return False
+    if tag in SCENARIO_LABELS:
+        return True
+    return _UNMAPPED_SLUG_RE.fullmatch(tag) is None
+
+
 def task_functions(task: AnalysisTask) -> list[str]:
     """Return all selected business function keys or custom scenario labels for a project (preserving order)."""
     raw = (getattr(task, "facts_json", None) or {}).get("_functions")
@@ -1076,21 +1087,22 @@ def task_functions(task: AnalysisTask) -> list[str]:
     if isinstance(raw, list):
         for x in raw:
             tag = sanitize_custom_tag(x)
-            if tag and tag not in out:
+            if _is_valid_scenario_entry(tag) and tag not in out:
                 out.append(tag)
             if len(out) >= 12:
                 break
     primary = sanitize_custom_tag(getattr(task, "scenario_type", "") or "")
-    if not out and primary:
-        out = [primary]
-    elif primary and primary not in out:
-        out.insert(0, primary)
+    if _is_valid_scenario_entry(primary):
+        if not out:
+            out = [primary]
+        elif primary not in out:
+            out.insert(0, primary)
     return out[:12]
 
 
 def _scenario(task: AnalysisTask) -> dict[str, str]:
     fns = task_functions(task)
-    label = "；".join(SCENARIO_LABELS.get(f, f) for f in fns if f)
+    label = "；".join(SCENARIO_LABELS.get(f, f) for f in fns if _is_valid_scenario_entry(f))
     scene = str((getattr(task, "facts_json", None) or {}).get("business_scene") or "")
     return {"scenario": f"{label}（{scene}）" if label and scene else (label or scene)}
 
