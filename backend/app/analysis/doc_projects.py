@@ -16,6 +16,7 @@ import logging
 import re
 import uuid
 import zipfile
+from collections import OrderedDict
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 
@@ -134,8 +135,16 @@ def _build_risk_sync(facts: dict, vehicle_model: str, risk_raw: str) -> dict:
 CHAT_KEY = "_chat"  # 项目关联的对话：项目页旁边显示它，对话里说的业务情况进本项目预填
 MAX_SOURCE_TEXT = 50000
 STALE_PAPER_SECONDS = 20 * 60
-_suggesting: dict[str, tuple[str, datetime, str]] = {}  # 项目 -> (状态, 开始时间, 失败原因)
-_papers: dict[tuple[str, str], tuple[str, datetime, str]] = {}  # (项目, 文件) -> (状态, 开始时间, 失败原因)
+_suggesting: OrderedDict[str, tuple[str, datetime, str]] = OrderedDict()  # 项目 -> (状态, 开始时间, 失败原因)
+_papers: OrderedDict[tuple[str, str], tuple[str, datetime, str]] = OrderedDict()  # (项目, 文件) -> (状态, 开始时间, 失败原因)
+
+
+def _put_bounded(store: OrderedDict, key, val, max_items: int = 256) -> None:
+    if key in store:
+        store.move_to_end(key)
+    store[key] = val
+    while len(store) > max_items:
+        store.popitem(last=False)
 
 # 项目名里用的业务简称：同一流向的多个项目靠它区分
 SHORT_FUNCTION = {
@@ -275,10 +284,10 @@ def task_business_scenes(task: AnalysisTask) -> list[str]:
     return []
 
 
-def _format_multi_function_short(fns: list[str], fallback: str = "") -> str:
-    labels = [SHORT_FUNCTION.get(f, f[:12]) for f in fns if SHORT_FUNCTION.get(f, f[:12])]
+def _format_multi_function_short(fns: list[str], fallback: str = "", *, max_label_len: int = 48) -> str:
+    labels = [SHORT_FUNCTION.get(f, f[:max_label_len]) for f in fns if SHORT_FUNCTION.get(f, f[:max_label_len])]
     if not labels:
-        return fallback[:12]
+        return fallback[:max_label_len]
     if len(labels) == 1:
         return labels[0]
     if len(labels) == 2:
@@ -490,8 +499,8 @@ async def list_projects(user: UserDep, session: SessionDep, archived: bool = Fal
     return [item for item, _ in await _list(session, user, archived)]
 
 
-_PROGRESS_CACHE: dict[str, tuple[tuple, dict]] = {}
-_OVERVIEW_PROJECT_CACHE: dict[str, tuple[tuple, dict]] = {}
+_PROGRESS_CACHE: OrderedDict[str, tuple[tuple, dict]] = OrderedDict()
+_OVERVIEW_PROJECT_CACHE: OrderedDict[str, tuple[tuple, dict]] = OrderedDict()
 
 
 async def _progress_stamp(session: AsyncSession, task: AnalysisTask) -> tuple:
@@ -568,6 +577,7 @@ async def _fast_progress(
     stamp = await _progress_stamp(session, task)
     cached = _PROGRESS_CACHE.get(str(task.id))
     if cached and cached[0] == stamp:
+        _PROGRESS_CACHE.move_to_end(str(task.id))
         return cached[1]
 
     from app.iam.service import strip_trial_org_suffix
@@ -708,9 +718,7 @@ async def _fast_progress(
         "missing": len(final["missing"]) + sum(f["missing"] for f in final["forms"]),
         "issues": len(final.get("issues") or []),
     }
-    if len(_PROGRESS_CACHE) > 256:
-        _PROGRESS_CACHE.clear()
-    _PROGRESS_CACHE[str(task.id)] = (stamp, res)
+    _put_bounded(_PROGRESS_CACHE, str(task.id), (stamp, res), 64)
     return res
 
 
@@ -1604,7 +1612,7 @@ async def clone_project(project_id: uuid.UUID, request: Request, user: UserDep, 
             SCENES_KEY,
             "business_scene",
         ):
-            cloned_facts[k] = v
+            cloned_facts[k] = copy.deepcopy(v)
     base_title = (src_task.title or "合规文件").strip()
     if base_title.endswith("（副本）"):
         new_title = base_title[:60]
@@ -1807,7 +1815,9 @@ async def _official_states(session: AsyncSession, task: AnalysisTask, forms: lis
     return out
 
 
-async def _official_rendered(session: AsyncSession, task: AnalysisTask, form_code: str) -> tuple[bytes, str, dict]:
+async def _official_rendered(
+    session: AsyncSession, task: AnalysisTask, form_code: str, *, foreign_only: bool = False
+) -> tuple[bytes, str, dict]:
     """The official form of this project filled with what the project knows (the user's own entries
     on the form page included)."""
     from functools import partial
@@ -1827,8 +1837,17 @@ async def _official_rendered(session: AsyncSession, task: AnalysisTask, form_cod
     row = await session.scalar(
         select(FormInstance).where(FormInstance.task_id == task.id, FormInstance.org_id == task.org_id, FormInstance.form_code == form_code)
     )
+    is_foreign_form = str(form.get("country") or "").upper() not in ("", "CN")
     data, _report, too_long = await run_in_threadpool(
-        partial(fs.render, form, (row.answers if row else {}) or {}, facts_for_task(task, form_code), allow_annex=True)
+        partial(
+            fs.render,
+            form,
+            (row.answers if row else {}) or {},
+            facts_for_task(task, form_code),
+            allow_annex=True,
+            foreign_only=foreign_only,
+            foreign_annex=is_foreign_form,
+        )
     )
     if too_long:
         raise HTTPException(409, "以下内容放不进官方表格栏位，请在表格里修改：" + "；".join(t["label"] for t in too_long))
@@ -2155,6 +2174,7 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
         )
         hit = _OVERVIEW_PROJECT_CACHE.get(str(task.id))
         if hit is not None and hit[0] == ov_stamp:
+            _OVERVIEW_PROJECT_CACHE.move_to_end(str(task.id))
             return copy.deepcopy(hit[1])
 
     library = await D.library_countries(session)
@@ -2387,6 +2407,7 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
             "recipient_country": recipient,
             "function": cur_fns[0] if cur_fns else (task.scenario_type or ""),
             "functions": cur_fns,
+            "function_zh": _format_multi_function_short(cur_fns, facts.get(DOC_FACT_PREFIX + "scenario") or ""),
             "business_scene": cur_scs[0] if cur_scs else "",
             "business_scenes": cur_scs,
             "scenario_text": facts.get(DOC_FACT_PREFIX + "scenario", ""),
@@ -2427,9 +2448,7 @@ async def build_overview(session: AsyncSession, task: AnalysisTask, state_then: 
     signoff_full = project_delivery_aids.build_signoff_checklist(result, answers)
     result["signoff_summary"] = {k: v for k, v in signoff_full.items() if k != "blocks"}
     if ov_stamp is not None:
-        if len(_OVERVIEW_PROJECT_CACHE) > 128:
-            _OVERVIEW_PROJECT_CACHE.clear()
-        _OVERVIEW_PROJECT_CACHE[str(task.id)] = (ov_stamp, copy.deepcopy(result))
+        _put_bounded(_OVERVIEW_PROJECT_CACHE, str(task.id), (ov_stamp, copy.deepcopy(result)), 24)
     return result
 
 
@@ -2761,11 +2780,11 @@ async def _suggest_job(factory: async_sessionmaker, project_id: uuid.UUID, text:
                     facts[DIAGNOSIS_KEY] = diag
                 task.facts_json = facts
                 await session.commit()
-        _suggesting[key] = ("done", datetime.now(UTC), "")
+        _put_bounded(_suggesting, key, ("done", datetime.now(UTC), ""), 256)
     except Exception as exc:  # noqa: BLE001 - 后台任务：失败要让用户看到，不能悄悄消失
         log.exception("建议答案生成失败")
         why = "模型暂时不可用，稍后再试；也可以直接填写" if isinstance(exc, RuntimeError) else "暂时没能生成建议，稍后再试；也可以直接填写"
-        _suggesting[key] = ("failed", datetime.now(UTC), why)
+        _put_bounded(_suggesting, key, ("failed", datetime.now(UTC), why), 256)
 
 
 @router.post("/{project_id}/suggest", status_code=202)
@@ -2786,7 +2805,7 @@ async def start_suggest(project_id: uuid.UUID, body: SuggestIn, user: UserDep, s
 
 def begin_suggest(session: AsyncSession, project_id: uuid.UUID, text: str) -> None:
     """Start reading ``text`` for suggested answers in the background."""
-    _suggesting[str(project_id)] = ("running", datetime.now(UTC), "")
+    _put_bounded(_suggesting, str(project_id), ("running", datetime.now(UTC), ""), 256)
     asyncio.create_task(_suggest_job(async_sessionmaker(session.bind, expire_on_commit=False), project_id, text))
 
 
@@ -2829,7 +2848,7 @@ async def start_suggest_from_file(
     org = await session.get(Organization, task.org_id) if task.org_id else None
     aliases = org_redaction_aliases(org)
     redaction_info = summarize_redaction(text, aliases)
-    _suggesting[str(task.id)] = ("running", datetime.now(UTC), "")
+    _put_bounded(_suggesting, str(task.id), ("running", datetime.now(UTC), ""), 256)
     asyncio.create_task(_suggest_job(async_sessionmaker(session.bind, expire_on_commit=False), project_id, text))
     return {"state": "running", "seconds": 0, "note": note, "redaction": redaction_info}
 
@@ -2847,8 +2866,13 @@ async def accept_suggestions(project_id: uuid.UUID, body: AcceptIn, user: UserDe
         if key == "vehicle_model":
             task.vehicle_model = task.vehicle_model or item["text"][:128]
         elif key == "functions":
+            existing_custom = [f for f in D.task_functions(task) if f and f not in SCENARIO_LABELS]
             raw_keys = item.get("keys") if isinstance(item.get("keys"), list) else []
-            clean_fns = list(dict.fromkeys(str(x).strip() for x in raw_keys if str(x).strip() in SCENARIO_LABELS))
+            clean_fns = list(
+                dict.fromkeys(
+                    [*(str(x).strip() for x in raw_keys if str(x).strip() in SCENARIO_LABELS), *existing_custom]
+                )
+            )
             if clean_fns:
                 facts[FUNCTIONS_KEY] = clean_fns
                 task.scenario_type = clean_fns[0]
@@ -2878,38 +2902,47 @@ async def accept_suggestions(project_id: uuid.UUID, body: AcceptIn, user: UserDe
 
 async def _paper_job(factory: async_sessionmaker, project_id: uuid.UUID, code: str, user_id: uuid.UUID) -> None:
     from app.core.redaction import bind_egress, llm_scope
+    from app.core.resource_gate import background_job_gate
     from app.iam.models import Organization
 
     key = (str(project_id), code)
     try:
-        with system_scope("doc-paper"):
-            async with factory() as session:
-                task = await session.get(AnalysisTask, project_id)
-                if task is None:
-                    return
-                org = await session.get(Organization, task.org_id) if task.org_id else None
-                template, values, citations = await D._inputs(session, task, code)
-                with llm_scope():
-                    bind_egress(session, org)
-                    await D._write_paper(session, task, code, template, values, citations, user_id, raise_on_error=True)
-                if (
-                    code == "dpia"
-                    and values.get("source_country")
-                    and country_of(values.get("source_country")) != "CN"
-                    and involves_eu_eea(values.get("source_country"), values.get("recipient_country"))
-                ):
-                    try:
-                        await D.edpb_en_docx(session, task, draft=False, actor_user_id=user_id)
-                    except Exception:  # noqa: BLE001
-                        log.debug("预生成 EDPB 英文官方表略过（可在导出时按需生成）", exc_info=True)
-                ov_after = await build_overview(session, task)
-                await _sync_project_status(session, task, ov_after["final"])
-        _papers[key] = ("done", datetime.now(UTC), "")
+        async with background_job_gate():
+            with system_scope("doc-paper"):
+                async with factory() as session:
+                    task = await session.get(AnalysisTask, project_id)
+                    if task is None or task.archived_at is not None:
+                        _papers.pop(key, None)
+                        return
+                    org = await session.get(Organization, task.org_id) if task.org_id else None
+                    template, values, citations = await D._inputs(session, task, code)
+                    with llm_scope():
+                        bind_egress(session, org)
+                        await D._write_paper(session, task, code, template, values, citations, user_id, raise_on_error=True)
+                    await session.refresh(task)
+                    if task.archived_at is not None:
+                        _papers.pop(key, None)
+                        return
+                    if (
+                        code == "dpia"
+                        and values.get("source_country")
+                        and country_of(values.get("source_country")) != "CN"
+                        and involves_eu_eea(values.get("source_country"), values.get("recipient_country"))
+                    ):
+                        try:
+                            await D.edpb_en_docx(session, task, draft=False, actor_user_id=user_id)
+                        except Exception:  # noqa: BLE001
+                            log.debug("预生成 EDPB 英文官方表略过（可在导出时按需生成）", exc_info=True)
+                    ov_after = await build_overview(session, task)
+                    await _sync_project_status(session, task, ov_after["final"])
+        _put_bounded(_papers, key, ("done", datetime.now(UTC), ""), 256)
     except NarrativeError as exc:
-        _papers[key] = ("failed", datetime.now(UTC), f"论述没有生成成功：{exc}。可以补充事实后重试")
+        from app.core.jargon import scrub_engineering_jargon
+
+        _put_bounded(_papers, key, ("failed", datetime.now(UTC), scrub_engineering_jargon(f"论述没有生成成功：{exc}。可以补充事实后重试")), 256)
     except Exception:  # noqa: BLE001 - 后台任务：失败要让用户看到，不能悄悄消失
         log.exception("论述后台生成失败")
-        _papers[key] = ("failed", datetime.now(UTC), "服务暂时不可用，请稍后重试")
+        _put_bounded(_papers, key, ("failed", datetime.now(UTC), "服务暂时不可用，请稍后重试"), 256)
 
 
 @router.post("/{project_id}/documents/{code}/include")
@@ -2957,7 +2990,7 @@ async def start_paper(project_id: uuid.UUID, code: str, user: UserDep, session: 
     state = _paper_state(project_id, code, False)
     if state["state"] == "running":
         return state
-    _papers[key] = ("running", datetime.now(UTC), "")
+    _put_bounded(_papers, key, ("running", datetime.now(UTC), ""), 256)
     asyncio.create_task(_paper_job(async_sessionmaker(session.bind, expire_on_commit=False), project_id, code, user.user_id))
     return {"state": "running", "seconds": 0}
 
@@ -3105,65 +3138,153 @@ async def export_all(
     builtin_docx_forms: list[tuple[str, bytes, str, bool]] = []
     src_code = country_of(overview_now["route"]["source_country"])
     involves_eu = involves_eu_eea(overview_now["route"]["source_country"], overview_now["route"]["recipient_country"])
+    is_rtl_lang = lang == "ar"
+
+    from app.analysis.english_report import (
+        _apply_translated_slots,
+        _collect_translatable_slots,
+        strip_and_translate_cjk,
+    )
+    from app.analysis.multilingual_report import (
+        _apply_multilingual_slots,
+        clean_and_gate_target_text,
+    )
+
+    def _tr_str(txt: str, fb: str = "Document") -> str:
+        if lang == "zh":
+            return txt
+        if lang == "en":
+            return strip_and_translate_cjk(txt, fallback=fb)
+        return clean_and_gate_target_text(txt, lang, fallback=fb)
+
+    def _tr_std_blocks(blks: list[dict], fb: str = "—") -> list[dict]:
+        if lang == "zh":
+            return blks
+        slots = _collect_translatable_slots(blks)
+        if lang == "en":
+            return _apply_translated_slots(blks, [strip_and_translate_cjk(s, fallback=fb) for s in slots])
+        return _apply_multilingual_slots(blks, [clean_and_gate_target_text(s, lang, fallback=fb) for s in slots], lang)
+
+    task_tr = task_title if lang == "zh" else _tr_str(task_title, "Compliance_Project")
+
+    async def _render_std_entry(blks: list[dict], label_text: str) -> tuple[str, bytes, bool]:
+        ext_now = "docx" if via_word else fmt
+        if lang != "zh":
+            blks = _tr_std_blocks(blks)
+        if ext_now == "docx":
+            b = await asyncio.to_thread(
+                build_docx,
+                Rendered(blocks=blks),
+                label_text,
+                foreign=(lang != "zh"),
+                rtl=is_rtl_lang if lang != "zh" else None,
+            )
+            return named(task_tr, label_text, ext="docx"), b, via_word
+        if ext_now == "xlsx":
+            b = await asyncio.to_thread(
+                build_xlsx,
+                blks,
+                label_text,
+                foreign=(lang != "zh"),
+                rtl=bool(is_rtl_lang and lang != "zh"),
+            )
+            return named(task_tr, label_text, ext="xlsx"), b, False
+        b = await asyncio.to_thread(
+            build_pdf,
+            Rendered(blocks=blks),
+            label_text,
+            foreign=(lang != "zh"),
+            rtl=is_rtl_lang if lang != "zh" else None,
+        )
+        return named(task_tr, label_text, ext="pdf"), b, False
+
     if not draft:
-        aid_ext = "docx" if via_word else fmt
-        signoff_bytes, signoff_fname, _ = await _build_aid_doc(session, task, "signoff", aid_ext)
-        made.append((f"00_{signoff_fname}", signoff_bytes))
+        if lang == "zh":
+            aid_ext = "docx" if via_word else fmt
+            signoff_bytes, signoff_fname, _ = await _build_aid_doc(session, task, "signoff", aid_ext)
+            made.append((f"00_{signoff_fname}", signoff_bytes))
+        else:
+            _, _, signoff_blks = await _build_aid_doc(session, task, "signoff", "preview")
+            signoff_lbl = _tr_str("正式申报递交前人工核签清单", "Pre_Submission_Signoff_Checklist")
+            sf_name, sf_bytes, sf_via_word = await _render_std_entry(signoff_blks, signoff_lbl)
+            (made if sf_via_word else originals).append((f"00_{sf_name}", sf_bytes))
     for i, (code, _, _) in enumerate(DEFAULT_TEMPLATES, 1):
         if code in left_out:
             continue
         if code == "declaration":
             _, values, _ = await D._inputs(session, task, code)
             forms = D._official_forms_for(code, values)
+            non_cn_forms_added = False
             for k, f in enumerate(forms):  # 转移申请在前，与项目页顺序一致
+                f_country = str(f.get("country") or "").upper()
+                if lang != "zh" and (f_country in ("", "CN") or fmt == "xlsx"):
+                    # 外文包或外文 Excel 包不塞纯中文官方原表，统一走下方多语种结构化转译分支（保留网格合并与在线修订）
+                    continue
                 try:
-                    raw_form, label_part, f_meta = await _official_rendered(session, task, f["code"])
+                    raw_form, label_part, f_meta = await _official_rendered(
+                        session, task, f["code"], foreign_only=(lang != "zh")
+                    )
                 except HTTPException as exc:
-                    skipped.append(f"{f['name_zh']}：{exc.detail}")
+                    err_line = f"{f['name_zh']}：{exc.detail}" if lang == "zh" else _tr_str(f"{f.get('code', code)}: {exc.detail}", f"{f.get('code', code)}: skipped")
+                    skipped.append(err_line)
                     continue
                 prefix = f"{i:02d}{chr(97 + k)}_"
+                eff_label = (
+                    label_part
+                    if lang == "zh"
+                    else str(f_meta.get("name_orig") or f_meta.get("code") or "Official_Form").replace("_", " ")
+                )
+                eff_title = task_title if lang == "zh" else task_tr
+                non_cn_forms_added = True
                 if f_meta.get("kind") == "docx":
                     if via_word:
-                        made.append((f"{prefix}{named(task_title, label_part, ext='docx')}", raw_form))
+                        made.append((f"{prefix}{named(eff_title, eff_label, ext='docx')}", raw_form))
                     elif fmt == "pdf":
                         is_foreign_form = str(f_meta.get("country") or "").upper() not in ("", "CN")
                         pdf_header = (
                             str(f_meta.get("name_orig") or f_meta["code"].replace("_", " "))
                             if is_foreign_form
-                            else label_part
+                            else eff_label
                         )
                         builtin_docx_forms.append(
-                            (f"{prefix}{named(task_title, label_part, ext='pdf')}", raw_form, pdf_header, is_foreign_form)
+                            (f"{prefix}{named(eff_title, eff_label, ext='pdf')}", raw_form, pdf_header, is_foreign_form)
                         )
                     else:
-                        originals.append((f"{prefix}{named(task_title, label_part, ext='docx')}", raw_form))
+                        originals.append((f"{prefix}{named(eff_title, eff_label, ext='docx')}", raw_form))
                 else:
-                    originals.append((f"{prefix}{named(task_title, label_part, ext='pdf')}", raw_form))
-            if official_only(code, values.get("source_country", ""), forms):
-                continue  # 发出国有官方表：申报表就是官方原表，不再放通用申报表
-        if lang != "zh" and fmt in ("docx", "pdf"):
+                    originals.append((f"{prefix}{named(eff_title, eff_label, ext='pdf')}", raw_form))
+            if official_only(code, values.get("source_country", ""), forms) and (lang == "zh" or non_cn_forms_added):
+                continue  # 发出国有同语种/外文官方表：申报表就是官方原表，不再放通用申报表
+        if lang != "zh":
             try:
-                from app.analysis.english_report import strip_and_translate_cjk
-                from app.analysis.multilingual_report import clean_and_gate_target_text
-
                 tr_blocks, label_tr, header_tr = await D._build_foreign_doc(session, task, code, user, draft, lang=lang)
-                task_tr = (
-                    strip_and_translate_cjk(task_title, fallback="Compliance_Project")
-                    if lang == "en"
-                    else clean_and_gate_target_text(task_title, lang, fallback="Compliance_Project")
-                )
-                if via_word or fmt == "docx":
+                if fmt == "xlsx":
+                    tr_xlsx = await asyncio.to_thread(
+                        build_xlsx, tr_blocks, label_tr, foreign=True, rtl=bool(is_rtl_lang)
+                    )
+                    originals.append((f"{i:02d}_{named(task_tr, label_tr, ext='xlsx')}", tr_xlsx))
+                elif via_word or fmt == "docx":
                     tr_bytes = await asyncio.to_thread(
-                        build_docx, Rendered(blocks=tr_blocks), header_tr, foreign=True, table_style="formal_black"
+                        build_docx,
+                        Rendered(blocks=tr_blocks),
+                        header_tr,
+                        foreign=True,
+                        table_style="formal_black",
+                        rtl=is_rtl_lang,
                     )
                     made.append((f"{i:02d}_{named(task_tr, label_tr, ext='docx')}", tr_bytes))
                 else:
                     tr_pdf = await asyncio.to_thread(
-                        build_pdf, Rendered(blocks=tr_blocks), header_tr, foreign=True, table_style="formal_black"
+                        build_pdf,
+                        Rendered(blocks=tr_blocks),
+                        header_tr,
+                        foreign=True,
+                        table_style="formal_black",
+                        rtl=is_rtl_lang,
                     )
                     originals.append((f"{i:02d}_{named(task_tr, label_tr, ext='pdf')}", tr_pdf))
             except HTTPException as exc:
-                skipped.append(f"{code}：{exc.detail}")
+                skipped.append(_tr_str(f"{code}: {exc.detail}", f"{code}: skipped"))
             continue
         try:
             data, filename, _ = await _file(session, task, code, "docx" if via_word else fmt, draft)
@@ -3203,9 +3324,15 @@ async def export_all(
             except Exception as exc:  # noqa: BLE001
                 log.warning("打包成稿生成欧盟标准英文范本略过：%s", exc)
     if not draft and overview_now.get("third_country_checklists"):
-        aid_ext = "docx" if via_word else fmt
-        tc_bytes, tc_fname, _ = await _build_aid_doc(session, task, "third-country", aid_ext)
-        made.append((f"09_{tc_fname}", tc_bytes))
+        if lang == "zh":
+            aid_ext = "docx" if via_word else fmt
+            tc_bytes, tc_fname, _ = await _build_aid_doc(session, task, "third-country", aid_ext)
+            made.append((f"09_{tc_fname}", tc_bytes))
+        else:
+            _, _, tc_blks = await _build_aid_doc(session, task, "third-country", "preview")
+            tc_lbl = _tr_str("库外法域属地法律待核查清单", "Third_Country_Statutory_Verification_Checklist")
+            tc_name, tc_bytes, tc_via_word = await _render_std_entry(tc_blks, tc_lbl)
+            (made if tc_via_word else originals).append((f"09_{tc_name}", tc_bytes))
 
     # 关键优化：所有数据库读取已全部完成，进入耗时 PDF 转换与压缩前立即归还数据库连接与事务锁
     await session.close()
@@ -3233,15 +3360,35 @@ async def export_all(
 
     route_note_entry: tuple[str, bytes] | None = None
     if route_note is not None:
+        rn_label = "出境路径判断待补" if lang == "zh" else _tr_str("出境路径判断待补", "Route_Determination_Pending")
+        rn_blocks = route_note if lang == "zh" else _tr_std_blocks(route_note)
         if fmt == "pdf":
-            rn_bytes = await asyncio.to_thread(build_pdf, Rendered(blocks=route_note), "出境路径判断待补")
-            route_note_entry = (named(task_title, "出境路径判断待补", ext="pdf"), rn_bytes)
+            rn_bytes = await asyncio.to_thread(
+                build_pdf,
+                Rendered(blocks=rn_blocks),
+                rn_label,
+                foreign=(lang != "zh"),
+                rtl=is_rtl_lang if lang != "zh" else None,
+            )
+            route_note_entry = (named(task_tr, rn_label, ext="pdf"), rn_bytes)
         elif fmt == "xlsx":
-            rn_bytes = await asyncio.to_thread(build_xlsx, route_note, "出境路径判断待补")
-            route_note_entry = (named(task_title, "出境路径判断待补", ext="xlsx"), rn_bytes)
+            rn_bytes = await asyncio.to_thread(
+                build_xlsx,
+                rn_blocks,
+                rn_label,
+                foreign=(lang != "zh"),
+                rtl=bool(is_rtl_lang and lang != "zh"),
+            )
+            route_note_entry = (named(task_tr, rn_label, ext="xlsx"), rn_bytes)
         else:
-            rn_bytes = await asyncio.to_thread(build_docx, Rendered(blocks=route_note), "出境路径判断待补")
-            route_note_entry = (named(task_title, "出境路径判断待补", ext="docx"), rn_bytes)
+            rn_bytes = await asyncio.to_thread(
+                build_docx,
+                Rendered(blocks=rn_blocks),
+                rn_label,
+                foreign=(lang != "zh"),
+                rtl=is_rtl_lang if lang != "zh" else None,
+            )
+            route_note_entry = (named(task_tr, rn_label, ext="docx"), rn_bytes)
 
     def _pack_zip() -> bytes:
         buf = io.BytesIO()
@@ -3249,16 +3396,31 @@ async def export_all(
             for fname, fdata in sorted(made + originals):
                 zf.writestr(fname, fdata)
             if skipped:
-                zf.writestr("未能生成的文件.txt", "\n".join(skipped))
+                skip_name = "未能生成的文件.txt" if lang == "zh" else "Skipped_Documents.txt"
+                zf.writestr(skip_name, "\n".join(skipped))
             if route_note_entry is not None:
                 zf.writestr(route_note_entry[0], route_note_entry[1])
             if not_needed:
-                tpl_names = {c: nm for c, nm, _ in DEFAULT_TEMPLATES} | {"dpia_edpb_en": "数据保护影响评估（欧盟标准英文范本）"}
-                if overview_now["route"]["source_country"] and src_code != "CN":
-                    tpl_names["declaration"] = D._NON_CN_DECL_NAME
-                zf.writestr("按目前情况不需要的文件.txt", "\n".join(f"{tpl_names.get(c, c)}：{a['why']}" for c, a in not_needed.items()))
+                if lang == "zh":
+                    tpl_names = {c: nm for c, nm, _ in DEFAULT_TEMPLATES} | {"dpia_edpb_en": "数据保护影响评估（欧盟标准英文范本）"}
+                    if overview_now["route"]["source_country"] and src_code != "CN":
+                        tpl_names["declaration"] = D._NON_CN_DECL_NAME
+                    zf.writestr("按目前情况不需要的文件.txt", "\n".join(f"{tpl_names.get(c, c)}：{a['why']}" for c, a in not_needed.items()))
+                else:
+                    lines_na = [
+                        _tr_str(f"{c.upper()}: {a['why']}", f"{c.upper()}: Not required under current route")
+                        for c, a in not_needed.items()
+                    ]
+                    zf.writestr("Not_Applicable_Documents.txt", "\n".join(lines_na))
         return buf.getvalue()
 
     zip_bytes = await asyncio.to_thread(_pack_zip)
-    name = named(task.title, "初稿" if draft else "成稿", ext="zip")
+    if lang == "zh":
+        name = named(task_title, "初稿" if draft else "成稿", ext="zip")
+    else:
+        from app.analysis.multilingual_report import release_lang_lexicon_cache
+
+        pkg_suffix = _tr_str("初稿" if draft else "成稿", "Draft" if draft else "Final")
+        name = named(task_tr, f"{pkg_suffix}_{lang.upper()}", ext="zip")
+        release_lang_lexicon_cache()
     return Response(zip_bytes, media_type="application/zip", headers={"Content-Disposition": content_disposition(name)})

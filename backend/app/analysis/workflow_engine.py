@@ -42,15 +42,15 @@ def country_name_zh(code: str | None) -> str:
 
 def is_overseas_country(code: str | None) -> bool:
     """True when ``code`` is a valid overseas ISO country/region code (excludes CN/ZZ/--)."""
-    from app.analysis.document_basis import NAMES
+    import re as _re
 
     c = (code or "").strip().upper()
-    return bool(c and c not in ("--", "CN", "ZZ") and c in NAMES)
+    return bool(c and c not in ("--", "CN", "ZZ", "INTL") and _re.fullmatch(r"[A-Z]{2}", c))
 
 
 async def active_overseas_countries(session: AsyncSession) -> list[dict[str, str]]:
-    """Pilot overseas countries plus any additional overseas countries with available, parsed,
-    citable regulations or non-empty published briefings in the library."""
+    """Overseas countries that actually have available, parsed, citable regulations or non-empty
+    published briefings in the library (empty library cleanly returns [])."""
     from sqlalchemy import func, select
 
     from app.ingestion.models import NOT_CITABLE_STATUSES, Document, DocumentVersion
@@ -78,20 +78,23 @@ async def active_overseas_countries(session: AsyncSession) -> list[dict[str, str
             .distinct()
         )
     ).all()
-    extra = sorted(
-        {
-            c.upper()
-            for c in [*rows, *wp_rows]
-            if c and c.upper() not in COUNTRY_NAMES_ZH and c.upper() not in ("CN", "ZZ", "--")
-        }
-    )
-    ordered = [*COUNTRY_NAMES_ZH.keys(), *extra]
+    present = {
+        c.upper()
+        for c in [*rows, *wp_rows]
+        if c and c.upper() not in ("CN", "ZZ", "INTL", "--")
+    }
+    pilot_present = [c for c in COUNTRY_NAMES_ZH if c in present]
+    extra = sorted(c for c in present if c not in COUNTRY_NAMES_ZH)
+    ordered = [*pilot_present, *extra]
     return [{"code": c, "name": country_name_zh(c)} for c in ordered]
 
 
 async def overseas_countries_map(session: AsyncSession) -> dict[str, str]:
-    """Ordered ``{code: name_zh}`` mapping of all active overseas countries."""
-    return {item["code"]: item["name"] for item in await active_overseas_countries(session)}
+    """Ordered ``{code: name_zh}`` mapping of all active overseas countries (empty on cold-start DB)."""
+    active = {item["code"]: item["name"] for item in await active_overseas_countries(session)}
+    if not active:
+        return {}
+    return {**COUNTRY_NAMES_ZH, **{k: v for k, v in active.items() if k not in COUNTRY_NAMES_ZH}}
 
 SCENARIO_LABELS = {
     "autonomous_trial": "L3/L4 自动驾驶公共道路测试与远程监控回传",

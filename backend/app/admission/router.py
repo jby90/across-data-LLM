@@ -45,7 +45,7 @@ SHOWN = ("pending_review", "approved")
 class ProjectIn(BaseModel):
     entry_id: uuid.UUID
     task_id: uuid.UUID | None = None
-    function: str = Field(default="", max_length=32)
+    function: str = Field(default="", max_length=80)
     title: str = Field(default="", max_length=256)
     applicant: str = Field(default="", max_length=256)
     vehicle_model: str = Field(default="", max_length=256)
@@ -100,6 +100,14 @@ _PORTALS_CACHE: list[dict] | None = None
 _BASIS_MEMO: dict[str, dict | None] = {}
 _LISTED_MEMO: dict[str, bool] = {}
 _DETAIL_MEMO: dict[tuple[str, str], dict] = {}
+
+
+def _put_memo(cache: dict, key: Any, val: Any, limit: int = 512) -> None:
+    if key in cache:
+        cache.pop(key, None)
+    while len(cache) >= limit:
+        cache.pop(next(iter(cache)), None)
+    cache[key] = val
 
 
 def _portals_list() -> list[dict]:
@@ -175,7 +183,7 @@ async def _basis(session: AsyncSession, clause_id) -> dict | None:
     if row is None:
         s_cache[key] = None
         if keeper_active or rebuilding.get():
-            _BASIS_MEMO[key] = None
+            _put_memo(_BASIS_MEMO, key, None, 1024)
         return None
     from app.knowledge.reading import article_label
 
@@ -207,7 +215,7 @@ async def _basis(session: AsyncSession, clause_id) -> dict | None:
     }
     s_cache[key] = res
     if keeper_active or rebuilding.get():
-        _BASIS_MEMO[key] = res
+        _put_memo(_BASIS_MEMO, key, res, 1024)
     return dict(res)
 
 
@@ -319,22 +327,39 @@ def clean_quote(text_: str | None) -> str:
 ARABIC = re.compile(r"[\u0600-\u06FF]")
 
 
+_BARE_GENERIC_AUTHORITY_RE = re.compile(
+    r"^(?:部|部长|司|司长|局|局长|署|委员会|主管机关|主管部门|主管机构|主管监管机构|监管机构|监管部门|有关机关)(?:\s*[（(][A-Za-z\s.\-]+?[）)])?$"
+)
+
+
 def display_authority(text_: str, cc: str = "") -> str:
     """The body as cards show it: Chinese name (English abbreviation); words in Arabic script go to
     the detail only (“中心（المركز）” → “中心”, “الهيئة（电信监管机构）” → “电信监管机构”)."""
     from app.admission import names
+    from app.analysis.document_basis import NAMES as COUNTRY_NAMES_ZH
 
     hit = names.body(cc, text_) if cc else None
     if hit is not None:
-        return names.normalize_body(hit, cc)
+        res_hit = names.normalize_body(hit, cc)
+        if res_hit and not _BARE_GENERIC_AUTHORITY_RE.fullmatch(res_hit):
+            return res_hit
+        text_ = res_hit
     t = re.sub(r"[（(][^）)]*[\u0600-\u06FF][^）)]*[）)]", "", text_ or "").strip()
     if ARABIC.search(t):
         inner = re.findall(r"[（(]([^）)]*)[）)]", t)
         t = "；".join(x for x in inner if not ARABIC.search(x)) or re.sub(r"[\u0600-\u06FF\s]+", "", t)
     t = re.sub(r"\s*/\s*", "、", t).strip("；、 ")
-    # 写的是职位的，换成所属机构（部长 → 部，司长 → 司，法官 → 法院）
-    t = re.sub(r"部长(?!会议)", "部", t)
-    return names.normalize_body(re.sub(r"司长", "司", re.sub(r"法官", "法院", t)), cc)
+    # 仅在带有具体部门前缀时将职位转为机构（如“交通部长”→“交通部”），杜绝孤立单字“部”或“负责部”
+    t = re.sub(r"(?<=[\u4e00-\u9fff])(?<!负责)(?<!指定)(?<!有关)(?<!主管)部长(?!会议)", "部", t)
+    t = re.sub(r"(?<=[\u4e00-\u9fff])司长", "司", re.sub(r"法官", "法院", t))
+    t = names.normalize_body(t, cc)
+    if _BARE_GENERIC_AUTHORITY_RE.fullmatch(t):
+        c_zh = COUNTRY_NAMES_ZH.get((cc or "").upper(), "")
+        return f"{c_zh}法定主管部门" if c_zh else ""
+    c_zh = COUNTRY_NAMES_ZH.get((cc or "").upper(), "")
+    if c_zh and t in ("中央政府", "联邦政府", "国民议会", "议会", "内阁", "国务院"):
+        return f"{c_zh}{t}"
+    return t
 
 
 def authority_short(detail: dict) -> str:
@@ -534,7 +559,29 @@ async def _authority_hint(session: AsyncSession, entry: AdmissionEntry, document
     return await regulator_of_law(session, entry.country_code, document_id, at_least=2)
 
 
-LANG_ZH = {"fr": "法语", "ar": "阿拉伯语", "en": "英语", "zh": "中文"}
+LANG_ZH = {
+    "fr": "法语",
+    "ar": "阿拉伯语",
+    "en": "英语",
+    "zh": "中文",
+    "de": "德语",
+    "es": "西班牙语",
+    "pt": "葡萄牙语",
+    "it": "意大利语",
+    "nl": "荷兰语",
+    "id": "印尼语",
+    "ms": "马来语",
+    "tr": "土耳其语",
+    "pl": "波兰语",
+    "ja": "日语",
+    "ko": "韩语",
+    "th": "泰语",
+    "vi": "越南语",
+    "ru": "俄语",
+    "sv": "瑞典语",
+    "bn": "孟加拉语",
+    "he": "希伯来语",
+}
 
 
 def entry_profile(entry: AdmissionEntry, forms: list[dict]) -> dict:
@@ -665,7 +712,7 @@ async def _entry_detail(session: AsyncSession, entry: AdmissionEntry) -> dict:
         ]
     s_cache[d_key] = out
     if keeper_active or rebuilding.get():
-        _DETAIL_MEMO[d_key] = out
+        _put_memo(_DETAIL_MEMO, d_key, out, 256)
     return _copy.deepcopy(out)
 
 
@@ -728,8 +775,11 @@ async def _admission_countries(session: AsyncSession, *, admin_view: bool = Fals
             for e in cand_entries
             if e.country_code and await entry_listed(session, e)
         }
-    pilot = ("SG", "EG", "TN", "MA", "LB")
-    extra = sorted((doc_codes | entry_codes) - set(pilot) - {"CN", "ZZ", "--"})
+    active_codes = (doc_codes | entry_codes) - {"CN", "ZZ", "INTL", "--"}
+    if not active_codes:
+        return []
+    pilot = tuple(c for c in ("SG", "EG", "TN", "MA", "LB") if c in active_codes)
+    extra = sorted(active_codes - set(pilot))
     return [{"code": c, "name": COUNTRY_ZH.get(c, c)} for c in (*pilot, *extra)]
 
 
@@ -785,7 +835,7 @@ async def entry_listed(session: AsyncSession, entry: AdmissionEntry) -> bool:
     ok = bool(laws) and bool(steps)
     s_cache[key] = ok
     if keeper_active or rebuilding.get():
-        _LISTED_MEMO[key] = ok
+        _put_memo(_LISTED_MEMO, key, ok, 512)
     return ok
 
 
@@ -932,8 +982,13 @@ async def get_entry(entry_id: uuid.UUID, user: UserDep, session: SessionDep) -> 
 
 
 async def _own_task(session: AsyncSession, task_id: uuid.UUID, user: Principal) -> AnalysisTask:
+    from app.analysis.chat_advisor import viewer_owner
+
     task = await session.get(AnalysisTask, task_id)
     if task is None or task.org_id != user.org_id:
+        raise HTTPException(404, "未找到该合规评估项目")
+    owner = viewer_owner(task)
+    if owner is not None and owner != str(user.user_id):
         raise HTTPException(404, "未找到该合规评估项目")
     return task
 
@@ -1193,10 +1248,14 @@ async def admission_plan(
     """The items a business needs in a country, each with the enterprise's material for it (if
     started). From a compliance-document project: its overseas end and its business."""
     country = country or country_code
-    fn_list = [f.strip() for f in functions.split(",") if f.strip() in plan.FUNCTIONS] if functions else []
+    raw_fn_items = [f.strip() for f in functions.split(",") if f.strip()] if functions else []
+    fn_list = [f for f in raw_fn_items if f in plan.FUNCTIONS]
+    custom_fns = [f for f in raw_fn_items if f not in plan.FUNCTIONS]
     if function and function in plan.FUNCTIONS and function not in fn_list:
         fn_list.insert(0, function)
-    function = function or (fn_list[0] if fn_list else "")
+    elif function and function not in plan.FUNCTIONS and function not in custom_fns:
+        custom_fns.insert(0, function)
+    function = function if function in plan.FUNCTIONS else (fn_list[0] if fn_list else "")
     task = await _own_task(session, task_id, user) if task_id else None
     values: dict[str, str] = {}
     if task is not None:
@@ -1207,9 +1266,21 @@ async def admission_plan(
         values = facts_for_task(task, "")
         ends = [c for c in (country_of(values.get("source_country")), country_of(values.get("recipient_country"))) if c and c != "CN"]
         country = country or (ends[0] if ends else task.country_code)
+        all_task_fns = task_functions(task)
         if not fn_list:
-            fn_list = [f for f in task_functions(task) if f in plan.FUNCTIONS]
-        function = function or (fn_list[0] if fn_list else (task.scenario_type if task.scenario_type in plan.FUNCTIONS else ""))
+            fn_list = [f for f in all_task_fns if f in plan.FUNCTIONS]
+        if not custom_fns:
+            custom_fns = [f for f in all_task_fns if f and f not in plan.FUNCTIONS]
+        if not function:
+            if fn_list:
+                function = fn_list[0]
+            elif task.scenario_type in plan.FUNCTIONS:
+                function = task.scenario_type
+            elif task.scenario_type and task.scenario_type not in custom_fns:
+                custom_fns.insert(0, task.scenario_type)
+    display_fn_key = function or (custom_fns[0][:80] if custom_fns else "")
+    display_fn_zh = plan.FUNCTIONS.get(function) or ("、".join(custom_fns) if custom_fns else "")
+    applies_fn = function or ("__custom_scenario__" if custom_fns else "")
     if not country:
         raise HTTPException(422, "请选择国家")
     cc = country.upper()
@@ -1245,7 +1316,7 @@ async def admission_plan(
             applies_each = [plan.applies(e.category, fn, e.functions, e.name_zh) for fn in fn_list]
             where = "needed" if "needed" in applies_each else ("maybe" if "maybe" in applies_each else "")
         else:
-            where = plan.applies(e.category, function, e.functions, e.name_zh)
+            where = plan.applies(e.category, applies_fn, e.functions, e.name_zh)
         detail = await _entry_detail(session, e)
         if not where or not products.fits(product, e.category, e.name_zh):
             # 与所选业务、产品无关的也列出名称（折叠），和事项库的数目对得上
@@ -1271,7 +1342,7 @@ async def admission_plan(
         o["gate"] = gate
         (needed if where == "needed" and not gate else maybe).append(o)
     return {
-        "country_code": cc, "country_zh": COUNTRY_ZH.get(cc, cc), "function": function, "function_zh": plan.FUNCTIONS.get(function, ""),
+        "country_code": cc, "country_zh": COUNTRY_ZH.get(cc, cc), "function": display_fn_key, "function_zh": display_fn_zh,
         "task": {"id": str(task.id), "title": task.title} if task else None,
         "needed": needed, "maybe": maybe, "other": other,
         "functions": [{"key": k, "label": v} for k, v in plan.FUNCTIONS.items()],
@@ -1279,11 +1350,22 @@ async def admission_plan(
     }
 
 
+def _is_submitted_locked(project: AdmissionProject) -> bool:
+    m = project.milestones or {}
+    st = filing.state_of(project)
+    if st in ("preparing", "correcting"):
+        return False
+    if st == "submitted":
+        return True
+    # 已取得批文/未通过：仅当项目曾正式走过“已递交”流程锁版时才锁定草稿与答卷（未递交直接补录历史批文编号的不阻断初稿生成）
+    return bool(m.get("submitted_on") or m.get("submitted_draft"))
+
+
 @user_router.post("/projects/{project_id}/check")
 async def check_project(project_id: uuid.UUID, user: UserDep, session: SessionDep) -> dict:
     """Check the item's material the way the authority will look at it; findings are recorded."""
     project = await _project(session, project_id, user)
-    found = await _check(session, project, record=True)
+    found = await _check(session, project, record=not _is_submitted_locked(project))
     return {"findings": found, **(await _readiness(session, project))}
 
 
@@ -1295,7 +1377,15 @@ async def create_project(body: ProjectIn, user: UserDep, session: SessionDep) ->
     if entry is None or entry.review_status not in SHOWN:
         raise HTTPException(404, "准入事项不存在")
     task = await _own_task(session, body.task_id, user) if body.task_id else None
-    function = body.function or (task.scenario_type if task and task.scenario_type in plan.FUNCTIONS else "")
+    if body.function:
+        function = body.function.strip()[:80]
+    elif task:
+        from app.analysis.documents_router import task_functions
+
+        tfns = task_functions(task)
+        function = tfns[0][:80] if tfns else (task.scenario_type or "")[:80]
+    else:
+        function = ""
     await session.execute(
         sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
         {"k": f"adm_proj:{user.org_id}:{entry.id}:{task.id if task else ''}:{function}"},
@@ -1416,6 +1506,13 @@ async def delete_project(project_id: uuid.UUID, request: Request, user: UserDep,
     from app.updates.models import UserNotification
 
     project = await _project(session, project_id, user)
+    st = filing.state_of(project)
+    if (
+        st in ("submitted", "correcting", "approved")
+        or (project.approval or {}).get("number")
+        or await _open_authority(session, project.id) > 0
+    ):
+        raise HTTPException(409, "当前准入办理项目已递交、处于补正中或已取得批文，不可直接删除")
     set_detail(request, summary=f"删除准入办理项目“{project.title}”")
     await session.execute(
         sa_delete(UserNotification).where(
@@ -1486,6 +1583,16 @@ async def set_approval(project_id: uuid.UUID, body: ApprovalIn, request: Request
     from datetime import date
 
     project = await _project(session, project_id, user)
+    cur_st = filing.state_of(project)
+    if cur_st == "rejected":
+        raise HTTPException(409, "当前项目处于未通过状态，请先转为重新准备并递交后再登记批文")
+    if await _open_authority(session, project.id) > 0:
+        raise HTTPException(409, "尚有未处理完的受理机构补正问题，请处理完毕并递交后再登记批文")
+    if cur_st == "correcting":
+        raise HTTPException(409, "补正问题处理完毕后请先重新标记为已递交，再登记批文")
+    hist = (project.milestones or {}).get("history") or []
+    if cur_st == "preparing" and any(isinstance(h, dict) and h.get("state") in ("rejected", "correcting") for h in hist):
+        raise HTTPException(409, "项目曾经历补正或退回重备，请先重新标记为已递交后再登记批文")
     for d in (body.issued_on, body.expires_on):
         if d:
             try:
@@ -1544,6 +1651,7 @@ async def set_filing(project_id: uuid.UUID, body: FilingIn, request: Request, us
         m["history"] = [*m.get("history", []), {"state": "preparing", "at": datetime.now(UTC).isoformat(), "by": str(user.user_id), "renewal": True}][-50:]
         m["state"], m["renewal"] = "preparing", True
         m.pop("submitted_draft", None)
+        m.pop("submitted_on", None)
         project.milestones, project.approval = m, {}
         set_detail(request, summary=f"准入办理“{project.title}”开始准备续期")
         await session.commit()
@@ -1563,11 +1671,12 @@ async def set_filing(project_id: uuid.UUID, body: FilingIn, request: Request, us
         raise HTTPException(422, str(exc)) from None
     if body.state == "submitted":  # 递交的就是最新这一版：之后页面只读显示这一版
         project.milestones = {**project.milestones, "submitted_draft": str(latest.id)}
-    for q in questions:
-        session.add(AdmissionIssue(
-            org_id=user.org_id, project_id=project.id, kind="authority", question=q,
-            created_by=user.user_id, updated_by=user.user_id,
-        ))
+    if body.state == "correcting":
+        for q in questions:
+            session.add(AdmissionIssue(
+                org_id=user.org_id, project_id=project.id, kind="authority", question=q,
+                created_by=user.user_id, updated_by=user.user_id,
+            ))
     set_detail(
         request, summary=f"准入办理“{project.title}”申报状态改为“{filing.STATE_ZH[body.state]}”",
         before=filing.STATE_ZH[before], after=filing.STATE_ZH[body.state],
@@ -1585,6 +1694,8 @@ async def link_task(project_id: uuid.UUID, body: LinkIn, request: Request, user:
     """Tie the filing project to a compliance-assessment project of the enterprise (or untie it):
     the assessment's answers — company, data, recipient — then fill this item's forms and drafts."""
     project = await _project(session, project_id, user)
+    if _is_submitted_locked(project):
+        raise HTTPException(409, "申报材料已递交，当前版本已锁定")
     task = await _own_task(session, body.task_id, user) if body.task_id else None
     before = str(project.task_id) if project.task_id else ""
     project.task_id = task.id if task else None
@@ -1830,6 +1941,8 @@ async def answer_questions(
     project_id: uuid.UUID, body: AnswersIn, user: UserDep, session: SessionDep
 ) -> dict:
     project = await _project(session, project_id, user)
+    if _is_submitted_locked(project):
+        raise HTTPException(409, "申报材料已递交，当前版本已锁定")
     entry = await session.get(AdmissionEntry, project.entry_id)
     detail = await _entry_detail(session, entry)
     rendered, _, _ = await _render(session, project)
@@ -1890,6 +2003,8 @@ async def assist_project(
 @user_router.post("/projects/{project_id}/drafts", status_code=201)
 async def make_draft(project_id: uuid.UUID, user: UserDep, session: SessionDep) -> dict:
     project = await _project(session, project_id, user)
+    if _is_submitted_locked(project):
+        raise HTTPException(409, "申报材料已递交，当前版本已锁定")
     rendered, name, entry = await _render(session, project)
     missing = [f"{q.label}（{q.question}）" for q in rendered.missing]
     blocks = rendered.blocks
@@ -1969,7 +2084,7 @@ async def make_foreign_draft(
     project = await session.get(AdmissionProject, d.project_id)
     if project is None:
         raise HTTPException(404, "准入项目不存在")
-    if filing.filing_out(project)["state"] != "preparing":
+    if _is_submitted_locked(project):
         raise HTTPException(409, "申报材料已递交，当前版本已锁定")
     entry = await session.get(AdmissionEntry, project.entry_id)
     if entry is None:
@@ -2036,15 +2151,16 @@ async def export_foreign_draft(
     ctx_title = str(fd.get("title") or "Application")
     doc_label = str(fd.get("name_zh") or f"申请书（{fd.get('lang_zh', '外文')}正式稿）")
     blocks = fd["blocks"]
+    is_rtl = str(fd.get("lang_code") or "").lower() in ("ar", "he")
     if fmt == "docx":
-        data = build_docx(Rendered(blocks=blocks), ctx_title, foreign=True)
+        data = build_docx(Rendered(blocks=blocks), ctx_title, foreign=True, rtl=is_rtl)
         media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     else:
         import asyncio
 
         await session.close()
         data = await asyncio.to_thread(
-            build_pdf, Rendered(blocks=blocks), ctx_title, foreign=True
+            build_pdf, Rendered(blocks=blocks), ctx_title, foreign=True, rtl=is_rtl
         )
         media = "application/pdf"
     return Response(
@@ -2059,8 +2175,17 @@ async def export_foreign_draft(
 
 
 @user_router.get("/drafts/{draft_id}/forms/{code}")
-async def export_draft_form(draft_id: uuid.UUID, code: str, user: UserDep, session: SessionDep) -> Response:
+async def export_draft_form(
+    draft_id: uuid.UUID,
+    code: str,
+    user: UserDep,
+    session: SessionDep,
+    annex: bool = True,
+    foreign_only: bool = True,
+) -> Response:
     """The official form as it was filled when this version was generated."""
+    from functools import partial
+
     from starlette.concurrency import run_in_threadpool
 
     from app.forms import service as fs
@@ -2070,7 +2195,21 @@ async def export_draft_form(draft_id: uuid.UUID, code: str, user: UserDep, sessi
     form = fs.get_form(code)
     if kept is None or form is None:
         raise HTTPException(404, "这一版没有这份官方表格")
-    data, _report, _too_long = await run_in_threadpool(fs.render, form, kept.get("answers") or {}, kept.get("facts") or {})
+    is_foreign_form = str(form.get("country") or "").upper() not in ("", "CN")
+    data, _report, _too_long = await run_in_threadpool(
+        partial(
+            fs.render,
+            form,
+            kept.get("answers") or {},
+            kept.get("facts") or {},
+            allow_annex=annex,
+            foreign_only=bool(foreign_only and is_foreign_form),
+            foreign_annex=is_foreign_form,
+        )
+    )
+    if _too_long:
+        names_str = "；".join(t["label"] for t in _too_long)
+        raise HTTPException(409, "以下内容超出官方表格容量，请精简后再导出：" + names_str)
     docx = form.get("kind") == "docx"
     project = await session.get(AdmissionProject, d.project_id)
     name = named(project.title if project else "", f"{kept.get('name') or code}（{d.created_at.astimezone().strftime('%Y-%m-%d %H%M')} 版）", ext="docx" if docx else "pdf")
@@ -2510,6 +2649,8 @@ async def add_issue(project_id: uuid.UUID, body: IssueIn, request: Request, user
     from app.admission.models import AdmissionProgress
 
     project = await _project(session, project_id, user)
+    if _is_submitted_locked(project):
+        raise HTTPException(409, "申报材料已递交锁定，当前不可新增审核问题")
     if body.progress_id is not None:
         prog = await session.scalar(
             select(AdmissionProgress.id).where(
@@ -2536,9 +2677,16 @@ async def add_issue(project_id: uuid.UUID, body: IssueIn, request: Request, user
 @user_router.patch("/issues/{issue_id}")
 async def update_issue(issue_id: uuid.UUID, body: IssuePatch, request: Request, user: UserDep, session: SessionDep) -> dict:
     row = await _own_issue(session, issue_id, user)
+    project = await session.get(AdmissionProject, row.project_id)
+    if project is not None and _is_submitted_locked(project):
+        raise HTTPException(409, "申报材料已递交锁定，当前不可修改审核问题")
     before = {"state": row.state, "answer": row.answer}
+    next_answer = body.answer.strip() if body.answer is not None else (row.answer or "").strip()
+    next_state = body.state if body.state is not None else row.state
+    if row.kind == "authority" and next_state == "closed" and not next_answer:
+        raise HTTPException(422, "受理机构提出的补正意见须先填写具体答复内容，方可标记为已关闭")
     if body.answer is not None:
-        row.answer = body.answer.strip()
+        row.answer = next_answer
     if body.state is not None:
         row.state = body.state
     row.updated_by = user.user_id
@@ -2551,6 +2699,12 @@ async def update_issue(issue_id: uuid.UUID, body: IssuePatch, request: Request, 
 @user_router.delete("/issues/{issue_id}")
 async def delete_issue(issue_id: uuid.UUID, request: Request, user: UserDep, session: SessionDep) -> dict:
     row = await _own_issue(session, issue_id, user)
+    project = await session.get(AdmissionProject, row.project_id)
+    if project is not None:
+        if _is_submitted_locked(project):
+            raise HTTPException(409, "申报材料已递交锁定，当前不可删除审核问题")
+        if row.kind == "authority":
+            raise HTTPException(409, "受理机构提出的补正意见须逐条填写答复并关闭，不可直接删除")
     set_detail(request, summary="删除准入审核问题")
     await session.delete(row)
     await session.commit()

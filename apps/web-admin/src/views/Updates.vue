@@ -120,7 +120,7 @@ onMounted(load)
       <p>记录各国官方法规、技术标准与申报表格从发现收录到完成条款切分入库的时效状态。</p>
       <el-table :data="discoveries" border empty-text="暂无入库跟踪记录">
         <el-table-column label="国别" width="90"><template #default="{ row }">{{ countryZh(row.country_code) }}</template></el-table-column>
-        <el-table-column prop="title" label="法规文件" min-width="260" show-overflow-tooltip />
+        <el-table-column prop="title" label="法规文件" min-width="260" />
         <el-table-column label="收录时间" min-width="170"><template #default="{ row }">{{ date(row.discovered_at) }}</template></el-table-column>
         <el-table-column label="完成入库时间" min-width="170"><template #default="{ row }">{{ row.first_parsed_at ? date(row.first_parsed_at) : row.history_unknown ? date(row.discovered_at) : '入库处理中' }}</template></el-table-column>
         <el-table-column label="当前状态" min-width="140"><template #default="{ row }"><el-tag :type="row.overdue ? 'danger' : (row.first_parsed_at || row.history_unknown) ? 'success' : 'warning'">{{ row.overdue ? '入库超期' : (row.first_parsed_at || row.history_unknown) ? '已入库生效' : '入库处理中' }}</el-tag></template></el-table-column>

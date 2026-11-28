@@ -1843,7 +1843,7 @@ onUnmounted(() => {
             </template>
           </el-table-column>
 
-          <el-table-column label="操作" width="226" fixed="right" class-name="cy-col-nowrap">
+          <el-table-column label="操作" width="226" class-name="cy-col-nowrap">
             <template #default="{ row }">
               <div class="row-actions-inline">
                 <el-button
@@ -2252,7 +2252,7 @@ onUnmounted(() => {
 }
 
 .studio-badge {
-  background: linear-gradient(135deg, #1d4ed8, #4f46e5);
+  background: #1d4ed8;
   color: #fff;
   font-weight: 600;
   font-size: 13px;
@@ -2837,7 +2837,7 @@ onUnmounted(() => {
   margin-top: 8px;
   padding: 4px 8px;
   border-radius: 6px;
-  background: linear-gradient(90deg, #2563eb, #1d4ed8);
+  background: #2563eb;
   color: #ffffff;
   font-size: 13px;
   font-weight: 600;

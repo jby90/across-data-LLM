@@ -13,11 +13,11 @@
 }
 
 /* 第 7.5 项二轮 规则 18：法规链接全站一个样式——主色、不加下划线，鼠标移上去才有下划线 */
-.app-content a[href^='/knowledge']:not(.quick-link) {
+.app-content a[href^='/knowledge']:not(.quick-link):not(.mf-cta) {
   color: var(--el-color-primary);
   text-decoration: none;
 }
-.app-content a[href^='/knowledge']:not(.quick-link):hover {
+.app-content a[href^='/knowledge']:not(.quick-link):not(.mf-cta):hover {
   text-decoration: underline;
   text-underline-offset: 2px;
 }

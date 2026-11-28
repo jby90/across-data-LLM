@@ -158,13 +158,17 @@ class Redactor:
             for marker, original in self.mapping.items():
                 value = value.replace(marker, original)
             own_core = self.prefix.strip("_")
-            if self.prefix in value or (own_core and re.search(re.escape(own_core), value, re.I)):
+            if (
+                self.prefix in value
+                or (own_core and re.search(re.escape(own_core), value, re.I))
+                or (self.mapping and re.search(r"CYSH_SECRET", value, re.I))
+            ):
                 raise ValueError("模型返回的隐私占位符损坏，禁止作为原文使用")
             return value
         if isinstance(value, list):
             return [self.restore(v) for v in value]
         if isinstance(value, dict):
-            return {k: self.restore(v) for k, v in value.items()}
+            return {(self.restore(k) if isinstance(k, str) else k): self.restore(v) for k, v in value.items()}
         return value
 
     def tree(self, value):
@@ -173,7 +177,7 @@ class Redactor:
         if isinstance(value, list):
             return [self.tree(v) for v in value]
         if isinstance(value, dict):
-            return {k: self.tree(v) for k, v in value.items()}
+            return {(self.redact(k) if isinstance(k, str) else k): self.tree(v) for k, v in value.items()}
         return value
 
 

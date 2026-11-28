@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { localTime } from '@cyshuhe/shared'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import { useAuth } from '../auth'
 
 const auth = useAuth()
 const isSuperAdmin = computed(() => auth.user?.role === 'platform_admin')
+const isCompact = ref(typeof window !== 'undefined' ? window.innerWidth <= 1024 : false)
+function syncCompact() {
+  if (typeof window !== 'undefined') isCompact.value = window.innerWidth <= 1024
+}
 
 interface Item {
   id: string
@@ -120,13 +124,18 @@ async function openDigestDrawer() {
 async function saveDigestConfig() {
   digestBusy.value = 'save'
   try {
-    const rcpts = recipientsInput.value.split(/[,;，；\s]+/).map((s) => s.trim()).filter((s) => s.includes('@'))
+    const rcpts = isSuperAdmin.value
+      ? recipientsInput.value.split(/[,;，；\s]+/).map((s) => s.trim()).filter((s) => s.includes('@'))
+      : []
     const saved = await api.put<DigestConfig>('/api/admin/opinion/digest-config', {
       ...digestCfg.value,
       recipients: rcpts,
+      smtp_host: isSuperAdmin.value ? digestCfg.value.smtp_host : '',
+      smtp_user: isSuperAdmin.value ? digestCfg.value.smtp_user : '',
+      smtp_from: isSuperAdmin.value ? digestCfg.value.smtp_from : '',
     })
     digestCfg.value = saved
-    recipientsInput.value = saved.recipients.join(', ')
+    recipientsInput.value = isSuperAdmin.value ? (saved.recipients || []).join(', ') : ''
     digestPreview.value = await api.get<DigestPreview>(
       `/api/admin/opinion/digest-preview?days=${saved.lookback_days}&min_level=${saved.min_level}`,
     )
@@ -141,9 +150,11 @@ async function saveDigestConfig() {
 async function sendDigestNow() {
   digestBusy.value = 'send'
   try {
-    const rcpts = recipientsInput.value.split(/[,;，；\s]+/).map((s) => s.trim()).filter((s) => s.includes('@'))
+    const rcpts = isSuperAdmin.value
+      ? recipientsInput.value.split(/[,;，；\s]+/).map((s) => s.trim()).filter((s) => s.includes('@'))
+      : []
     const res = await api.post<DigestRun>('/api/admin/opinion/digest-send', {
-      recipients: rcpts.length ? rcpts : null,
+      recipients: isSuperAdmin.value && rcpts.length ? rcpts : null,
     })
     digestRuns.value = await api.get<DigestRun[]>('/api/admin/opinion/digest-runs?limit=10')
     ElMessage.success(`已生成并推送周报（收录 ${res.item_count} 条重点动态），用户端更新通知已同步展示`)
@@ -229,7 +240,14 @@ async function loadSources() {
 
 const when = (s: string | null) => localTime(s) || '—'
 
-onMounted(load)
+onMounted(() => {
+  syncCompact()
+  window.addEventListener('resize', syncCompact)
+  void load()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncCompact)
+})
 </script>
 
 <template>
@@ -277,20 +295,20 @@ onMounted(load)
           <el-tag :type="TAG[row.level || ''] || 'info'" size="small">{{ row.level_label }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="title" label="标题" min-width="270" show-overflow-tooltip />
-      <el-table-column label="来源" width="168" show-overflow-tooltip>
+      <el-table-column prop="title" label="标题" min-width="270" />
+      <el-table-column label="来源" width="206">
         <template #default="{ row }">{{ row.publisher }}</template>
       </el-table-column>
       <el-table-column label="发布日期" width="118" class-name="cy-col-nowrap">
         <template #default="{ row }">{{ row.published_on || '—' }}</template>
       </el-table-column>
-      <el-table-column label="预警提示" min-width="220" show-overflow-tooltip>
+      <el-table-column label="预警提示" min-width="220">
         <template #default="{ row }">
           <span v-if="row.level === 'low'" class="muted">未触及重点关注事项</span>
           <span v-else>{{ row.reasons.join('；') || '—' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="96" fixed="right" class-name="cy-col-nowrap">
+      <el-table-column label="操作" width="96" :fixed="isCompact ? false : 'right'" class-name="cy-col-nowrap">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click.stop="open(row)">查看详情</el-button>
         </template>
@@ -328,7 +346,7 @@ onMounted(load)
         <el-table-column label="来源" width="150" prop="publisher" />
         <el-table-column label="类型" width="90"><template #default="{ row }">{{ KIND[row.kind] }}</template></el-table-column>
         <el-table-column label="上次采集" width="160"><template #default="{ row }">{{ when(row.last_run_at) }}</template></el-table-column>
-        <el-table-column label="结果" min-width="220" show-overflow-tooltip>
+        <el-table-column label="结果" min-width="220">
           <template #default="{ row }">
             <span v-if="row.last_status === 'failed'" class="bad">采集失败：{{ row.last_note }}</span>
             <span v-else>{{ row.last_note || '尚未采集' }}</span>
@@ -349,9 +367,12 @@ onMounted(load)
             </label>
             <label>统计天数：<el-input-number v-model="digestCfg.lookback_days" size="small" :min="1" :max="30" /></label>
           </div>
-          <div class="digest-field">
+          <div v-if="isSuperAdmin" class="digest-field">
             <span>订阅邮箱列表（支持多邮箱群发，逗号分隔；留空则同步至企业用户端更新通知页面的行业合规周报专栏）：</span>
             <el-input v-model="recipientsInput" size="small" placeholder="compliance@oem.com, legal@oem.com" />
+          </div>
+          <div v-else class="digest-field">
+            <span class="muted">当前为站内合规周报归档模式（外部订阅邮箱与发信服务器由超级管理员统一维护）。</span>
           </div>
           <div v-if="isSuperAdmin" class="digest-row2">
             <el-input v-model="digestCfg.smtp_host" size="small" style="flex: 1 1 180px" placeholder="发信邮件服务器（选填，如 mail.corp.com）" />
@@ -362,7 +383,7 @@ onMounted(load)
           </div>
           <div class="digest-actions">
             <el-button size="small" :loading="digestBusy === 'save'" data-testid="opinion-digest-save" @click="saveDigestConfig">保存推送策略</el-button>
-            <el-button size="small" plain :loading="digestBusy === 'test'" data-testid="opinion-digest-test" @click="testDigestEmail">发送群发验证邮件</el-button>
+            <el-button v-if="isSuperAdmin" size="small" plain :loading="digestBusy === 'test'" data-testid="opinion-digest-test" @click="testDigestEmail">发送群发验证邮件</el-button>
             <el-button size="small" type="primary" :loading="digestBusy === 'send'" data-testid="opinion-digest-send" @click="sendDigestNow">立即生成并推送本期周报</el-button>
             <span v-if="digestCfg.next_run_at" class="muted" style="font-size: 13px">下次自动推送：{{ when(digestCfg.next_run_at) }}</span>
           </div>
@@ -377,9 +398,9 @@ onMounted(load)
           <h4>最近推送记录</h4>
           <el-table :data="digestRuns" size="small" border>
             <el-table-column label="生成时间" width="150" class-name="cy-col-nowrap"><template #default="{ row }">{{ when(row.created_at) }}</template></el-table-column>
-            <el-table-column prop="subject" label="周报标题" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="subject" label="周报标题" min-width="180" />
             <el-table-column prop="item_count" label="条数" width="64" class-name="cy-col-nowrap" />
-            <el-table-column prop="note" label="投递状态与归档" min-width="150" show-overflow-tooltip />
+            <el-table-column prop="note" label="投递状态与归档" min-width="150" />
           </el-table>
         </div>
       </div>

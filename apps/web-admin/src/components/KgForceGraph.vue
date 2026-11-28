@@ -41,7 +41,11 @@ function buildOption(): echarts.EChartsOption {
       },
     },
     series: [graphSeries(props.nodes, props.edges, props.categories, {
-      overview: props.overview, selectedId: props.selectedId, reducedMotion, viewportWidth: canvas.value?.clientWidth,
+      overview: props.overview,
+      selectedId: props.selectedId,
+      reducedMotion,
+      viewportWidth: canvas.value?.clientWidth,
+      viewportHeight: canvas.value?.clientHeight,
     })],
   }
 }

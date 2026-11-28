@@ -16,7 +16,7 @@ PDF 使用 Google Fonts 官方仓库固定提交 `e7db6ca603fd4862010383ff17ffd6
 | notosanshebrew | 112640 | `7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88` |
 | inter | 876576 | `29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031` |
 
-PDF 由 WeasyPrint 70 + Pango/HarfBuzz 进行阿拉伯文整形、从右到左排版和字体嵌入；PDF 内部自动子集化，不把生成的子集字体作为独立字体产品发布。所选字体的 OFL 声明中，Noto Sans SC 的保留名称是 Source，Noto/Inter 的所用名称未列作保留名称；版权和 OFL 全文随包保留。Word 只写 Inter / Noto Sans SC / Noto Naskh Arabic 字体名，不嵌入系统字体；接收电脑需安装对应开源字体才能保持相同版式。
+PDF 由 WeasyPrint 70 + Pango/HarfBuzz 进行多文字整形、阿拉伯语/希伯来语从右到左排版、泰语无空格安全断行和字体子集化嵌入；PDF 内部自动子集化，不把生成的子集字体作为独立字体产品发布。为保障 17 种官方语言（中文、英文及法、德、西、葡、意、荷、印尼、土、波、日、韩、泰、越、阿、俄 15 种属地国官方语言）导出在 2GB 轻量云主机上零交换分区稳定运行，`pdf_renderer.py` 按当前文档实际出现的 Unicode 文字脚本**动态按需加载**上述 7 套随包校验开源字体（例如纯拉丁/西里尔文档仅加载 `Inter`，日语汉字与平片假名由 `Noto Sans SC` 完整覆盖并通过日语汉字词汇与假名双特征门禁，韩/泰/阿/孟加拉/希伯来各自按脚本按需挂载），并在配合 `CYSH_MAX_CONCURRENT_PDF_RENDERS` 渲染信号量完成输出后及时释放内存峰值。所选字体的 OFL 声明中，Noto Sans SC 的保留名称是 Source，Noto/Inter 的所用名称未列作保留名称；版权和 OFL 全文随包保留。Word 按目标语种声明 `Inter` / `Noto Sans SC` / `Noto Sans KR` / `Noto Sans Thai` / `Noto Naskh Arabic` 字体名，不嵌入系统商业字体；接收电脑安装对应开源字体即可保持一致版式。
 
 旧 SourceHanSansCN-Medium.ttf 的来源尚未重新确认，S12 渲染不再使用或随生产镜像分发，Git 历史保留。字体核验属于工程检查，人工法务确认仍待完成。
 

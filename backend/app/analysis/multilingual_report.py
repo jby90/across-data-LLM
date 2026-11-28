@@ -21,6 +21,7 @@ import gc
 import hashlib
 import json
 import re
+import uuid
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -122,7 +123,9 @@ COUNTRY_OFFICIAL_LANGS: dict[str, tuple[str, ...]] = {
     "IT": ("it",),
     "NL": ("nl",),
     "ID": ("id",),
-    "MY": ("id", "en"),
+    "MY": ("en",),
+    "BD": ("en",),
+    "LK": ("en",),
     "TR": ("tr",),
     "PL": ("pl",),
     "JP": ("ja",),
@@ -140,21 +143,44 @@ COUNTRY_OFFICIAL_LANGS: dict[str, tuple[str, ...]] = {
     "JO": ("ar",),
     "RU": ("ru",),
     "KZ": ("ru",),
+    "KG": ("ru",),
+    "UZ": ("ru", "en"),
+    "TJ": ("ru", "en"),
     "BY": ("ru",),
     "SE": ("en",),
     "DK": ("en",),
     "FI": ("en",),
     "NO": ("en",),
+    "MT": ("en",),
+    "IS": ("en",),
+    "LI": ("de",),
+    "MC": ("fr",),
+    "CR": ("es",),
+    "PA": ("es",),
+    "EC": ("es",),
+    "VE": ("es",),
+    "BO": ("es",),
+    "PY": ("es",),
+    "DO": ("es",),
+    "SN": ("fr",),
+    "CI": ("fr",),
+    "CM": ("fr", "en"),
+    "AO": ("pt",),
 }
 
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")
 _HAN_AND_CJK_PUNCT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60]")
 _HAN_ONLY_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _JA_KANA_RE = re.compile(r"[\u3040-\u30ff\uff66-\uff9f]")
-_PURE_HAN_CLAUSE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]{12,}")
+_PURE_HAN_CLAUSE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]{6,}")
 _THAI_LONG_RUN_RE = re.compile(r"[\u0e01-\u0e5b]{18,}")
+_LTR_ATOM_AR = (
+    r"(?:\+\d[\d\s\-()]{4,}\d"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|[A-Za-z\u00C0-\u024F][A-Za-z0-9\u00C0-\u024F._/\-+]*|\d+[A-Za-z\u00C0-\u024F][A-Za-z0-9\u00C0-\u024F._/\-+]*)"
+)
 _LTR_IN_AR_RE = re.compile(
-    r"(?:[A-Za-z][A-Za-z0-9._/\-+]*|\d+[A-Za-z][A-Za-z0-9._/\-+]*|\d{4}-\d{2}-\d{2})"
+    rf"{_LTR_ATOM_AR}(?:[ \t]+(?:{_LTR_ATOM_AR}|\d+(?:[.,/-]\d+)*))*"
 )
 
 def _is_cp932(ch: str) -> bool:
@@ -168,15 +194,82 @@ def _is_cp932(ch: str) -> bool:
 _RAW_PRC_TO_SHINJITAI: dict[str, str] = {
     "车": "車", "辆": "両", "规": "規", "则": "則", "评": "評", "输": "輸", "进": "進",
     "级": "級", "险": "険", "护": "護", "处": "処", "据": "拠", "络": "絡", "设": "設",
-    "备": "備", "签": "署", "订": "訂", "约": "約", "责": "責", "罚": "罰", "监": "監",
+    "备": "備", "订": "訂", "约": "約", "责": "責", "罚": "罰", "监": "監",
     "报": "報", "审": "審", "实": "実", "现": "現", "业": "業", "务": "務", "产": "産",
     "户": "戸", "专": "専", "门": "門", "义": "義", "权": "権", "准": "準", "认": "認",
-    "证": "証", "识": "識", "传": "伝", "储": "貯", "删": "削", "销": "消", "毁": "毀",
+    "证": "証", "识": "識", "传": "伝", "储": "貯", "删": "削", "毁": "毀",
     "补": "補", "个": "個", "为": "為", "从": "従", "对": "対", "应": "応", "该": "該",
     "还": "還", "经": "経", "过": "過", "达": "達", "并": "並", "开": "開", "关": "関",
     "联": "連", "网": "網", "云": "雲", "电": "電", "脑": "脳", "软": "軟", "类": "類",
     "项": "項", "际": "際", "东": "東", "亚": "亜", "马": "馬", "韩": "韓", "罗": "羅",
 }
+_JA_WORD_FIXES: tuple[tuple[str, str], ...] = (
+    ("正式申报递交前人工核签清单", "正式申告提出前確認・承認チェックリスト"),
+    ("出境路径判断待补", "越境移転経路判定補足事項"),
+    ("签署标准合同条款并采取加密措施", "標準契約条項を締結し暗号化措置を講じる"),
+    ("禁止向境外提供重要信息", "重要情報の外国第三者提供を禁止する"),
+    ("实施端到端加密", "エンドツーエンド暗号化を実施する"),
+    ("未按规定履行告知义务", "法定の通知義務を履行していない"),
+    ("不得在未经同意时向境外提供", "本人の同意なく外国にある第三者へ提供してはならない"),
+    ("在未经同意时向境外提供", "本人の同意なく外国にある第三者へ提供する"),
+    ("不得向境外提供", "外国にある第三者へ提供してはならない"),
+    ("不得向外国提供", "外国にある第三者へ提供してはならない"),
+    ("禁止向境外提供", "外国にある第三者への提供を禁止する"),
+    ("向境外提供", "外国にある第三者へ提供する"),
+    ("向外国提供", "外国にある第三者へ提供する"),
+    ("未经同意", "本人の同意なく"),
+    ("未按规定", "規定に違反して"),
+    ("履行告知义务", "通知義務を履行する"),
+    ("告知义务", "通知義務"),
+    ("标准合同条款", "標準契約条項"),
+    ("端到端加密", "エンドツーエンド暗号化"),
+    ("加密措施", "暗号化措置"),
+    ("重要信息", "重要情報"),
+    ("重要数据", "重要データ"),
+    ("个人数据管理制度", "個人データ管理規程"),
+    ("个人数据", "個人データ"),
+    ("个人信息", "個人情報"),
+    ("轨迹数据", "走行軌跡データ"),
+    ("车主", "車両所有者"),
+    ("初稿", "作業草案"),
+    ("成稿", "最終版"),
+    ("销售", "販売"),
+    ("签署", "署名"),
+    ("签订", "締結"),
+    ("销毁", "廃棄"),
+    ("注销", "抹消"),
+    ("撤销", "撤回"),
+    ("删除", "削除"),
+    ("存储", "保管"),
+    ("传输", "移転"),
+    ("处理", "取扱"),
+    ("加密", "暗号化"),
+    ("数据", "データ"),
+    ("信息", "情報"),
+    ("合规", "コンプライアンス"),
+    ("隐私", "プライバシー"),
+    ("本公司的", "当社の"),
+    ("他的", "当該主体の"),
+    ("她的", "当該主体の"),
+    ("我们的", "当社の"),
+    ("不在那里", "当該地域に所在しない"),
+    ("不在", "に所在しない"),
+    ("那里", "当該地域"),
+    ("不得", "してはならない"),
+    ("公司", "会社"),
+)
+_JA_EXEMPT_KANJI_SUFFIXES = (
+    "株式会社", "有限会社", "合同会社",
+    "保護法", "安全法", "事業法", "車両法", "契約弁法", "管理条例", "管理規定", "管理規程",
+    "評価弁法", "流動規定", "人民共和国", "評価報告書", "標準契約条項", "型式認証",
+    "保護委員会", "監督機関", "安全管理措置", "損害賠償責任",
+)
+_ZH_GRAMMAR_IN_JA_RE = re.compile(
+    r"他的|她的|它的|我们的|你们的|他们的|本公司的|不在那里|向外国|向境外|不得向|禁止向"
+    r"|未经|未経|未按|按照|依照|应当|應當|必须|必須|端到端|核签|递交|核清単|申告交前"
+    r"|告知義務|重要信息|数据|信息|加密|合规|隐私|车主|車主|轨迹|請填寫|请填写|待补充|待企业"
+    r"|してはならない在|[【】《》]"
+)
 # Strictly map ONLY PRC-simplified characters that are NOT already in Japanese JIS/CP932,
 # guaranteeing 100% idempotence on valid Japanese text.
 _JA_SHINJITAI_MAP = str.maketrans({k: v for k, v in _RAW_PRC_TO_SHINJITAI.items() if not _is_cp932(k)})
@@ -218,14 +311,17 @@ def list_supported_report_languages(
     }
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=2)
 def load_lang_lexicon(lang: str) -> dict[str, Any]:
-    """Load only a single target language's lexicon into memory (LRU bounded to 3 languages)."""
-    raw_all = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
-    entry = raw_all.get(lang)
+    """Load only a single target language's split lexicon file (~22 KB, LRU bounded to 2 languages)."""
+    split_file = LEXICON_PATH.parent / "lexicons" / f"{lang}.json"
+    if split_file.exists():
+        entry = json.loads(split_file.read_text(encoding="utf-8"))
+    else:
+        raw_all = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
+        entry = raw_all.get(lang)
     if not isinstance(entry, dict):
         raise ValueError(f"未找到语种词库配置：{lang}")
-    # Pre-sort phrase & country replacements longest-first once per cached language
     phrases = entry.get("phrases") or {}
     countries = entry.get("countries") or {}
     return {
@@ -253,6 +349,15 @@ def _inject_thai_zwsp(text: str) -> str:
     """Insert cluster-safe U+200B break opportunities into long uninterrupted Thai runs so narrow
     DOCX and WeasyPrint table columns never overflow while preserving 100% vowel/tone shaping."""
 
+    _THAI_COMBINING_OR_LEADING = frozenset(
+        {
+            0x0E31,
+            *range(0x0E34, 0x0E3B),
+            *range(0x0E40, 0x0E45),
+            *range(0x0E47, 0x0E4F),
+        }
+    )
+
     def _split_run(m: re.Match[str]) -> str:
         run = m.group(0)
         out: list[str] = []
@@ -261,20 +366,15 @@ def _inject_thai_zwsp(text: str) -> str:
         for i, ch in enumerate(run):
             cp = ord(ch)
             prev_cp = ord(run[i - 1]) if i > 0 else 0
-            # Safe Thai syllable start:
-            # 1) Leading vowel [\u0e40-\u0e44] after >= 8 chars (and previous char is not a combining mark \u0e3a phinthu)
-            # 2) Base consonant [\u0e01-\u0e2e] after >= 12 chars when previous char is NOT a leading vowel [\u0e40-\u0e44]
-            #    and NOT Mai Han-Akat / Phinthu (\u0e31, \u0e3a) and next char is NOT Thanthakhat (\u0e4c)
             next_cp = ord(run[i + 1]) if i + 1 < n else 0
-            if 0x0E40 <= cp <= 0x0E44 and since_break >= 8 and prev_cp != 0x0E3A:
+            if 0x0E40 <= cp <= 0x0E44 and since_break >= 8 and prev_cp not in _THAI_COMBINING_OR_LEADING:
                 out.append("\u200b")
                 since_break = 0
             elif (
                 0x0E01 <= cp <= 0x0E2E
                 and since_break >= 12
-                and not (0x0E40 <= prev_cp <= 0x0E44)
-                and prev_cp not in (0x0E31, 0x0E3A, 0x0E47)
-                and next_cp != 0x0E4C
+                and prev_cp not in _THAI_COMBINING_OR_LEADING
+                and next_cp not in (0x0E3A, 0x0E4C)
             ):
                 out.append("\u200b")
                 since_break = 0
@@ -293,12 +393,30 @@ def _isolate_arabic_ltr(text: str) -> str:
     return _LTR_IN_AR_RE.sub(lambda m: f"\u2066{m.group(0)}\u2069", base)
 
 
+def _ja_clause_window(text: str, start: int, end: int) -> str:
+    """Return immediate local window around [start, end) bounded by punctuation/delimiters so Kana
+    in a neighboring phrase cannot mask an untranslated pure-Chinese clause."""
+    seps = ("：", ":", "。", "；", "、", "・", ",", " ", "\n", "（", "）", "(", ")", "[", "]", "「", "」")
+    left = max(0, start - 6)
+    for sep in seps:
+        pos = text.rfind(sep, left, start)
+        if pos != -1 and pos + 1 > left:
+            left = pos + 1
+    right = min(len(text), end + 6)
+    for sep in seps:
+        pos = text.find(sep, end, right)
+        if pos != -1 and pos < right:
+            right = pos
+    return text[left:right]
+
+
 def _sanitize_japanese_text(s: str, fallback: str) -> str:
     """Japanese Legal Kanji & Kana Gate:
-    1. Normalizes punctuation to Japanese legal style (`「」`, `・`, `（...）`);
-    2. Maps Shinjitai equivalents and strips any character in `[\u3400-\u9fff]` not encodable in `cp932`
-       (eliminating PRC-only simplified characters like `车, 规, 据, 护, 评, 这, 们`);
-    3. Rejects pure-Hanzi clauses (`>=12` Hanzi with `0` Kana) so untranslated Chinese prose cannot pass."""
+    1. Normalizes punctuation to Japanese legal style (`「」`, `・`, `[...]`, `（...）`);
+    2. Applies multi-char PRC->Japanese legal phrase replacements, then maps Shinjitai equivalents;
+    3. Rejects sub-clauses containing unmapped non-CP932 Simplified Hanzi or Chinese-only grammar
+       (never silently dropping single characters to form broken Sino-Japanese fragments);
+    4. Rejects pure-Hanzi clauses (`>=6` Hanzi with `0` attached Kana unless an allowed Japanese compound)."""
     for k, v in (
         ("“", "「"),
         ("”", "」"),
@@ -306,34 +424,46 @@ def _sanitize_japanese_text(s: str, fallback: str) -> str:
         ("’", "』"),
         ("《", "『"),
         ("》", "』"),
+        ("【", "["),
+        ("】", "]"),
         ("，", "、"),
         ("；", "；"),
         ("：", "："),
     ):
         s = s.replace(k, v)
+    for zh_w, ja_w in _JA_WORD_FIXES:
+        if zh_w in s:
+            s = s.replace(zh_w, ja_w)
     s = s.translate(_JA_SHINJITAI_MAP)
 
-    # Filter out any CJK ideograph that is not valid Japanese JIS/CP932 Kanji
-    cleaned_chars: list[str] = []
-    for ch in s:
-        if "\u3400" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff":
-            try:
-                ch.encode("cp932")
-                cleaned_chars.append(ch)
-            except UnicodeEncodeError:
-                continue
+    # Split into sentence segments; any segment with unmapped non-CP932 Hanzi or Chinese syntax
+    # has its untranslated Chinese runs removed rather than silently dropping single chars.
+    segs = re.split(r"([。；！？\n])", s)
+    kept_segs: list[str] = []
+    for seg in segs:
+        if not seg or seg in "。；！？\n":
+            kept_segs.append(seg)
+            continue
+        has_non_cp932 = any(
+            ("\u3400" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff") and not _is_cp932(ch)
+            for ch in seg
+        )
+        if has_non_cp932 or _ZH_GRAMMAR_IN_JA_RE.search(seg):
+            # Strip Chinese clause runs while keeping pure ASCII / katakana / numbers if standalone
+            seg_clean = re.sub(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u309f]+", " ", seg)
+            kept_segs.append(seg_clean)
         else:
-            cleaned_chars.append(ch)
-    s = "".join(cleaned_chars)
+            kept_segs.append(seg)
+    s = "".join(kept_segs)
 
-    # Strip any >=12-Kanji run that lacks Kana in its local 20-char window (exact dual of has_untranslated_chinese_leak)
     while True:
         bad_span: tuple[int, int] | None = None
         for m in _PURE_HAN_CLAUSE_RE.finditer(s):
-            if m.group(0).endswith(("株式会社", "有限会社", "合同会社")):
+            tok = m.group(0)
+            if tok.endswith(_JA_EXEMPT_KANJI_SUFFIXES) and len(tok) <= 20:
                 continue
-            win = s[max(0, m.start() - 20) : min(len(s), m.end() + 20)]
-            if not _JA_KANA_RE.search(win):
+            win = _ja_clause_window(s, m.start(), m.end())
+            if not _JA_KANA_RE.search(win) or len(tok) >= 10:
                 bad_span = (m.start(), m.end())
                 break
         if bad_span is None:
@@ -341,8 +471,10 @@ def _sanitize_japanese_text(s: str, fallback: str) -> str:
         s = s[: bad_span[0]] + " " + s[bad_span[1] :]
 
     s = re.sub(r"[、。；：,\s]{2,}", lambda m: m.group(0)[0] if m.group(0)[0] in "、。" else " ", s)
-    s = re.sub(r"[ \t]{2,}", " ", s).strip(" -;,:、")
-    return s if s else fallback
+    s = re.sub(r"[ \t]{2,}", " ", s).lstrip(" -;,:、。").rstrip(" -;,:、")
+    if not s or not re.search(r"[\u3040-\u30ff\u3400-\u9fffA-Za-z0-9]", s):
+        return fallback
+    return s
 
 
 def has_untranslated_chinese_leak(text: str, lang: str) -> list[str]:
@@ -351,6 +483,8 @@ def has_untranslated_chinese_leak(text: str, lang: str) -> list[str]:
         return []
     if lang == "ja":
         leaks: list[str] = []
+        for gm in _ZH_GRAMMAR_IN_JA_RE.finditer(text):
+            leaks.append(gm.group(0))
         for ch in text:
             if "\u3400" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff":
                 try:
@@ -358,12 +492,12 @@ def has_untranslated_chinese_leak(text: str, lang: str) -> list[str]:
                 except UnicodeEncodeError:
                     leaks.append(ch)
         for m in _PURE_HAN_CLAUSE_RE.finditer(text):
-            if m.group(0).endswith(("株式会社", "有限会社", "合同会社")):
+            tok = m.group(0)
+            if tok.endswith(_JA_EXEMPT_KANJI_SUFFIXES) and len(tok) <= 20:
                 continue
-            # Allow long Kanji compound ONLY if Kana exists nearby in the surrounding 30 chars
-            win = text[max(0, m.start() - 20) : min(len(text), m.end() + 20)]
-            if not _JA_KANA_RE.search(win):
-                leaks.append(m.group(0))
+            win = _ja_clause_window(text, m.start(), m.end())
+            if not _JA_KANA_RE.search(win) or len(tok) >= 10:
+                leaks.append(tok)
         return leaks
     return _HAN_AND_CJK_PUNCT_RE.findall(text)
 
@@ -374,6 +508,7 @@ def clean_and_gate_target_text(text: Any, lang: str, fallback: str = "—") -> s
     if text is None:
         return fallback
     s = _CTRL_RE.sub("", str(text)).strip()
+    s = re.sub(r"_{0,2}CYSH_SECRET_[A-Za-z0-9_.\-]*_{0,2}", "", s, flags=re.IGNORECASE).strip()
     if not s:
         return fallback
 
@@ -451,7 +586,7 @@ def clean_and_gate_target_text(text: Any, lang: str, fallback: str = "—") -> s
     s = re.sub(r"([(])\s+", r"\1", s)
     s = s.strip(" -;,:")
 
-    if not s:
+    if not s or not re.search(r"[^\W_]", s):
         return fallback
     if lang == "th":
         s = _inject_thai_zwsp(s)
@@ -484,12 +619,28 @@ def _apply_multilingual_slots(blocks: list[dict], translated: list[str], lang: s
             if items:
                 out.append({"type": "list", "items": items})
         elif btype == "table":
-            head = [_next(fallback=col_fb) for _ in (b.get("head") or [])]
+            is_no_head = bool(b.get("no_head"))
+            spans = b.get("spans") if isinstance(b.get("spans"), list) else None
+            head = [_next(fallback="" if is_no_head else col_fb) for _ in (b.get("head") or [])]
             rows: list[list[str]] = []
-            for r in b.get("rows") or []:
+            for r_i, r in enumerate(b.get("rows") or []):
                 if isinstance(r, list):
-                    rows.append([_next(fallback="—") for _ in r])
+                    row_out: list[str] = []
+                    for c_i, _ in enumerate(r):
+                        covered = bool(
+                            spans
+                            and r_i < len(spans)
+                            and isinstance(spans[r_i], list)
+                            and c_i < len(spans[r_i])
+                            and spans[r_i][c_i] == [0, 0]
+                        )
+                        row_out.append(_next(fallback="" if covered else "—"))
+                    rows.append(row_out)
             tbl: dict[str, Any] = {"type": "table", "head": head, "rows": rows}
+            if is_no_head:
+                tbl["no_head"] = True
+            if spans is not None:
+                tbl["spans"] = spans
             if b.get("widths"):
                 tbl["widths"] = list(b["widths"])
             out.append(tbl)
@@ -516,21 +667,57 @@ def _quote_is_native_target(orig_q: str, cite_lang: str, target_lang: str) -> bo
     return False
 
 
+_LIST_OR_ABBREV_DOT_RE = re.compile(
+    r"(?:^|[\s(\[])(?:Art|Arts|Sec|Secs|No|Nos|Ch|Fig|Figs|al|etc|vs|cf|para|paras|sub|pt|vol|rev|ed|e\.g|i\.e|\d+|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})$"
+)
+_DANGLING_FOREIGN_TAIL_RE = re.compile(
+    r"(?:[:：—–\-]+|(?:^|[\s;；,，(（])(?:and|or|ou|et|und|oder|y|o|e|en|of|oraz|lub|ve|veya|dan|atau|và|hoặc|أو|و|и|или)|(?:^|[\s;；(（])(?:\d+\.|[a-zA-Z]\.|\(\d+\)|\([a-zA-Z]\)))\s*$",
+    re.IGNORECASE,
+)
+
+
+def _format_target_script(s: str, lang: str) -> str:
+    return _inject_thai_zwsp(s) if lang == "th" else (_isolate_arabic_ltr(s) if lang == "ar" else s)
+
+
 def _truncate_at_sentence_or_word(text: str, max_chars: int = 400, *, lang: str) -> str:
     """Redline 4.3: truncate statutory quotes cleanly without dangling list numbers or mid-word cuts."""
     clean = _CTRL_RE.sub("", text).strip()
     if len(clean) <= max_chars:
-        return _inject_thai_zwsp(clean) if lang == "th" else (_isolate_arabic_ltr(clean) if lang == "ar" else clean)
+        return _format_target_script(clean, lang)
     cut = clean[:max_chars]
-    for sep in ("。", ". ", "؛ ", "; "):
+    best = -1
+    for sep in ("。", "！", "？", "؛ ", "; "):
         pos = cut.rfind(sep)
         if pos >= max_chars // 2:
-            res = cut[: pos + len(sep)].strip()
-            return _inject_thai_zwsp(res) if lang == "th" else (_isolate_arabic_ltr(res) if lang == "ar" else res)
+            cand_end = pos + (1 if sep in ("。", "！", "？") else 1)
+            before_sep = cut[:cand_end].rstrip()
+            if not _DANGLING_FOREIGN_TAIL_RE.search(before_sep) and cand_end > best:
+                best = cand_end
+    for m in re.finditer(r"[^\s.]\.(?=\s|$)", cut):
+        dot_end = m.end()
+        if dot_end >= max_chars // 2 and not _LIST_OR_ABBREV_DOT_RE.search(cut[: dot_end - 1]):
+            if dot_end > best:
+                best = dot_end
+    if best >= max_chars // 2:
+        res = cut[:best].strip()
+        while True:
+            nxt = _DANGLING_FOREIGN_TAIL_RE.sub("", res).rstrip(" ,;:—–-\n\t")
+            if nxt == res or not nxt:
+                break
+            res = nxt
+        if res and res[-1] in ".。!！?？":
+            return _format_target_script(res, lang)
+        return _format_target_script(res + "...", lang)
     if " " in cut:
         cut = cut.rsplit(" ", 1)[0]
+    while True:
+        nxt = _DANGLING_FOREIGN_TAIL_RE.sub("", cut).rstrip(" ,;:—–-\n\t")
+        if nxt == cut or not nxt:
+            break
+        cut = nxt
     cut = re.sub(r"[\s,;:\-]+$", "", cut) + "..."
-    return _inject_thai_zwsp(cut) if lang == "th" else (_isolate_arabic_ltr(cut) if lang == "ar" else cut)
+    return _format_target_script(cut, lang)
 
 
 def _build_multilingual_citation_table(
@@ -556,9 +743,17 @@ def _build_multilingual_citation_table(
 
         if orig_title and _quote_is_native_target(orig_title, c_lang, lang):
             law_txt = _truncate_at_sentence_or_word(orig_title, 160, lang=lang)
-        elif orig_title and lang != "ja" and not _HAN_ONLY_RE.search(orig_title) and lang in ("fr", "de", "es", "pt", "it", "nl", "id", "tr", "pl"):
-            # Keep official Latin statute title if already in Latin script, or translate Chinese title
-            law_txt = clean_and_gate_target_text(zh_title or orig_title, lang, fallback=def_statute)
+        elif (
+            orig_title
+            and lang in ("fr", "de", "es", "pt", "it", "nl", "id", "tr", "pl")
+            and re.search(r"[A-Za-z]", orig_title)
+            and not re.search(
+                r"[\u01a0\u01a1\u01af\u01b0\u1ea0-\u1ef9\u0370-\u04ff\u0530-\u077f\u08a0-\u0dff\u0e00-\u10ff\u1780-\u17ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]",
+                orig_title,
+            )
+        ):
+            # Keep official Latin statute title if already in clean Latin script
+            law_txt = clean_and_gate_target_text(orig_title, lang, fallback=def_statute)
         else:
             law_txt = clean_and_gate_target_text(zh_title or orig_title, lang, fallback=def_statute)
 
@@ -739,16 +934,19 @@ async def build_multilingual_doc_blocks(
             DocumentNarrative.inputs_hash == sig_hash,
         )
     )
+    from app.analysis.english_report import _valid_slot_strings
+
     translated_slots: list[str] | None = None
     if cached is not None and isinstance(cached.report, dict):
-        cand = cached.report.get("strings")
-        if isinstance(cand, list) and len(cand) == len(slots):
-            translated_slots = [str(x) for x in cand]
+        translated_slots = _valid_slot_strings(slots, cached.report.get("strings"))
 
     if translated_slots is None and (force_llm or _allow_live_llm_now()) and not read_only_viewer and slots and task_org_id is not None:
         try:
             from app.core.config import get_settings
+            from app.core.redaction import bind_egress, llm_scope
+            from app.iam.models import Organization
 
+            org = await session.get(Organization, task_org_id)
             st = get_settings()
             eff_model = (
                 "deepseek-chat"
@@ -759,41 +957,61 @@ async def build_multilingual_doc_blocks(
             merged_out: list[str] = []
             total_tok = 0
             batch_size = 20
-            for start in range(0, len(slots), batch_size):
-                chunk = slots[start : start + batch_size]
-                keyed_in = {str(idx_k): val_k for idx_k, val_k in enumerate(chunk)}
-                llm_res = await call_llm_json(
-                    [
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": json.dumps({"slots": keyed_in}, ensure_ascii=False)},
-                    ],
-                    max_tokens=8192,
-                    model=eff_model,
-                )
-                total_tok += int(llm_res.total_tokens or 0)
-                raw_data = llm_res.data if isinstance(llm_res.data, dict) else {}
-                slot_map = raw_data.get("slots") if isinstance(raw_data.get("slots"), dict) else raw_data
-                if not isinstance(slot_map, dict) or len(slot_map) < max(1, int(len(chunk) * 0.75)):
-                    raise LlmUnavailableError(f"Multilingual ({lang}) slot map incomplete")
-                for idx_k, orig_s in enumerate(chunk):
-                    cand_s = str(slot_map.get(str(idx_k)) or "").strip()
-                    merged_out.append(cand_s if cand_s else clean_and_gate_target_text(orig_s, lang))
+            with llm_scope():
+                bind_egress(session, org)
+                for start in range(0, len(slots), batch_size):
+                    chunk = slots[start : start + batch_size]
+                    keyed_in = {str(idx_k): val_k for idx_k, val_k in enumerate(chunk)}
+                    llm_res = await call_llm_json(
+                        [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": json.dumps({"slots": keyed_in}, ensure_ascii=False)},
+                        ],
+                        max_tokens=8192,
+                        model=eff_model,
+                    )
+                    total_tok += int(llm_res.total_tokens or 0)
+                    raw_data = llm_res.data if isinstance(llm_res.data, dict) else {}
+                    slot_map = raw_data.get("slots") if isinstance(raw_data.get("slots"), dict) else raw_data
+                    if not isinstance(slot_map, dict):
+                        raise LlmUnavailableError(f"Multilingual ({lang}) slot map invalid")
+                    non_empty_indices = [idx_k for idx_k, orig_s in enumerate(chunk) if str(orig_s).strip()]
+                    matched_non_empty = sum(
+                        1
+                        for idx_k in non_empty_indices
+                        if str(idx_k) in slot_map and str(slot_map.get(str(idx_k)) or "").strip()
+                    )
+                    if non_empty_indices and matched_non_empty < len(non_empty_indices):
+                        raise LlmUnavailableError(f"Multilingual ({lang}) keyed slots incomplete ({matched_non_empty}/{len(non_empty_indices)})")
+                    for idx_k, orig_s in enumerate(chunk):
+                        cand_s = str(slot_map.get(str(idx_k)) or "").strip()
+                        if cand_s and has_untranslated_chinese_leak(cand_s, lang):
+                            cand_s = clean_and_gate_target_text(cand_s, lang, fallback="")
+                        merged_out.append(cand_s if cand_s else (clean_and_gate_target_text(orig_s, lang) if str(orig_s).strip() else ""))
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
             translated_slots = merged_out
-            session.add(
-                DocumentNarrative(
-                    org_id=task_org_id,
-                    task_id=task_id,
-                    code=cache_code,
-                    inputs_hash=sig_hash,
-                    blocks=[],
-                    report={"strings": translated_slots},
-                    tokens=total_tok,
+            async with session.begin_nested():
+                await session.execute(
+                    pg_insert(DocumentNarrative)
+                    .values(
+                        id=uuid.uuid4(),
+                        org_id=task_org_id,
+                        task_id=task_id,
+                        code=cache_code,
+                        inputs_hash=sig_hash,
+                        blocks=[],
+                        report={"strings": translated_slots},
+                        tokens=total_tok,
+                    )
+                    .on_conflict_do_nothing(constraint="uq_document_narrative_inputs")
                 )
-            )
             await session.commit()
+            session.info.pop("latest_templates", None)
             await session.refresh(task)
         except Exception:  # noqa: BLE001
             await session.rollback()
+            session.info.pop("latest_templates", None)
             await session.refresh(task)
             translated_slots = None
 
@@ -912,8 +1130,13 @@ def build_multilingual_consulting_report_blocks(
     countries_map = lex["countries"]
     dim_titles = lex["dimension_titles"]
 
-    cc_iso = str(task.country_code or "").upper()
-    cc_tr = countries_map.get(cc_iso) or clean_and_gate_target_text(cc_iso, lang, fallback="Jurisdiction")
+    cc_iso = str(task.country_code or "").strip().upper()
+    cc_tr = (
+        countries_map.get(cc_iso)
+        or (clean_and_gate_target_text(cc_iso, lang, fallback="Jurisdiction") if cc_iso and len(cc_iso) > 2 else clean_and_gate_target_text(ui.get("target_jurisdiction"), lang, fallback="Jurisdiction"))
+    )
+    edited_meta = ((getattr(rv, "consulting_json", None) or {}).get("edited") or {}) if isinstance(getattr(rv, "consulting_json", None), dict) else {}
+    edited_dims = set(edited_meta.get("dimensions") or [])
     veh_tr = clean_and_gate_target_text(task.vehicle_model or "", lang, fallback=ui.get("default_vehicle", "Vehicle"))
     scn_tr = clean_and_gate_target_text(task.scenario_type or "", lang, fallback=ui.get("default_scenario", "Scenario"))
 
@@ -996,21 +1219,43 @@ def build_multilingual_consulting_report_blocks(
                     "rows": f_rows,
                 }
             )
+            if (dcode in edited_dims or getattr(rv, "status", "") == "edited") and (d.get("content_markdown") or "").strip():
+                fb_rev = clean_and_gate_target_text(
+                    f"{dtitle} — {ver_word} {getattr(rv, 'version_no', 1)} ({cc_tr}).",
+                    lang,
+                    fallback=dtitle,
+                )
+                md_rev = clean_and_gate_target_text(d.get("content_markdown") or "", lang, fallback=fb_rev)
+                if len(re.findall(r"[^\W_]", md_rev)) < 12:
+                    md_rev = fb_rev
+                blocks.append({"type": "paragraph", "text": md_rev})
         else:
-            md_tr = clean_and_gate_target_text(
-                d.get("content_markdown") or "",
+            fb_md = clean_and_gate_target_text(
+                ui.get("fallback_excerpt", "{law} ({art})").format(law=dtitle, art=cc_tr),
                 lang,
                 fallback=clean_and_gate_target_text(f"{dtitle} — {cc_tr} ({veh_tr}).", lang, fallback=dtitle),
             )
+            md_tr = clean_and_gate_target_text(d.get("content_markdown") or "", lang, fallback=fb_md)
+            if len(re.findall(r"[^\W_]", md_tr)) < 12:
+                md_tr = fb_md
             blocks.append({"type": "paragraph", "text": md_tr})
 
         recs = d.get("key_recommendations") or []
         if recs:
-            rec_items = [
-                clean_and_gate_target_text(r, lang, fallback="")
-                for r in recs
-            ]
-            rec_clean = [x for x in rec_items if x]
+            rec_items: list[str] = []
+            for r_idx, r in enumerate(recs, 1):
+                fb_rec = clean_and_gate_target_text(
+                    ui.get("fallback_control", "Control #{idx}: {src} -> {rcp}").format(
+                        idx=r_idx, src=cc_tr, rcp=dtitle
+                    ),
+                    lang,
+                    fallback=f"#{r_idx} {dtitle}",
+                )
+                cand_rec = clean_and_gate_target_text(r, lang, fallback=fb_rec)
+                if len(re.findall(r"[^\W_]", cand_rec)) < 4:
+                    cand_rec = fb_rec
+                rec_items.append(cand_rec)
+            rec_clean = [x for x in rec_items if x and re.search(r"[^\W_]", x)]
             if rec_clean:
                 blocks.append({"type": "list", "items": rec_clean})
 
@@ -1032,3 +1277,180 @@ def build_multilingual_consulting_report_blocks(
     part = dimension if dimension else "Full_Report"
     fname_stem = f"{day}_{safe_cc}_Automotive_Compliance_{part}_v{getattr(rv, 'version_no', 1)}_{lang.upper()}"
     return blocks, fname_stem, clean_and_gate_target_text(f"{title_tr} ({lang.upper()})", lang, fallback=title_tr)
+
+
+async def build_multilingual_consulting_report_blocks_async(
+    session: AsyncSession,
+    task: AnalysisTask,
+    rv: Any,
+    dimension: str | None = None,
+    *,
+    lang: str,
+    read_only_viewer: bool = False,
+) -> tuple[list[dict], str, str]:
+    """Async consulting report translator: translates Chinese executive summary, dimension prose,
+    compliance obligations, and recommendations via cached LLM slots when outbound LLM is enabled,
+    then delegates to ``build_multilingual_consulting_report_blocks`` for deterministic gating."""
+    import copy as _copy
+    from types import SimpleNamespace
+
+    lang = normalize_report_lang(lang)
+    if lang == "zh":
+        raise ValueError("中文报告请走原生中文导出分支")
+
+    # Collect Chinese prose strings from rv so LLM translates real project conclusions
+    prose_in: list[str] = []
+    exec_zh = str(getattr(rv, "executive_summary", "") or "").strip()
+    if exec_zh and not dimension and _HAN_ONLY_RE.search(exec_zh):
+        prose_in.append(exec_zh[:1200])
+    raw_dims = _copy.deepcopy(getattr(rv, "dimensions_json", None) or [])
+    for d in raw_dims:
+        if dimension and d.get("dimension_code") != dimension:
+            continue
+        md_s = str(d.get("content_markdown") or "").strip()
+        if md_s and _HAN_ONLY_RE.search(md_s):
+            prose_in.append(md_s[:1200])
+        for f in d.get("findings") or []:
+            ob_s = str(f.get("compliance_obligation") or "").strip()
+            if ob_s and _HAN_ONLY_RE.search(ob_s):
+                prose_in.append(ob_s[:600])
+        for r in d.get("key_recommendations") or []:
+            r_s = str(r or "").strip()
+            if r_s and _HAN_ONLY_RE.search(r_s):
+                prose_in.append(r_s[:600])
+
+    unique_in = list(dict.fromkeys(prose_in))
+    tr_lookup: dict[str, str] = {}
+    if unique_in and _allow_live_llm_now() and not read_only_viewer and task.org_id is not None:
+        sig_payload = json.dumps(
+            {"v": 2, "kind": "consulting_rv", "lang": lang, "ver": getattr(rv, "version_no", 1), "items": unique_in},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        sig_hash = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()
+        cache_code = f"rv_{getattr(rv, 'version_no', 1)}_{dimension or 'all'}__{lang}"[:30]
+        cached = await session.scalar(
+            select(DocumentNarrative).where(
+                DocumentNarrative.task_id == task.id,
+                DocumentNarrative.code == cache_code,
+                DocumentNarrative.inputs_hash == sig_hash,
+            )
+        )
+        from app.analysis.english_report import _valid_slot_strings
+
+        out_list: list[str] | None = None
+        if cached is not None and isinstance(cached.report, dict):
+            out_list = _valid_slot_strings(unique_in, cached.report.get("strings"))
+        if out_list is None:
+            try:
+                from app.analysis.english_report import SYSTEM_DOC_EN
+                from app.core.config import get_settings
+                from app.core.redaction import bind_egress, llm_scope
+                from app.iam.models import Organization
+
+                org = await session.get(Organization, task.org_id)
+                st = get_settings()
+                eff_model = (
+                    "deepseek-chat"
+                    if st.llm_model == "deepseek-flash" and "deepseek.com" in (st.llm_base_url or "")
+                    else st.llm_model
+                )
+                sys_p = SYSTEM_DOC_EN if lang == "en" else _system_prompt_for_lang(lang)
+                merged_tr: list[str] = []
+                total_tok = 0
+                with llm_scope():
+                    bind_egress(session, org)
+                    for start in range(0, len(unique_in), 20):
+                        chunk = unique_in[start : start + 20]
+                        if lang == "en":
+                            llm_res = await call_llm_json(
+                                [
+                                    {"role": "system", "content": sys_p},
+                                    {"role": "user", "content": json.dumps({"strings": chunk}, ensure_ascii=False)},
+                                ],
+                                model=eff_model,
+                                temperature=0.1,
+                                max_tokens=4096,
+                            )
+                            total_tok += int(llm_res.total_tokens or 0)
+                            res_j = llm_res.data if isinstance(llm_res.data, dict) else {}
+                            arr = res_j.get("strings") if isinstance(res_j, dict) else None
+                            if (
+                                not isinstance(arr, list)
+                                or len(arr) != len(chunk)
+                                or any(not isinstance(x, str) or not x.strip() for x in arr)
+                            ):
+                                raise ValueError("Consulting EN slot count mismatch or empty slot")
+                            merged_tr.extend(str(x) for x in arr)
+                        else:
+                            keyed_in = {str(i_k): v_k for i_k, v_k in enumerate(chunk)}
+                            llm_res = await call_llm_json(
+                                [
+                                    {"role": "system", "content": sys_p},
+                                    {"role": "user", "content": json.dumps({"slots": keyed_in}, ensure_ascii=False)},
+                                ],
+                                model=eff_model,
+                                temperature=0.1,
+                                max_tokens=4096,
+                            )
+                            total_tok += int(llm_res.total_tokens or 0)
+                            res_j = llm_res.data if isinstance(llm_res.data, dict) else {}
+                            s_map = res_j.get("slots") if isinstance(res_j.get("slots"), dict) else res_j
+                            if not isinstance(s_map, dict) or any(
+                                str(i_k) not in s_map or not str(s_map.get(str(i_k)) or "").strip()
+                                for i_k in range(len(chunk))
+                            ):
+                                raise ValueError("Consulting i18n slot map missing or incomplete")
+                            merged_tr.extend(str(s_map.get(str(i_k), "")) for i_k in range(len(chunk)))
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                out_list = merged_tr
+                async with session.begin_nested():
+                    await session.execute(
+                        pg_insert(DocumentNarrative)
+                        .values(
+                            id=uuid.uuid4(),
+                            org_id=task.org_id,
+                            task_id=task.id,
+                            code=cache_code,
+                            inputs_hash=sig_hash,
+                            blocks=[],
+                            report={"strings": out_list},
+                            tokens=total_tok,
+                        )
+                        .on_conflict_do_nothing(constraint="uq_document_narrative_inputs")
+                    )
+                await session.commit()
+            except Exception:  # noqa: BLE001
+                await session.rollback()
+                out_list = None
+        if out_list is not None:
+            tr_lookup = dict(zip(unique_in, out_list, strict=False))
+
+    if tr_lookup:
+        new_exec = tr_lookup.get(exec_zh[:1200], exec_zh) if exec_zh else exec_zh
+        for d in raw_dims:
+            md_s = str(d.get("content_markdown") or "").strip()
+            if md_s and md_s[:1200] in tr_lookup:
+                d["content_markdown"] = tr_lookup[md_s[:1200]]
+            for f in d.get("findings") or []:
+                ob_s = str(f.get("compliance_obligation") or "").strip()
+                if ob_s and ob_s[:600] in tr_lookup:
+                    f["compliance_obligation"] = tr_lookup[ob_s[:600]]
+            if d.get("key_recommendations"):
+                d["key_recommendations"] = [
+                    tr_lookup.get(str(r or "").strip()[:600], r) for r in d["key_recommendations"]
+                ]
+        rv_proxy = SimpleNamespace(
+            version_no=getattr(rv, "version_no", 1),
+            status=getattr(rv, "status", ""),
+            executive_summary=new_exec,
+            dimensions_json=raw_dims,
+            consulting_json=getattr(rv, "consulting_json", None),
+            citation_policy=getattr(rv, "citation_policy", None),
+            regulatory_updates=getattr(rv, "regulatory_updates", None),
+        )
+    else:
+        rv_proxy = rv
+
+    return build_multilingual_consulting_report_blocks(task, rv_proxy, dimension, lang=lang)

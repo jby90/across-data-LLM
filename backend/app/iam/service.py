@@ -30,7 +30,7 @@ def strip_trial_org_suffix(name: str | None) -> str:
 
 
 def is_trial_org_name(name: str | None) -> bool:
-    return bool(name and TRIAL_ORG_MARKER in name)
+    return bool(name and (TRIAL_ORG_MARKER in name or "(体验空间-" in name))
 
 
 class AuthError(Exception):
@@ -186,7 +186,10 @@ async def register_portal_user(
     """普通用户自助注册体验账号：新建独立个人体验空间组织实现跨租户物理隔离，默认赋予无导出权限的普通查看者角色。"""
     from app.core.rls import DatabaseIdentity, bind_identity
 
-    clean = strip_trial_org_suffix(full_name(org_name))
+    norm_org = full_name(org_name)
+    if is_trial_org_name(org_name) or is_trial_org_name(norm_org):
+        raise RuleError("单位全称不可包含系统体验空间保留标识")
+    clean = strip_trial_org_suffix(norm_org)
     if len(clean) < 2:
         raise RuleError("请填写公司全称")
 
@@ -240,6 +243,12 @@ async def exchange_portal_ticket(
     target_role = Role.MEMBER if tier == "enterprise" else Role.VIEWER
     if not email or "@" not in email or len(org_name) < 2:
         raise RuleError("门户票据缺少有效的邮箱或单位全称")
+    norm_org = full_name(org_name)
+    if is_trial_org_name(org_name) or is_trial_org_name(norm_org):
+        raise RuleError("单位全称不可包含系统体验空间保留标识")
+    clean_org = strip_trial_org_suffix(norm_org)
+    if len(clean_org) < 2:
+        raise RuleError("请填写公司全称")
     try:
         TypeAdapter(EmailStr).validate_python(email)
     except PydanticValidationError:
@@ -255,16 +264,28 @@ async def exchange_portal_ticket(
         org = await session.get(Organization, user.org_id) if user.org_id else None
         if org is None or not org.is_active:
             raise AuthError("所属单位已停用")
-        if tier == "enterprise" and user.role == Role.VIEWER.value and not is_trial_org_name(org.name):
+        if tier == "enterprise":
+            if is_trial_org_name(org.name):
+                ent_org = await company_by_full_name(session, clean_org)
+                if not ent_org.is_active:
+                    raise AuthError("所属单位已停用")
+                user.org_id = ent_org.id
             user.role = Role.MEMBER.value
             user.can_export = False
         if display_name and user.display_name != display_name:
             user.display_name = display_name[:100]
         await session.commit()
     else:
-        org = await company_by_full_name(session, org_name)
-        if not org.is_active:
-            raise AuthError("所属单位已停用")
+        if tier == "enterprise":
+            org = await company_by_full_name(session, clean_org)
+            if not org.is_active:
+                raise AuthError("所属单位已停用")
+        else:
+            # 非企业级普通单点票据严格建立物理隔离的独立体验沙箱，绝不混入正式签约车企租户
+            sandbox_name = f"{clean_org[:175]}{TRIAL_ORG_MARKER}{uuid.uuid4().hex[:8]}）"
+            org = Organization(name=sandbox_name, is_demo=True, is_active=True)
+            session.add(org)
+            await session.flush()
         try:
             user = await create_user(
                 session,

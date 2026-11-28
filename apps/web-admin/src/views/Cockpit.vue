@@ -94,25 +94,29 @@ type CameraKey = 'WORLD' | 'EUROPE' | 'ASIA' | 'MENA' | 'AMER'
 
 const CAMERA_PRESETS: Record<CameraKey, { label: string; s: number; cx: number; cy: number }> = {
   WORLD: { label: '全球全景', s: 1, cx: 480, cy: 220 },
-  EUROPE: { label: '欧洲法域', s: 3.25, cx: 502, cy: 92 },
-  ASIA: { label: '亚太与东盟', s: 2.32, cx: 754, cy: 172 },
-  MENA: { label: '中东与非洲', s: 2.42, cx: 528, cy: 186 },
-  AMER: { label: '美洲与澳新', s: 1.24, cx: 245, cy: 222 },
+  EUROPE: { label: '欧洲法域', s: 3.1, cx: 502, cy: 94 },
+  ASIA: { label: '亚太与澳新', s: 1.28, cx: 760, cy: 232 },
+  MENA: { label: '中东与非洲', s: 1.32, cx: 528, cy: 238 },
+  AMER: { label: '南北美洲', s: 1.24, cx: 245, cy: 222 },
 }
 
 const REGION_CODES: Record<Exclude<CameraKey, 'WORLD'>, Set<string>> = {
   EUROPE: new Set([
     'EU', 'DE', 'FR', 'IT', 'ES', 'NL', 'SE', 'PL', 'PT', 'BE', 'AT', 'IE', 'DK', 'FI',
-    'NO', 'CH', 'GB', 'CZ', 'HU', 'RO', 'GR', 'AZ', 'SK', 'SI', 'BG', 'HR', 'LT', 'LV', 'EE',
-    'LU', 'RU', 'TR', 'UA', 'BY', 'RS',
+    'NO', 'IS', 'LI', 'MC', 'MT', 'CY', 'CH', 'GB', 'CZ', 'HU', 'RO', 'GR', 'AZ', 'AM', 'GE',
+    'SK', 'SI', 'BG', 'HR', 'LT', 'LV', 'EE', 'LU', 'RU', 'TR', 'UA', 'BY', 'RS', 'AL', 'BA', 'MK', 'ME', 'MD',
   ]),
   ASIA: new Set([
-    'CN', 'SG', 'JP', 'KR', 'TH', 'MY', 'ID', 'VN', 'PH', 'IN', 'PK', 'KZ', 'UZ', 'BD', 'LK', 'KH', 'BN',
+    'CN', 'HK', 'MO', 'TW', 'SG', 'JP', 'KR', 'TH', 'MY', 'ID', 'VN', 'PH', 'IN', 'PK', 'BD', 'LK', 'NP', 'AF',
+    'KZ', 'UZ', 'KG', 'TJ', 'TM', 'MN', 'KH', 'LA', 'MM', 'BN', 'AU', 'NZ', 'FJ', 'PG',
   ]),
   MENA: new Set([
-    'MA', 'TN', 'EG', 'LB', 'AE', 'SA', 'QA', 'KW', 'OM', 'BH', 'IL', 'JO', 'DZ', 'NG', 'ZA', 'KE', 'ET',
+    'MA', 'TN', 'EG', 'LB', 'AE', 'SA', 'QA', 'KW', 'OM', 'BH', 'IL', 'JO', 'IQ', 'IR', 'SY', 'YE',
+    'DZ', 'LY', 'NG', 'ZA', 'KE', 'ET', 'GH', 'TZ', 'UG', 'AO', 'SN', 'CI', 'CM', 'ZW', 'ZM', 'BW', 'NA', 'MZ', 'MU', 'RW',
   ]),
-  AMER: new Set(['US', 'CA', 'MX', 'BR', 'AR', 'CL', 'CO', 'PE', 'UY', 'AU', 'NZ']),
+  AMER: new Set([
+    'US', 'CA', 'MX', 'BR', 'AR', 'CL', 'CO', 'PE', 'UY', 'PY', 'BO', 'EC', 'VE', 'CR', 'PA', 'DO', 'CU', 'GT',
+  ]),
 }
 
 const ANCHOR_LABEL_CODES = new Set([
@@ -122,6 +126,12 @@ const ANCHOR_LABEL_CODES = new Set([
 const route = useRoute()
 const router = useRouter()
 const boardRef = ref<HTMLElement | null>(null)
+const geoSvgRef = ref<SVGSVGElement | null>(null)
+const geoSvgWidth = ref(960)
+let geoResizeObs: ResizeObserver | null = null
+const mapLabelFontSize = computed(() =>
+  Math.max(13, Math.ceil((13.3 * 960) / Math.max(240, geoSvgWidth.value))),
+)
 const loading = ref(false)
 const selectedGeoCode = ref<string>('ALL')
 const activeCamera = ref<CameraKey>('WORLD')
@@ -246,8 +256,10 @@ const mapHubMarkers = computed(() => {
     if (rt.recipient_code) routeCodes.add(rt.recipient_code)
   }
 
-  const placedLabels: Array<{ x: number; y: number }> = []
-  return sovereignCountries.value
+  const fontScale = mapLabelFontSize.value / 13
+  const minX = 84 * fontScale
+  const minY = 17 * fontScale
+  const rawMarkers = sovereignCountries.value
     .map((c) => {
       const hub = getCountryHub(c.country_code)
       if (!hub) return null
@@ -264,19 +276,13 @@ const mapHubMarkers = computed(() => {
       const isSelected = selectedGeoCode.value === c.country_code
       const isCn = c.country_code === 'CN'
       const inRegion = activeCamera.value === 'WORLD' || REGION_CODES[activeCamera.value].has(c.country_code)
-      let showLabel =
+      const wantLabel =
         isSelected ||
         isCn ||
         (zoomed && inRegion) ||
         !dense ||
         ANCHOR_LABEL_CODES.has(c.country_code) ||
         routeCodes.has(c.country_code)
-
-      if (showLabel && !isSelected && !isCn) {
-        const collides = placedLabels.some((p) => Math.abs(p.x - lx) < 82 && Math.abs(p.y - ly) < 17)
-        if (collides) showLabel = false
-      }
-      if (showLabel) placedLabels.push({ x: lx, y: ly })
 
       const labelText = isCn
         ? c.standards_count > 0
@@ -297,10 +303,40 @@ const mapHubMarkers = computed(() => {
         lx,
         ly,
         anchor: baseOffset.anchor,
-        showLabel,
+        wantLabel,
       }
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
+
+  const placedLabels: Array<{ x: number; y: number }> = []
+  for (const m of rawMarkers) {
+    if (m.isSelected || m.isCn) {
+      placedLabels.push({ x: m.lx, y: m.ly })
+    }
+  }
+  return rawMarkers.map((m) => {
+    let showLabel = m.wantLabel
+    if (showLabel && !m.isSelected && !m.isCn) {
+      const collides = placedLabels.some((p) => Math.abs(p.x - m.lx) < minX && Math.abs(p.y - m.ly) < minY)
+      if (collides) showLabel = false
+      else placedLabels.push({ x: m.lx, y: m.ly })
+    }
+    return {
+      code: m.code,
+      name: m.name,
+      labelText: m.labelText,
+      laws: m.laws,
+      isCn: m.isCn,
+      isSelected: m.isSelected,
+      isMajor: m.isMajor,
+      sx: m.sx,
+      sy: m.sy,
+      lx: m.lx,
+      ly: m.ly,
+      anchor: m.anchor,
+      showLabel,
+    }
+  })
 })
 
 const selectedCountry = computed(() => {
@@ -406,9 +442,9 @@ const executiveTakeaway = computed(() => {
   const trPct = hl.translation_coverage_pct !== null ? hl.translation_coverage_pct : 100
   if (!props.opsMode) {
     const totalProj = hl.doc_projects_total + hl.admission_projects_total
-    return `全球法规底座与治理实况：已覆盖五大洲 ${hl.covered_jurisdictions} 个出海法域、收录现行有效法规 ${hl.laws_in_force} 部（${hl.clauses_total.toLocaleString()} 条可用条文，外文精译率 ${trPct}%）与中外标准 ${hl.standards_active} 项，支撑 ${hl.briefings_ready} 国合规简报、${hl.official_forms_total} 套法定原表及 ${totalProj} 个企业评估与准入项目闭环。`
+    return `全球法规底座与治理实况：已覆盖五大洲 ${hl.covered_jurisdictions} 个主权国家与地区、收录现行有效法规 ${hl.laws_in_force} 部（${hl.clauses_total.toLocaleString()} 条可用条文，外文精译率 ${trPct}%）与中外标准 ${hl.standards_active} 项，支撑 ${hl.briefings_ready} 国合规简报、${hl.official_forms_total} 套法定申报原表及 ${totalProj} 个企业评估与准入项目闭环。`
   }
-  return `全球法规底座实况：已覆盖五大洲 ${hl.covered_jurisdictions} 个汽车出海法域，收录现行有效法规 ${hl.laws_in_force} 部（${hl.clauses_total.toLocaleString()} 条可用条文）与中外标准 ${hl.standards_active} 项；外文条文中文精译率 ${trPct}%，全面支撑 ${hl.briefings_ready} 国八维合规简报与 ${hl.official_forms_total} 套东道国法定原表套打。`
+  return `全球法规底座实况：已覆盖五大洲 ${hl.covered_jurisdictions} 个主权国家与地区，收录现行有效法规 ${hl.laws_in_force} 部（${hl.clauses_total.toLocaleString()} 条可用条文）与中外标准 ${hl.standards_active} 项；外文条文中文精译率 ${trPct}%，全面支撑 ${hl.briefings_ready} 国八维合规简报与 ${hl.official_forms_total} 套法定申报原表套打。`
 })
 
 const cleanKgLabel = (label: string) => label.replace(/节点/g, '要素')
@@ -449,12 +485,30 @@ watch(
   { immediate: true },
 )
 
+watch(
+  geoSvgRef,
+  (el) => {
+    geoResizeObs?.disconnect()
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const w0 = el.getBoundingClientRect().width
+    if (w0 > 0) geoSvgWidth.value = w0
+    geoResizeObs = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width || el.getBoundingClientRect().width
+      if (w > 0) geoSvgWidth.value = w
+    })
+    geoResizeObs.observe(el)
+  },
+  { flush: 'post' },
+)
+
 onMounted(() => {
   window.addEventListener('keydown', onFullscreenKeydown)
   void load()
 })
 
 onUnmounted(() => {
+  geoResizeObs?.disconnect()
+  geoResizeObs = null
   if (camAnimId !== null) cancelAnimationFrame(camAnimId)
   document.documentElement.classList.remove('cy-cockpit-fullscreen')
   document.body.style.overflow = ''
@@ -505,7 +559,11 @@ onUnmounted(() => {
       <section class="takeaway-ribbon" aria-label="核心成效摘要">
         <p class="takeaway-text">{{ executiveTakeaway }}</p>
         <span class="takeaway-badge">
-          {{ props.opsMode ? '51 站周错峰巡检 · 8 类标准模板与 25 套原表维护' : '中英双语文书直出 · 多租户隔离与不可变审计' }}
+          {{
+            props.opsMode
+              ? `${data.operations.monitor_sites_total} 站周错峰巡检 · ${(data.headline as any).doc_templates_total ?? 8} 类标准模板与 ${data.headline.official_forms_total} 套原表维护`
+              : '17 语种合规文书直出 · 多租户隔离与不可变审计'
+          }}
         </span>
       </section>
 
@@ -639,22 +697,22 @@ onUnmounted(() => {
             </div>
             <div class="dk-ring-pair">
               <div class="dk-ring-col" @click="go('/translations')">
-                <svg viewBox="0 0 64 64" width="48" height="48" class="dk-ring-svg" aria-hidden="true">
-                  <circle cx="32" cy="32" r="25" fill="none" class="ring-track-svg" stroke-width="6" />
+                <svg viewBox="0 0 52 52" width="52" height="52" class="dk-ring-svg" aria-hidden="true">
+                  <circle cx="26" cy="26" r="20" fill="none" class="ring-track-svg" stroke-width="5" />
                   <circle
                     v-if="data.headline.translation_coverage_pct !== null"
-                    cx="32"
-                    cy="32"
-                    r="25"
+                    cx="26"
+                    cy="26"
+                    r="20"
                     fill="none"
                     class="ring-cyan-svg"
-                    stroke-width="6"
+                    stroke-width="5"
                     stroke-linecap="round"
-                    :stroke-dasharray="2 * Math.PI * 25"
-                    :stroke-dashoffset="ringOffset(data.headline.translation_coverage_pct, 25)"
-                    transform="rotate(-90 32 32)"
+                    :stroke-dasharray="2 * Math.PI * 20"
+                    :stroke-dashoffset="ringOffset(data.headline.translation_coverage_pct, 20)"
+                    transform="rotate(-90 26 26)"
                   />
-                  <text x="32" y="37" text-anchor="middle" class="ring-text-svg" font-size="13" font-weight="600">
+                  <text x="26" y="30" text-anchor="middle" class="ring-text-svg" font-size="13" font-weight="600">
                     {{ data.headline.translation_coverage_pct !== null ? `${Math.round(data.headline.translation_coverage_pct)}%` : '100%' }}
                   </text>
                 </svg>
@@ -665,22 +723,22 @@ onUnmounted(() => {
               </div>
 
               <div class="dk-ring-col" @click="go(data.operations.attention_sites_total > 0 ? '/sites?attention=1' : '/sites')">
-                <svg viewBox="0 0 64 64" width="48" height="48" class="dk-ring-svg" aria-hidden="true">
-                  <circle cx="32" cy="32" r="25" fill="none" class="ring-track-svg" stroke-width="6" />
+                <svg viewBox="0 0 52 52" width="52" height="52" class="dk-ring-svg" aria-hidden="true">
+                  <circle cx="26" cy="26" r="20" fill="none" class="ring-track-svg" stroke-width="5" />
                   <circle
                     v-if="siteHealthyPct !== null"
-                    cx="32"
-                    cy="32"
-                    r="25"
+                    cx="26"
+                    cy="26"
+                    r="20"
                     fill="none"
                     :class="data.operations.attention_sites_total > 0 ? 'ring-gold-svg' : 'ring-emerald-svg'"
-                    stroke-width="6"
+                    stroke-width="5"
                     stroke-linecap="round"
-                    :stroke-dasharray="2 * Math.PI * 25"
-                    :stroke-dashoffset="ringOffset(siteHealthyPct, 25)"
-                    transform="rotate(-90 32 32)"
+                    :stroke-dasharray="2 * Math.PI * 20"
+                    :stroke-dashoffset="ringOffset(siteHealthyPct, 20)"
+                    transform="rotate(-90 26 26)"
                   />
-                  <text x="32" y="37" text-anchor="middle" class="ring-text-svg" font-size="13" font-weight="600">
+                  <text x="26" y="30" text-anchor="middle" class="ring-text-svg" font-size="13" font-weight="600">
                     {{ siteHealthyPct !== null ? `${Math.round(siteHealthyPct)}%` : '—' }}
                   </text>
                 </svg>
@@ -714,10 +772,10 @@ onUnmounted(() => {
           <div class="dk-card dk-flex1">
             <div class="dk-sec-head">
               <h2>知识图谱六要素立体雷达</h2>
-              <span class="dk-link" @click="go('/knowledge-graph')">打开图谱 →</span>
+              <span class="dk-link" @click="go(selectedCountry ? { path: '/knowledge-graph', query: { country: selectedCountry.country_code } } : '/knowledge-graph')">打开图谱 →</span>
             </div>
 
-            <div v-if="radarGeometry" class="radar-wrap" @click="go('/knowledge-graph')">
+            <div v-if="radarGeometry" class="radar-wrap" @click="go(selectedCountry ? { path: '/knowledge-graph', query: { country: selectedCountry.country_code } } : '/knowledge-graph')">
               <svg viewBox="0 0 224 188" class="radar-svg" aria-label="知识图谱六要素分布雷达图">
                 <polygon
                   v-for="(pts, rIdx) in radarGeometry.rings"
@@ -765,7 +823,7 @@ onUnmounted(() => {
                 v-for="item in sortedKgBreakdown"
                 :key="item.label"
                 class="dk-row dk-row-click kg-compact-row"
-                @click="go('/knowledge-graph')"
+                @click="go(selectedCountry ? { path: '/knowledge-graph', query: { country: selectedCountry.country_code } } : '/knowledge-graph')"
               >
                 <span class="kg-dot-label">
                   <i class="kg-dot" :class="{ gold: item.label.includes('罚则') }" />
@@ -801,7 +859,7 @@ onUnmounted(() => {
           </div>
 
           <div class="geo-stage-box">
-            <svg class="geo-svg" :viewBox="MAP_VIEWBOX" role="img" aria-label="全球重点法域法规覆盖与跨境流向地图">
+            <svg ref="geoSvgRef" class="geo-svg" :viewBox="MAP_VIEWBOX" role="img" aria-label="全球重点法域法规覆盖与跨境流向地图">
               <g class="geo-grid-lines" stroke-width="0.9">
                 <line x1="0" y1="110" x2="960" y2="110" />
                 <line x1="0" y1="220" x2="960" y2="220" />
@@ -885,7 +943,7 @@ onUnmounted(() => {
                   :x="m.lx"
                   :y="m.ly"
                   :text-anchor="m.anchor"
-                  font-size="13"
+                  :font-size="mapLabelFontSize"
                   font-weight="600"
                 >
                   {{ m.labelText }}
@@ -958,7 +1016,7 @@ onUnmounted(() => {
                     v-if="props.opsMode"
                     type="button"
                     class="dk-inline-reset"
-                    @click="go('/sites')"
+                    @click="go({ path: '/sites', query: { country: selectedCountry.country_code } })"
                   >
                     采集源站 →
                   </button>
@@ -966,7 +1024,7 @@ onUnmounted(() => {
                     v-else-if="selectedCountry.country_code !== 'CN' && selectedCountry.briefing_ready"
                     type="button"
                     class="dk-inline-reset"
-                    @click="go('/whitepapers')"
+                    @click="go({ path: '/whitepapers', query: { country: selectedCountry.country_code } })"
                   >
                     国别简报 →
                   </button>
@@ -980,15 +1038,15 @@ onUnmounted(() => {
                 </div>
               </div>
               <div class="dossier-grid5">
-                <div class="dossier-cell">
+                <div class="dossier-cell dk-row-click" @click="go({ path: '/documents', query: { country: selectedCountry.country_code } })">
                   <span>在册现行法规</span>
                   <strong>{{ selectedCountry.laws_count }} 部 / {{ selectedCountry.clauses_count.toLocaleString() }} 条</strong>
                 </div>
-                <div class="dossier-cell">
+                <div class="dossier-cell dk-row-click" @click="go({ path: '/standards', query: { country: selectedCountry.country_code, status: 'active' } })">
                   <span>配套技术标准</span>
                   <strong>{{ selectedCountry.standards_count }} 项关联标准</strong>
                 </div>
-                <div class="dossier-cell">
+                <div class="dossier-cell dk-row-click" @click="go({ path: '/translations', query: { country: selectedCountry.country_code } })">
                   <span>译文状态</span>
                   <strong class="dk-done">
                     {{
@@ -1000,11 +1058,14 @@ onUnmounted(() => {
                     }}
                   </strong>
                 </div>
-                <div class="dossier-cell">
+                <div class="dossier-cell dk-row-click" @click="go({ path: '/knowledge-graph', query: { country: selectedCountry.country_code } })">
                   <span>知识图谱要素</span>
                   <strong>{{ selectedCountry.kg_nodes_count.toLocaleString() }} 个 / {{ selectedCountry.kg_edges_count.toLocaleString() }} 边</strong>
                 </div>
-                <div class="dossier-cell">
+                <div
+                  class="dossier-cell dk-row-click"
+                  @click="go(props.opsMode ? { path: '/sites', query: { country: selectedCountry.country_code } } : { path: '/admission', query: { country: selectedCountry.country_code } })"
+                >
                   <span>{{ props.opsMode ? '官方源站与原表' : '准入与法定原表' }}</span>
                   <strong v-if="props.opsMode">{{ selectedCountry.monitor_sites_count }} 站 / {{ selectedCountry.official_forms_count }} 套</strong>
                   <strong v-else>{{ selectedCountry.admission_entries_count }} 项 / {{ selectedCountry.official_forms_count }} 套</strong>
@@ -1053,7 +1114,7 @@ onUnmounted(() => {
                     <button
                       type="button"
                       class="dk-jump-btn"
-                      @click.stop="go(props.opsMode ? '/sites' : { path: '/documents', query: { country: c.country_code } })"
+                      @click.stop="go(props.opsMode ? { path: '/sites', query: { country: c.country_code } } : { path: '/documents', query: { country: c.country_code } })"
                     >
                       {{ props.opsMode ? '维护 →' : '查看 →' }}
                     </button>
@@ -1085,7 +1146,7 @@ onUnmounted(() => {
               <span>管理端与企业端角色账号</span>
               <strong>管理 {{ data.account_summary.super_admins + data.account_summary.ops_admins }} · 企业 {{ data.account_summary.enterprise_members + data.account_summary.ordinary_viewers }}</strong>
             </div>
-            <div v-if="data.account_summary.trial_visitors" class="dk-row dk-row-click" @click="go('/orgs')">
+            <div v-if="data.account_summary.trial_visitors" class="dk-row dk-row-click" @click="go('/orgs?trial=1')">
               <span>门户独立体验空间账号</span>
               <strong>{{ data.account_summary.trial_visitors }} 个账号</strong>
             </div>
@@ -1095,7 +1156,7 @@ onUnmounted(() => {
             </div>
             <div class="dk-row dk-row-click" @click="go('/agent-studio')">
               <span>合规评估执行核验轨迹</span>
-              <strong>{{ data.headline.doc_projects_total }} 个评估项目</strong>
+              <strong>{{ data.headline.doc_projects_total + (data.headline.consulting_chats_total || 0) }} 条记录（评估 {{ data.headline.doc_projects_total }}）</strong>
             </div>
             <div class="dk-row dk-row-click" @click="go('/audit-logs')">
               <span>近 7 日不可变操作审计</span>
@@ -1119,13 +1180,13 @@ onUnmounted(() => {
               <span>东道国属地准入事项库</span>
               <strong>{{ data.headline.admission_entries_total }} 项现行事项</strong>
             </div>
-            <div class="dk-row dk-row-click" @click="go('/admission')">
+            <div class="dk-row dk-row-click" @click="go('/document-templates')">
               <span>已锁定指纹官方申报原表</span>
               <strong>{{ data.headline.official_forms_total }} 套法定原表</strong>
             </div>
             <div class="dk-row dk-row-click" @click="go('/document-templates')">
               <span>合规评估标准文书模板库</span>
-              <strong class="dk-done">8 类全套法定模板</strong>
+              <strong class="dk-done">{{ (data.headline as any).doc_templates_total ?? 8 }} 类全套法定模板</strong>
             </div>
             <div class="dk-row dk-row-click" @click="go('/opinion')">
               <span>海外执法与行业舆情动态</span>
@@ -1172,11 +1233,11 @@ onUnmounted(() => {
 
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
   background: var(--ck-bg);
   border: 1px solid var(--ck-border);
   border-radius: 10px;
-  padding: 18px 20px 20px;
+  padding: 9px 14px 10px;
   color: var(--ck-tx-1);
   font-size: 13px;
   font-weight: 400;
@@ -1196,25 +1257,25 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   flex-wrap: wrap;
   background: var(--ck-header);
   border: 1px solid var(--ck-border);
   border-top: 2px solid var(--ck-accent);
   border-radius: 8px;
-  padding: 12px 16px;
+  padding: 7px 14px;
 }
 
 .crown-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
 .crown-mark {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
   background: var(--ck-accent);
   color: #ffffff;
@@ -1271,9 +1332,22 @@ onUnmounted(() => {
 
 .cockpit-header h1 {
   margin: 0;
-  font-size: 20px;
-  line-height: 1.35;
+  font-size: 18px;
+  line-height: 1.25;
   color: var(--ck-tx-1);
+}
+
+@media (max-width: 640px) {
+  .cockpit-board {
+    padding: 12px;
+  }
+  .perm-scope-pill {
+    white-space: normal;
+    line-height: 1.4;
+  }
+  .cockpit-header h1 {
+    font-size: 16px;
+  }
 }
 
 .cockpit-actions {
@@ -1287,19 +1361,19 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   background: var(--ck-card);
   border: 1px solid var(--ck-border);
   border-left: 4px solid var(--ck-gold);
   border-radius: 8px;
-  padding: 10px 14px;
+  padding: 6px 12px;
 }
 
 .takeaway-text {
   margin: 0;
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.45;
   color: var(--ck-tx-1);
   flex: 1 1 520px;
 }
@@ -1311,14 +1385,14 @@ onUnmounted(() => {
   background: var(--ck-inner);
   border: 1px solid var(--ck-border);
   border-radius: 6px;
-  padding: 4px 10px;
+  padding: 3px 10px;
   white-space: nowrap;
 }
 
 .dk-kpi6 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 @media (min-width: 1480px) {
   .dk-kpi6 {
@@ -1335,7 +1409,7 @@ onUnmounted(() => {
   background: var(--ck-card);
   border: 1px solid var(--ck-border);
   border-radius: 8px;
-  padding: 14px 15px;
+  padding: 9px 12px;
 }
 
 .dk-btn-card {
@@ -1346,7 +1420,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
   transition: border-color 0.15s;
 }
 .dk-btn-card:hover {
@@ -1383,11 +1457,11 @@ onUnmounted(() => {
 }
 
 .dk-kpi-val {
-  font-size: 24px;
+  font-size: 21px;
   font-weight: 600;
   color: var(--ck-tx-1);
   display: block;
-  line-height: 1.2;
+  line-height: 1.15;
 }
 .dk-kpi-val small {
   font-size: 13px;
@@ -1426,7 +1500,7 @@ onUnmounted(() => {
 .adm-dark-body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 9px;
   align-items: stretch;
 }
 .dk-col-center {
@@ -1459,7 +1533,7 @@ onUnmounted(() => {
 .dk-stack {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 9px;
   min-width: 0;
 }
 .dk-flex1 {
@@ -1473,7 +1547,7 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 .dk-sec-head h2 {
   margin: 0;
@@ -1494,9 +1568,9 @@ onUnmounted(() => {
 .dk-ring-pair {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  padding-bottom: 12px;
-  margin-bottom: 10px;
+  gap: 8px;
+  padding-bottom: 7px;
+  margin-bottom: 6px;
   border-bottom: 1px solid var(--ck-border);
 }
 .dk-ring-col {
@@ -1507,7 +1581,7 @@ onUnmounted(() => {
   background: var(--ck-inner);
   border: 1px solid var(--ck-border);
   border-radius: 8px;
-  padding: 7px 8px;
+  padding: 5px 7px;
   min-width: 0;
 }
 .dk-ring-svg {
@@ -1549,7 +1623,7 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
-  padding: 7px 0;
+  padding: 4px 0;
   border-bottom: 1px solid var(--ck-border);
   font-size: 13px;
   color: var(--ck-tx-2);
@@ -1588,11 +1662,11 @@ onUnmounted(() => {
   display: flex;
   justify-content: center;
   cursor: pointer;
-  margin-bottom: 6px;
+  margin-bottom: 2px;
 }
 .radar-svg {
-  width: 224px;
-  height: 184px;
+  width: 196px;
+  height: 132px;
   overflow: visible;
 }
 .radar-grid-line {
@@ -1617,7 +1691,7 @@ onUnmounted(() => {
   fill: var(--ck-tx-2);
 }
 .kg-compact-row {
-  padding: 5px 0;
+  padding: 3px 0;
 }
 .kg-dot-label {
   display: inline-flex;
@@ -1637,10 +1711,10 @@ onUnmounted(() => {
 
 /* 排行列表 */
 .dk-bar-item {
-  margin-bottom: 9px;
+  margin-bottom: 6px;
   font-size: 13px;
   cursor: pointer;
-  padding: 6px 8px;
+  padding: 5px 8px;
   border-radius: 6px;
   background: var(--ck-inner);
   border: 1px solid transparent;
@@ -1701,7 +1775,7 @@ onUnmounted(() => {
 }
 
 .dk-country-scroll {
-  max-height: 256px;
+  max-height: 196px;
   overflow-y: auto;
   padding-right: 2px;
 }
@@ -1735,11 +1809,11 @@ onUnmounted(() => {
   background: var(--ck-card);
   border: 1px solid var(--ck-border);
   border-radius: 8px;
-  padding: 14px 16px;
+  padding: 9px 12px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 10px;
+  gap: 7px;
 }
 .map-header-row {
   display: flex;
@@ -1792,6 +1866,7 @@ onUnmounted(() => {
 .geo-svg {
   width: 100%;
   height: auto;
+  max-height: 332px;
   display: block;
   background: var(--ck-ocean);
 }
@@ -1901,9 +1976,9 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
-  padding: 8px 12px;
+  padding: 5px 10px;
   background: var(--ck-inner);
   border-top: 1px solid var(--ck-border);
   font-size: 13px;
@@ -1961,19 +2036,19 @@ onUnmounted(() => {
   background: var(--ck-inner);
   border: 1px solid var(--ck-border);
   border-radius: 8px;
-  padding: 11px 14px;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
   font-size: 13px;
 }
 .dossier-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
-  padding-bottom: 8px;
+  padding-bottom: 5px;
   border-bottom: 1px solid var(--ck-border);
 }
 .map-detail-title {

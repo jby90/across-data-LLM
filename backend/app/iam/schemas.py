@@ -110,6 +110,22 @@ class AccountProfileOut(BaseModel):
     org_name: str | None = None
     signup_source: str = "admin"
     can_export: bool = False
+    is_trial: bool = False
+
+
+class TrialUserOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    display_name: str
+    org_id: uuid.UUID | None = None
+    org_name: str = ""
+    is_active: bool = True
+
+
+class TrialPromoteIn(BaseModel):
+    org_id: uuid.UUID
+    role: Role = Role.MEMBER
+    can_export: bool = False
 
 
 class AccountProfileUpdate(BaseModel):

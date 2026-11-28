@@ -185,40 +185,79 @@ async def workflow_lock(session: AsyncSession):
 
 async def ensure_baseline(session: AsyncSession) -> AgentWorkflowConfig:
     from app.analysis.workflow_engine import DEFAULT_WORKFLOW_EDGES, WORKFLOW_KEY
+    from app.core.rls import DatabaseIdentity, _identity, bind_identity
 
-    await workflow_lock(session)
+    # Fast read-only check first: never acquire xact lock or commit on tenant/viewer GET requests
     rows = list(
         (
             await session.scalars(
                 select(AgentWorkflowConfig)
-                .where(
-                    AgentWorkflowConfig.workflow_key == WORKFLOW_KEY,
-                )
+                .where(AgentWorkflowConfig.workflow_key == WORKFLOW_KEY)
                 .order_by(AgentWorkflowConfig.version_no.desc())
             )
         ).all()
     )
     active = next((r for r in rows if r.is_active), None)
     current = next((r for r in rows if r.runtime_schema_version == RUNTIME_SCHEMA), None)
-    if current is None:
-        current = AgentWorkflowConfig(
-            workflow_key=WORKFLOW_KEY,
-            version_no=(rows[0].version_no + 1 if rows else 1),
-            name="汽车数据跨境八维度合规评估工作流",
-            description="版本固定的检索、模型分析、确定性核验与报告编制；参数由受控导入配置驱动。",
-            dsl_version="cyshuhe-dify-dsl/1.0",
-            runtime_schema_version=RUNTIME_SCHEMA,
-            is_active=not rows,
-            readonly_locked=True,
-            nodes_json=baseline_nodes(),
-            edges_json=copy.deepcopy(DEFAULT_WORKFLOW_EDGES),
-            change_note=("[baseline-s6-user-facts] 分析中业务追问与断点续跑；旧库仅追加待激活版本"),
+    if current is not None:
+        return active or current
+
+    # Cold-start or schema upgrade: seed baseline on caller session (no extra pool checkout)
+    had_pending = bool(session.new or session.dirty or session.deleted)
+    prev_identity = _identity.get()
+    saved_identity = session.info.get("database_identity", prev_identity)
+    try:
+        await bind_identity(session, DatabaseIdentity(scope="system"))
+        await workflow_lock(session)
+        sys_rows = list(
+            (
+                await session.scalars(
+                    select(AgentWorkflowConfig)
+                    .where(AgentWorkflowConfig.workflow_key == WORKFLOW_KEY)
+                    .order_by(AgentWorkflowConfig.version_no.desc())
+                )
+            ).all()
         )
-        session.add(current)
-        await session.flush()
-        snapshot(session, current, "workflow_baseline_created")
-    await session.commit()
-    return active or current
+        sys_current = next(
+            (r for r in sys_rows if r.runtime_schema_version == RUNTIME_SCHEMA), None
+        )
+        if sys_current is None:
+            sys_current = AgentWorkflowConfig(
+                workflow_key=WORKFLOW_KEY,
+                version_no=(sys_rows[0].version_no + 1 if sys_rows else 1),
+                name="汽车数据跨境八维度合规评估工作流",
+                description="版本固定的检索、模型分析、确定性核验与报告编制；参数由受控导入配置驱动。",
+                dsl_version="cyshuhe-dify-dsl/1.0",
+                runtime_schema_version=RUNTIME_SCHEMA,
+                is_active=not sys_rows,
+                readonly_locked=True,
+                nodes_json=baseline_nodes(),
+                edges_json=copy.deepcopy(DEFAULT_WORKFLOW_EDGES),
+                change_note=(
+                    "[baseline-s6-user-facts] 分析中业务追问与断点续跑；旧库仅追加待激活版本"
+                ),
+            )
+            session.add(sys_current)
+            await session.flush()
+            snapshot(session, sys_current, "workflow_baseline_created")
+            if not had_pending:
+                await session.commit()
+    finally:
+        await bind_identity(session, saved_identity)
+        _identity.set(prev_identity)
+
+    rows = list(
+        (
+            await session.scalars(
+                select(AgentWorkflowConfig)
+                .where(AgentWorkflowConfig.workflow_key == WORKFLOW_KEY)
+                .order_by(AgentWorkflowConfig.version_no.desc())
+            )
+        ).all()
+    )
+    active = next((r for r in rows if r.is_active), None)
+    current = next((r for r in rows if r.runtime_schema_version == RUNTIME_SCHEMA), None)
+    return active or current  # type: ignore[return-value]
 
 
 async def import_version(session, payload, change_note, user_id):

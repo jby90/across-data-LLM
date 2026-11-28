@@ -211,6 +211,13 @@ def is_stopword_term(source_term: str | None, target_zh: str | None = None) -> b
         return True
     if re.search(r"[A-Za-z]\d+$", src) and tgt.endswith("的"):
         return True
+    if re.fullmatch(
+        r"(?:the\s+|this\s+)?(?:\d{4}\s+)?(?:act|law|regulations?|rules?|order|decree|statute)"
+        r"|(?:هذا\s+|هذه\s+)?(?:القانون|اللائحة(?:\s+التنفيذية)?|النظام|المرسوم|القرار)",
+        src,
+        re.I,
+    ):
+        return True
     return False
 
 

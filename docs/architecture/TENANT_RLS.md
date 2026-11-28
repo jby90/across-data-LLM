@@ -1,4 +1,4 @@
-# 数据库租户隔离（S11）
+# 数据库租户隔离与五角色边界（迁移链 `0001..0078`）
 
 ## 运行边界
 
@@ -12,11 +12,11 @@ API/worker 使用独立普通登录角色，继承 `cyshuhe_app` 权限组，不
 
 ## 受保护数据
 
-以下 11 张表启用 `ENABLE ROW LEVEL SECURITY` 和 `FORCE ROW LEVEL SECURITY`：
+全量多租户业务表与混合审计表（含 `organizations`、`users`、`analysis_tasks`、`analysis_messages`、`analysis_step_traces`、`report_versions`、`analysis_events`、`task_attachments`、`attachment_reviews`、`document_instances`、`document_instance_versions`、`document_edits`、`document_narratives`、`form_instances`、`admission_projects`、`admission_drafts`、`admission_issues`、`llm_call_audit`、`update_impacts`、`user_notifications`、`knowledge_audit_records`、`audit_logs` 等）全部启用 `ENABLE ROW LEVEL SECURITY` 和 `FORCE ROW LEVEL SECURITY`：
 
 - 企业与账号：`organizations`、`users`。
-- 分析任务及派生数据：`analysis_tasks`、`analysis_messages`、`analysis_step_traces`、`report_versions`、`analysis_events`。
-- 模型调用审计：`llm_call_audit`。
+- 合规评估、文书编制、原表填报与属地准入：`analysis_tasks` 及全部子表、`document_edits`（追加只写不可变存证，移除级联删除）、`form_instances`、`admission_projects` 及子表。
+- 模型调用审计：`llm_call_audit`（`ops` 作用域仅可访问 `org_id IS NULL` 的公共知识治理调用记录，零租户记录可见性）。
 - 报告更新影响与通知：`update_impacts`、`user_notifications`。
 - 混合审计：`knowledge_audit_records`。企业脱敏配置等私有记录按企业隔离；未知类型默认不向匿名或其他企业公开。
 
@@ -33,7 +33,7 @@ API/worker 使用独立普通登录角色，继承 `cyshuhe_app` 权限组，不
 5. SSE 每轮重新核对账号及企业状态，再查询有权限的事件；等待网络写入时不占用数据库事务。
 6. worker、CLI 只有在明确的运维入口中使用系统身份。用户分析后台任务继承经过验证的请求上下文；模型审计的独立事务使用同一企业边界。
 
-平台管理员和律所复核员保留既有管理端查看范围；具体导入、激活、账号管理等操作仍由接口角色权限控制。RLS 不能替代接口权限。相关 PostgreSQL 行为参考：[行安全策略](https://www.postgresql.org/docs/16/ddl-rowsecurity.html)、[CREATE POLICY](https://www.postgresql.org/docs/16/sql-createpolicy.html)、[SET LOCAL 的事务作用域](https://www.postgresql.org/docs/16/sql-set.html)。
+超级管理员（`platform_admin`，映射 `app.scope = 'platform'`）拥有全平台租户治理与安全审计总控范围；运维管理员（`ops_admin`，`0078` 迁移映射独立 `app.scope = 'ops'`）仅可读取与更新本人账号行及 `org_id IS NULL` 的公共法规治理记录，数据库层严格阻断其访问任何企业组织、车企项目或租户审计记录；企业编辑者（`member`）、普通查看者（`viewer`）与门户独立体验者统一运行于 `app.scope = 'tenant'` 并叠加接口先验 RBAC 门禁。相关 PostgreSQL 行为参考：[行安全策略](https://www.postgresql.org/docs/16/ddl-rowsecurity.html)、[CREATE POLICY](https://www.postgresql.org/docs/16/sql-createpolicy.html)、[SET LOCAL 的事务作用域](https://www.postgresql.org/docs/16/sql-set.html)。
 
 ## 威胁边界与后续维护
 

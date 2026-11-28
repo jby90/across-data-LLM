@@ -86,6 +86,7 @@ def _strip_cjk(text: Any, fallback: str = "") -> str:
     if not text:
         return fallback
     cleaned = _XML_BAD_RE.sub("", str(text))
+    cleaned = re.sub(r"_{0,2}CYSH_SECRET_[A-Za-z0-9_.\-]*_{0,2}", "", cleaned, flags=re.IGNORECASE)
     replacements = (
         ("，", ", "),
         ("。", ". "),
@@ -110,12 +111,15 @@ def _strip_cjk(text: Any, fallback: str = "") -> str:
     return cleaned or fallback
 
 
-def _edpb_inputs_hash(values: dict[str, str], citations: list[dict], draft: bool) -> str:
+def _edpb_inputs_hash(
+    values: dict[str, str], citations: list[dict], draft: bool, saved_sig: str = ""
+) -> str:
     payload = {
-        "v": 3,
+        "v": 4,
         "draft": draft,
         "values": {k: str(values.get(k) or "").strip() for k in sorted(values)},
         "citations": sorted(f"{c.get('document_title', '')}:{c.get('clause_number', '')}" for c in citations[:20]),
+        "saved_sig": saved_sig,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
@@ -965,10 +969,21 @@ async def build_edpb_2026_en(
     """Generate or fetch cached English EDPB 2026 official DPIA .docx for a non-China outbound project."""
     from fastapi import HTTPException
 
+    from app.analysis.document_instances import DocumentInstance
     from app.core.redaction import bind_egress, egress_context, llm_scope
     from app.iam.models import Organization
 
-    ihash = _edpb_inputs_hash(values, citations, draft)
+    saved_inst = await session.scalar(
+        select(DocumentInstance).where(
+            DocumentInstance.task_id == task.id, DocumentInstance.code == "dpia"
+        )
+    )
+    saved_sig = (
+        hashlib.sha256(json.dumps(saved_inst.blocks, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+        if saved_inst is not None and saved_inst.blocks
+        else ""
+    )
+    ihash = _edpb_inputs_hash(values, citations, draft, saved_sig=saved_sig)
     cached = await session.scalar(
         select(DocumentNarrative).where(
             DocumentNarrative.task_id == task.id,
@@ -984,6 +999,29 @@ async def build_edpb_2026_en(
             if not read_only_viewer:
                 await session.delete(cached)
                 await session.flush()
+
+    async def _fallback_latest_saved() -> tuple[bytes, str] | None:
+        latest_rows = (
+            await session.scalars(
+                select(DocumentNarrative)
+                .where(
+                    DocumentNarrative.task_id == task.id,
+                    DocumentNarrative.code == EDPB_NARRATIVE_CODE,
+                )
+                .order_by(DocumentNarrative.created_at.desc())
+                .limit(4)
+            )
+        ).all()
+        for cand in latest_rows:
+            if isinstance(cand.report, dict) and isinstance(cand.report.get("edpb_data"), dict):
+                try:
+                    return (
+                        render_edpb_2026_docx(cand.report["edpb_data"], assessment_dt),
+                        "EDPB_2026_DPIA_Official_EN",
+                    )
+                except (AttributeError, TypeError, KeyError, ValueError):
+                    continue
+        return None
 
     if read_only_viewer:
         raise HTTPException(403, "查看账号只能查阅或导出已生成的欧盟标准英文范本，不能触发新建生成")
@@ -1037,6 +1075,17 @@ async def build_edpb_2026_en(
         "facts": clean_facts,
         "graded_risks": structured_risks,
         "statutory_citations": offered_laws,
+        **(
+            {
+                "user_revised_zh_sections": [
+                    str(b.get("text") or "")[:600]
+                    for b in (saved_inst.blocks or [])[:25]
+                    if isinstance(b, dict) and b.get("text")
+                ]
+            }
+            if saved_inst is not None and saved_inst.edit_count > 0
+            else {}
+        ),
     }
 
     org = await session.get(Organization, task.org_id) if getattr(task, "org_id", None) else None
@@ -1066,18 +1115,21 @@ async def build_edpb_2026_en(
                 ),
             )
     except LlmUnavailableError as exc:
-        raise RuntimeError(f"英文 EDPB 官方表生成服务暂时不可用：{exc}") from exc
+        fb = await _fallback_latest_saved()
+        if fb is not None:
+            return fb
+        raise RuntimeError(f"欧盟标准英文范本生成服务暂时不可用：{exc}") from exc
 
     part1 = res1.data if isinstance(res1.data, dict) else {}
     part2 = res2.data if isinstance(res2.data, dict) else {}
     raw_edpb = {**part1, **part2}
     if not isinstance(raw_edpb.get("controller"), dict) or not raw_edpb["controller"]:
-        raise RuntimeError("英文 EDPB 官方表结构化输出未通过核验，请重试")
+        raise RuntimeError("欧盟标准英文范本结构化输出未通过核验，请重试")
     edpb_data = _sanitise_edpb_tree(raw_edpb, cjk_aliases)
     try:
         rendered_docx = render_edpb_2026_docx(edpb_data, assessment_dt)
     except (AttributeError, TypeError, KeyError, ValueError) as exc:
-        raise RuntimeError("英文 EDPB 官方表结构化输出未通过核验，请重试") from exc
+        raise RuntimeError("欧盟标准英文范本结构化输出未通过核验，请重试") from exc
 
     tokens = (
         int(getattr(res1, "prompt_tokens", 0) or 0)
@@ -1085,21 +1137,21 @@ async def build_edpb_2026_en(
         + int(getattr(res2, "prompt_tokens", 0) or 0)
         + int(getattr(res2, "completion_tokens", 0) or 0)
     )
-    row = DocumentNarrative(
-        org_id=task.org_id,
-        task_id=task.id,
-        code=EDPB_NARRATIVE_CODE,
-        inputs_hash=ihash,
-        blocks=[],
-        report={"edpb_data": edpb_data, "draft": draft},
-        tokens=tokens,
-        created_by=actor_user_id or getattr(task, "created_by", None),
-    )
-    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    session.add(row)
-    try:
-        await session.commit()
-    except IntegrityError:
-        await session.rollback()
+    await session.execute(
+        pg_insert(DocumentNarrative)
+        .values(
+            org_id=task.org_id,
+            task_id=task.id,
+            code=EDPB_NARRATIVE_CODE,
+            inputs_hash=ihash,
+            blocks=[],
+            report={"edpb_data": edpb_data, "draft": draft},
+            tokens=tokens,
+            created_by=actor_user_id or getattr(task, "created_by", None),
+        )
+        .on_conflict_do_nothing(index_elements=["task_id", "code", "inputs_hash"])
+    )
+    await session.commit()
     return rendered_docx, "EDPB_2026_DPIA_Official_EN"

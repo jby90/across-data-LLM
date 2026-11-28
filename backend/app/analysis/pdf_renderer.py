@@ -40,33 +40,54 @@ _RTL_RUN = re.compile(
     rf"[{RTL}](?:[{RTL}\s0-9\u0660-\u0669.,\u060c\u061b:/\-]*[{RTL}\u0660-\u0669]"
     rf"|[{RTL}\s0-9\u0660-\u0669.,\u060c\u061b:/\-]*[0-9](?![A-Za-z]))?"
 )
+_LTR_ATOM_IN_RTL = (
+    r"(?:\+\d[\d\s\-()]{4,}\d"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|(?:[A-Za-z\u00C0-\u024F]|\d+[A-Za-z\u00C0-\u024F])[A-Za-z0-9\u00C0-\u024F._/\-+]*)"
+)
 _LTR_TOKEN_IN_RTL = re.compile(
-    r"(?:[A-Za-z\u00C0-\u024F]|\d+[A-Za-z\u00C0-\u024F])"
-    r"(?:[A-Za-z0-9\u00C0-\u024F\s./_+\-]*[A-Za-z0-9\u00C0-\u024F])?"
+    rf"{_LTR_ATOM_IN_RTL}(?:[ \t]+(?:{_LTR_ATOM_IN_RTL}|\d+(?:[.,/-]\d+)*))*"
 )
 
 
+_PUA_CHAR_MAP = str.maketrans(
+    {
+        "\uf0b7": "\u2022",
+        "\uf0a7": "\u25aa",
+        "\uf0fc": "\u2713",
+        "\uf076": "\u2713",
+        "\uf0fe": "\u2611",
+        "\uf052": "\u2611",
+        "\uf0a8": "\u2610",
+        "\uf06f": "\u2610",
+        "\uf02a": "\u2610",
+    }
+)
+_PUA_RE = re.compile(r"[\ue000-\uf8ff]")
+
+
 def _text(value, *, base_dir: str = ""):
-    raw = str(value or "")
+    raw = _PUA_RE.sub("", str(value or "").translate(_PUA_CHAR_MAP))
     # 双向文字混排隔离：LTR 段落中隔离阿语片段（U+2068…U+2069），
-    # RTL 阿语段落中隔离含数字前缀的拉丁代号如 4G/5G、QH-S9（U+2066…U+2069）
+    # RTL 阿语段落中隔离多词拉丁专名、标准号、型号及国际电话（U+2066…U+2069）
     bidi = {unicodedata.bidirectional(c) for c in raw}
-    if not (bidi & {"R", "AL"} and "L" in bidi):
+    if not (bidi & {"R", "AL"} and ({"L", "EN"} & bidi)):
         return escape(raw, quote=True)
+    clean_raw = raw.replace("\u2066", "").replace("\u2068", "").replace("\u2069", "")
     first_strong = next(
         (
             unicodedata.bidirectional(c)
-            for c in raw
+            for c in clean_raw
             if unicodedata.bidirectional(c) in {"R", "AL", "L"}
         ),
         "L",
     )
     eff_dir = base_dir or ("rtl" if first_strong in {"R", "AL"} else "ltr")
     if eff_dir == "rtl":
-        raw = _LTR_TOKEN_IN_RTL.sub(lambda m: "\u2066" + m.group(0) + "\u2069", raw)
+        clean_raw = _LTR_TOKEN_IN_RTL.sub(lambda m: "\u2066" + m.group(0) + "\u2069", clean_raw)
     else:
-        raw = _RTL_RUN.sub(lambda m: "\u2068" + m.group(0) + "\u2069", raw)
-    return escape(raw, quote=True)
+        clean_raw = _RTL_RUN.sub(lambda m: "\u2068" + m.group(0) + "\u2069", clean_raw)
+    return escape(clean_raw, quote=True)
 
 
 def _p(value, cls=""):
@@ -162,9 +183,44 @@ def _blocks_html(blocks):
             out.append(f'<div class="finding"><p class="ftitle"><b>{head}</b></p>{rows}</div>')
         elif kind == "table":
             head = "".join(f"<th>{_p(h)}</th>" for h in blk["head"])
-            rows = "".join(
-                "<tr>" + "".join(f"<td>{_rp(c)}</td>" for c in row) + "</tr>" for row in blk["rows"]
-            )
+            raw_spans = blk.get("spans")
+            b_rows = blk["rows"]
+            ncols = len(blk["head"]) or max((len(r) for r in b_rows), default=1)
+            if raw_spans:
+                if isinstance(raw_spans, list) and raw_spans and isinstance(raw_spans[0], dict):
+                    norm_sp: list[list[list[int]]] = [[[1, 1] for _ in range(ncols)] for _ in range(len(b_rows))]
+                    for sp_item in raw_spans:
+                        sr = int(sp_item.get("r", 0))
+                        sc = int(sp_item.get("c", 0))
+                        srs = max(1, int(sp_item.get("rs", 1)))
+                        scs = max(1, int(sp_item.get("cs", 1)))
+                        if 0 <= sr < len(norm_sp) and 0 <= sc < ncols:
+                            for dr in range(srs):
+                                for dc in range(scs):
+                                    if sr + dr < len(norm_sp) and sc + dc < ncols:
+                                        norm_sp[sr + dr][sc + dc] = [srs, scs] if (dr == 0 and dc == 0) else [0, 0]
+                else:
+                    norm_sp = raw_spans
+                tr_list: list[str] = []
+                for r_idx, row in enumerate(b_rows):
+                    td_list: list[str] = []
+                    for c_idx, c_val in enumerate(row):
+                        rs, cs = (
+                            norm_sp[r_idx][c_idx]
+                            if r_idx < len(norm_sp)
+                            and isinstance(norm_sp[r_idx], list)
+                            and c_idx < len(norm_sp[r_idx])
+                            else [1, 1]
+                        )
+                        if rs == 0 or cs == 0:
+                            continue
+                        td_list.append(f'<td colspan="{cs}" rowspan="{rs}">{_rp(c_val)}</td>')
+                    tr_list.append("<tr>" + "".join(td_list) + "</tr>")
+                rows = "".join(tr_list)
+            else:
+                rows = "".join(
+                    "<tr>" + "".join(f"<td>{_rp(c)}</td>" for c in row) + "</tr>" for row in b_rows
+                )
             # 列宽写死：自动列宽会把“时限”这类窄列挤成一字一行
             widths = blk.get("widths") or []
             cols = "".join(f'<col style="width:{w}%">' for w in widths)
@@ -223,8 +279,10 @@ def _localize_inline_enums(value: object) -> str:
     )
 
 
-_CORE_FONT_FAMILIES: tuple[str, ...] = ("notosanssc", "notonaskharabic", "inter")
+_CORE_FONT_FAMILIES: tuple[str, ...] = ("inter", "notosanssc", "notonaskharabic")
 _EXTENDED_SCRIPT_PATTERNS: dict[str, re.Pattern[str]] = {
+    "notosanssc": re.compile(r"[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]"),
+    "notonaskharabic": re.compile(r"[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]"),
     "notosanskr": re.compile(r"[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]"),
     "notosansthai": re.compile(r"[\u0e00-\u0e7f]"),
     "notosansbengali": re.compile(r"[\u0980-\u09ff]"),
@@ -233,7 +291,7 @@ _EXTENDED_SCRIPT_PATTERNS: dict[str, re.Pattern[str]] = {
 
 
 def _active_fonts_for_html(fonts: dict[str, str], body_html: str) -> dict[str, str]:
-    """Emit @font-face for the 3 core families always, plus extended script fonts only when needed."""
+    """Emit @font-face for Latin Inter always, plus CJK/Arabic/extended script fonts strictly on demand."""
     selected: dict[str, str] = {}
     for name, uri in fonts.items():
         if name in _CORE_FONT_FAMILIES:
@@ -261,7 +319,6 @@ def report_html(
     bdr_col = "#0a105d" if table_style == "edpb" else "#000000"
     head_col = "#0a105d" if table_style == "edpb" else "#000000"
     outer_w = "0.5pt" if table_style == "edpb" else "0.75pt"
-    html_lang = "ar" if rtl else "zh-CN"
     body_attr = " dir='rtl' class='rtl-doc'" if rtl else ""
     top_slot = "@top-right" if rtl else "@top-left"
     body_parts = [
@@ -323,6 +380,7 @@ def report_html(
                     ]
                 )
     body_html = "".join(body_parts)
+    html_lang = ("he" if re.search(r"[\u0590-\u05ff]", body_html) else "ar") if rtl else "zh-CN"
     active_fonts = _active_fonts_for_html(fonts, body_html)
     css_fonts = "\n".join(
         f"@font-face{{font-family:'{name}';src:url('{uri}');font-weight:100 900}}"
@@ -336,38 +394,38 @@ def report_html(
         f"""
         @page {{size:A4; margin:28mm 18mm 22mm;
           {top_slot} {{content:element(reportHeader)}}
-          @bottom-center {{content:counter(page) ' / ' counter(pages);font-size:9pt}}}}
+          @bottom-center {{content:counter(page) ' / ' counter(pages);font-size:10pt;color:#000000}}}}
         body{{font-family:{font_stack};
           font-size:10.5pt;color:#000000;line-height:1.5;hyphens:none}}
         body.rtl-doc{{direction:rtl;text-align:right}}
         body.rtl-doc table{{direction:rtl}}
         body.rtl-doc th,body.rtl-doc td,body.rtl-doc th p,body.rtl-doc td p{{text-align:right}}
-        header{{position:running(reportHeader);font-size:8pt;color:#64748b}}
+        header{{position:running(reportHeader);font-size:10pt;color:#000000}}
         h1{{font-size:20pt;line-height:1.4;color:{head_col}}} h2{{font-size:14pt;color:{head_col}}}
         h3{{font-size:12pt;color:{head_col}}} h1,h2,h3{{break-after:avoid}}
         p{{margin:5pt 0;white-space:pre-wrap;overflow-wrap:anywhere}}
         .rtl{{direction:rtl;text-align:right;font-size:12pt}}
-        .notice{{padding:7pt;background:#fff7e8;color:#855800}}
-        .meta,.citation{{font-size:9pt;color:#43546a}}
-        .finding{{border-left:2pt solid #334155;padding-left:8pt;margin:10pt 0}}
-        .citation{{border-top:0.5pt solid #cbd5e1;padding-top:5pt}}
+        .notice{{padding:7pt;background:#ffffff;color:#000000;border:0.5pt solid #000000}}
+        .meta,.citation{{font-size:10pt;color:#000000}}
+        .finding{{border-left:2pt solid #000000;padding-left:8pt;margin:10pt 0}}
+        .citation{{border-top:0.5pt solid #000000;padding-top:5pt}}
         .citation-block{{break-inside:avoid}}
-        table{{border-collapse:collapse;width:100%;font-size:9.5pt;margin:6pt 0 10pt;border:{outer_w} solid {bdr_col}}}
+        table{{border-collapse:collapse;width:100%;font-size:10pt;margin:6pt 0 10pt;border:{outer_w} solid {bdr_col}}}
         th,td{{border:0.5pt solid {bdr_col};padding:3.5pt 5pt;vertical-align:top;color:#000000}}
         th{{background:#ffffff;border-bottom:{outer_w} solid {bdr_col};text-align:left;font-weight:700;color:#000000}}
         td p,th p{{margin:0}}
         tr{{break-inside:avoid}}
         .verdict{{font-size:16pt;font-weight:700;color:#000000;margin:14pt 0 6pt}}
         .item{{margin:6pt 0;break-inside:avoid}} .itemhead{{font-weight:700;margin-bottom:1pt}}
-        .finding{{break-inside:avoid;margin:9pt 0;padding-left:8pt;border-left:2pt solid #334155}}
+        .finding{{break-inside:avoid;margin:9pt 0;padding-left:8pt;border-left:2pt solid #000000}}
         .finding .ftitle{{font-size:11pt;margin:0 0 2pt}} .finding .kv{{margin:1.5pt 0}}
         .ref{{break-inside:avoid;margin:5pt 0}}
         p.center{{text-align:center}}
         p.lead-keep{{break-after:avoid;page-break-after:avoid}}
         .pagebreak{{break-before:page;page-break-before:always;height:0;margin:0;padding:0}}
         p.prose.ltr{{text-indent:2em;text-align:justify}}
-        table.grid td{{font-size:9.5pt}} table.grid td.blank{{border:0}}
-        .ref .refhead{{font-weight:700;font-size:9.5pt}}
+        table.grid td{{font-size:10pt}} table.grid td.blank{{border:0}}
+        .ref .refhead{{font-weight:700;font-size:10pt}}
         </style><body{body_attr}>""",
     ]
     return "".join(head_parts) + body_html + "</body></html>"
@@ -397,7 +455,9 @@ def render_pdf(task, rv, **kwargs):
                 info.pop(k, None)
                 info.pop(k.encode(), None)
 
-    with _RENDER_LOCK:
+    from app.core.resource_gate import pdf_render_slot
+
+    with pdf_render_slot(), _RENDER_LOCK:
         html_str = report_html(task, rv, **kwargs)
         fc = FontConfiguration()
         try:
@@ -414,8 +474,4 @@ def render_pdf(task, rv, **kwargs):
             )
         finally:
             del fc
-            if any(ext_fam in html_str for ext_fam in _EXTENDED_SCRIPT_PATTERNS):
-                import gc
-
-                gc.collect()
     return sanitize_pdf_metadata(raw_pdf)

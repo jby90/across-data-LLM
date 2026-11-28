@@ -55,7 +55,7 @@ from app.knowledge.numeric_integrity import (
 log = logging.getLogger(__name__)
 
 PROMPT_VERSION = "translate-v13"  # v13：六道译后质量门槛升级（新增译文完整性覆盖率、半句断尾拦截与款项序号格式统一）
-COMPATIBLE_TRANSLATION_CACHE_PROMPTS = (PROMPT_VERSION, "translate-v12", "translate-v11")
+COMPATIBLE_TRANSLATION_CACHE_PROMPTS = (PROMPT_VERSION, "translate-v13-direct", "translate-v12", "translate-v11")
 MAX_CHUNK_CHARS = 1500
 MAX_CHUNK_NUMBERS = 30
 DEFAULT_CONCURRENCY = 4
@@ -71,7 +71,32 @@ _META_POLLUTION_RE = re.compile(
     re.IGNORECASE,
 )
 _CYSH_LEAK_RE = re.compile(r"_*CYSH_(?:PRIVATE|LITERAL|DATE|SECRET|RESTORE)[A-Za-z0-9_]*")
-_BARE_PROCESSOR_RE = re.compile(r"(?<![微中央信号协图形网络流数字音频视频图像])处理器")
+_BARE_PROCESSOR_RE = re.compile(r"(?<![微中央信号协图形网络流数字音频视频图像车载安全应用视觉神经网络基带多核])处理器")
+_ECU_COMPOUND_PREFIX_RE = re.compile(
+    r"(?:微|域|总线|网关|座舱|驾驶|智驾|行泊|总成|动力|底盘|电池|主驱|辅驱|电机|整车|车身|制动|转向|刹车|"
+    r"安全气囊|气囊|巡航|热管理|逻辑|存储|闪存|中断|温度|电子|车载|充电|灯光|空调|悬架|悬挂|门窗|门禁|"
+    r"发动机|变速器|变速箱|通讯|通信|远程|区域|协同|硬件|设备|终端|传感器|执行器|飞控|雷达|视觉|域控|车控|电控|微控|工控|云控|智控|"
+    r"T-?Box|ECU|VCU|BMS|MCU|TCU|ADAS|CAN|LIN)[ \t\-]*$",
+    re.IGNORECASE,
+)
+
+
+class _BareControllerMatcher:
+    """Match legal mistranslation '控制器' (e.g. 数据控制器/主控制器/联合控制器) while exempting automotive hardware ECUs."""
+
+    _RE = re.compile(r"控制器")
+
+    def search(self, text: str | None) -> re.Match[str] | None:
+        if not text:
+            return None
+        for m in self._RE.finditer(text):
+            prefix = text[max(0, m.start() - 16) : m.start()]
+            if not _ECU_COMPOUND_PREFIX_RE.search(prefix):
+                return m
+        return None
+
+
+_BARE_CONTROLLER_RE = _BareControllerMatcher()
 _BIS_SOURCE_RE = re.compile(
     r"(?:\b(?:Article|Art\.?|Section)\s+\d+\s+bis\b|(?:المادة|الفصل)\s*\(?\s*[\d٠-٩]+\s*\)?\s*مكرر)",
     re.IGNORECASE,
@@ -189,16 +214,34 @@ def _protect_numeric_literals(text: str) -> tuple[str, dict[str, str]]:
         mapping[marker] = match.group()
         return marker
 
+    num_body = (
+        r"(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d{1,3}(?:\.\d{3}){2,}|\d{1,3}(?:,\d{3})+|\d+)"
+        r"(?:[.,]\d+)?"
+    )
+    currency_codes = (
+        r"US\$|S\$|A\$|C\$|R\$|Mex\$|S/\.|Rp\.?|euros?|dollars?|rupiah|reais|real|t[üu]rk\s+liras\w*|liras?|dirhams?|dinars?|livres?|zł|złot\w*|pesos?|soles|"
+        r"SGD|USD|EUR|GBP|MAD|DH|EGP|TND|DT|LBP|CNY|RMB|JPY|KRW|THB|MYR|IDR|VND|PHP|"
+        r"AED|SAR|QAR|KWD|OMR|DZD|RUB|KZT|KGS|TRY|TL|ILS|INR|PKR|BDT|AUD|CAD|BRL|"
+        r"MXN|ARS|CLP|COP|PEN|ZAR|NGN|PLN|SEK|\$|€|£|₩|฿|₫|₱|₽|₸|₺|₪|₹|৳|₦"
+    )
     currency_amount = re.compile(
-        r"(?<![A-Za-z])(?:US\$|S\$|A\$|C\$|R\$|Mex\$|S/\.|"
-        r"SGD|USD|EUR|GBP|MAD|EGP|TND|LBP|CNY|RMB|JPY|KRW|THB|MYR|IDR|VND|PHP|"
-        r"AED|SAR|QAR|KWD|OMR|DZD|RUB|KZT|KGS|TRY|ILS|INR|PKR|BDT|AUD|CAD|BRL|"
-        r"MXN|ARS|CLP|COP|PEN|ZAR|NGN|PLN|SEK|\$|€|£|₩|฿|₫|₱|₽|₸|₺|₪|₹|৳|₦)"
-        r"\s*\d+(?:,\d{3})*(?:\.\d+)?",
+        rf"(?<![A-Za-zÀ-ž])(?:{currency_codes})\s*\d{{1,3}}(?:\.\d{{3}})+(?![\d.])|"
+        rf"(?<![\d.])\d{{1,3}}(?:\.\d{{3}})+(?=\s*(?:{currency_codes})(?![A-Za-zÀ-ž]))|"
+        rf"(?<![A-Za-zÀ-ž])(?:{currency_codes})\s*{num_body}",
         re.IGNORECASE,
     )
-    safe = re.sub(r"٪\s*\d+(?:[٫.]\d+)?", replace, text)
+    compound_num = re.compile(
+        r"(?<![\d/.\-])(?:"
+        r"[1-9]\d{0,2}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?|"
+        r"[1-9]\d{0,2}(?:\.\d{3}){2,}(?:,\d+)?|"
+        r"\d+,\d{1,2}(?=\s*(?:%|percent|per\s*cent|pour\s*cent|pourcent|prozent|procent|per\s*cento|percento|por\s*ciento|por\s*cento|persen|°|[kK]\b|kg\b|g\b|mg\b|m\b|cm\b|mm\b|km\b|l\b|ml\b))|"
+        r"(?<=(?:yüzde|Yüzde|YÜZDE)\s)\d+,\d{1,2}"
+        r")(?![\d/.\-])",
+        re.IGNORECASE,
+    )
+    safe = re.sub(r"٪\s*\d+(?:[٫.,]\d+)?", replace, text)
     safe = currency_amount.sub(replace, safe)
+    safe = compound_num.sub(replace, safe)
     return _NUM_TOKEN_RE.sub(replace, safe), mapping
 
 
@@ -224,8 +267,9 @@ def _protect_explicit_dates(text: str) -> tuple[str, dict[str, str]]:
 
     def replace(match):
         day, month, year = match.group("day", "month", "year")
+        m_key = month.casefold().replace("i\u0307", "i").replace("ı", "i")
         try:
-            value = date(int(year), MONTHS[month.casefold()], int(day))
+            value = date(int(year), int(month) if m_key.isdigit() else MONTHS[m_key], int(day))
         except (KeyError, ValueError):
             return match.group()
         number, letters = len(mapping), ""
@@ -239,8 +283,10 @@ def _protect_explicit_dates(text: str) -> tuple[str, dict[str, str]]:
         return marker
 
     for pattern in (
-        rf"(?<!\d)(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s+day\s+of)?\s+(?P<month>{month_words})\s*[,،]?\s*(?P<year>\d{{4}})(?!\d)",
+        rf"(?<![\d.])(?P<day>\d{{1,2}})(?:st|nd|rd|th|er|º|°|\.)?(?:\s+(?:day\s+of|de|del))?\s+(?P<month>{month_words})(?:\s+(?:de|del|tahun|سنة|لسنة|عام))?\s*[,،]?\s*(?P<year>\d{{4}})(?!\d)",
         rf"(?P<month>{month_words})\s+(?P<day>\d{{1,2}}),?\s+(?P<year>\d{{4}})(?!\d)",
+        r"(?<!\d)(?P<year>\d{4})\s*년\s*(?P<month>\d{1,2})\s*월\s*(?P<day>\d{1,2})\s*일",
+        r"(?<!\d)(?:ngày\s*)?(?P<day>\d{1,2})\s*tháng\s*(?P<month>\d{1,2})\s*năm\s*(?P<year>\d{4})(?!\d)",
     ):
         text = re.sub(pattern, replace, text, flags=re.IGNORECASE)
     return text, mapping
@@ -402,10 +448,11 @@ def select_effective_terms(
     """按"国家特定覆盖 > 跨国通用术语"及来源优先级(1->4)筛选生效术语。"""
     from app.knowledge.legal_terms import is_stopword_term
 
-    lang = language.lower()
+    lang = (language or "").lower().split("-")[0].split("_")[0]
     by_concept: dict[str, list[GlossaryTerm]] = {}
     for t in terms:
-        if t.language.lower() != lang or t.review_status == "rejected":
+        t_lang = (t.language or "").lower().split("-")[0].split("_")[0]
+        if t_lang != lang or t.review_status == "rejected":
             continue
         if is_stopword_term(t.source_term, t.target_zh):
             continue
@@ -430,8 +477,10 @@ def match_clause_glossary(
     from app.knowledge.legal_terms import is_stopword_term
 
     hits: list[dict] = []
+    covered_spans: list[tuple[int, int]] = []
     lower_text = (original_text or "").lower()
-    for term in effective_terms:
+    candidate_matches: list[tuple[int, int, int, int, Any, re.Match[str]]] = []
+    for term_idx, term in enumerate(effective_terms):
         if is_stopword_term(term.source_term, term.target_zh):
             continue
         aliases = getattr(term, "aliases", []) or [term.source_term]
@@ -452,27 +501,39 @@ def match_clause_glossary(
                 escaped = r"[وف]?(?:[بك])?(?:" + "|".join(variants) + ")"
             expressions.append(escaped)
         pattern = re.compile(r"(?<!\w)(?:" + "|".join(expressions) + r")s?(?!\w)", re.I)
-        match = pattern.search(original_text)
-        matched = bool(match)
-        if matched:
-            hits.append(
-                {
-                    "term_id": str(term.id),
-                    "concept_code": term.concept_code,
-                    "source_term": match.group(),
-                    "canonical_source": term.source_term,
-                    "target_zh": term.target_zh,
-                    "priority_level": term.priority_level,
-                    "statutory_definition": term.statutory_definition,
-                    "source_reference": term.source_reference,
-                    "country_code": term.country_code,
-                    "source_url": getattr(term, "source_url", ""),
-                    "source_kind": getattr(term, "source_kind", "legacy_rendering"),
-                    "definition_id": getattr(term, "definition_id", None),
-                    "preserve_original": getattr(term, "preserve_original", False),
-                    "matched_in_translation": True,
-                }
-            )
+        prio = int(getattr(term, "priority_level", 4))
+        for m in pattern.finditer(original_text):
+            candidate_matches.append((-(m.end() - m.start()), prio, m.start(), term_idx, term, m))
+
+    candidate_matches.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    seen_term_ids: set[str] = set()
+    for _neg_len, _prio, m_start, _t_idx, term, m in candidate_matches:
+        m_end = m.end()
+        if any(not (m_end <= cs or m_start >= ce) for cs, ce in covered_spans):
+            continue
+        covered_spans.append((m_start, m_end))
+        tid_str = str(term.id)
+        if tid_str in seen_term_ids:
+            continue
+        seen_term_ids.add(tid_str)
+        hits.append(
+            {
+                "term_id": tid_str,
+                "concept_code": term.concept_code,
+                "source_term": m.group(),
+                "canonical_source": term.source_term,
+                "target_zh": term.target_zh,
+                "priority_level": term.priority_level,
+                "statutory_definition": term.statutory_definition,
+                "source_reference": term.source_reference,
+                "country_code": term.country_code,
+                "source_url": getattr(term, "source_url", ""),
+                "source_kind": getattr(term, "source_kind", "legacy_rendering"),
+                "definition_id": getattr(term, "definition_id", None),
+                "preserve_original": getattr(term, "preserve_original", False),
+                "matched_in_translation": True,
+            }
+        )
 
     hit_sources = {h["source_term"].lower() for h in hits}
     unmatched: list[dict] = []
@@ -505,6 +566,7 @@ def verify_translation(
     clause_number: str | None = None,
     *,
     allow_flex_cjk: bool = False,
+    arabic_parens_stripped: bool = False,
 ) -> tuple[bool, list[str], list[dict]]:
     """译后程序检查(四项强校验):
     ① CJK 占比 >= 30%(阿语/法语/英文原文都应翻成中文);
@@ -567,13 +629,20 @@ def verify_translation(
     for h in glossary_hits:
         # 原词跨行（PDF 换行）时术语里带换行：比较前统一空白，免得把对的译法判错
         squashed = " ".join(trans_clean.split())
-        ok = bool(trans_clean) and (" ".join(h["target_zh"].split()) in squashed)
+        ok = bool(trans_clean) and (
+            " ".join(h["target_zh"].split()) in squashed
+            or (h.get("concept_code") == "sensitive_data" and "敏感个人数据" in squashed)
+        )
         if h.get("preserve_original"):
+            is_arabic_src = bool(re.search(r"[\u0600-\u06ff]", h["source_term"]))
             trans_folded = " ".join(trans_clean.casefold().split())
             src_folded = " ".join(h["source_term"].casefold().split())
             canon_folded = " ".join((h.get("canonical_source") or h["source_term"]).casefold().split())
             target_unrendered = not any("\u4e00" <= ch <= "\u9fff" for ch in (h.get("target_zh") or ""))
-            if target_unrendered:
+            if is_arabic_src and arabic_parens_stripped:
+                # clean_translation strips parenthesized Arabic script (_ARABIC_PAREN) by design
+                ok = bool(trans_clean) if target_unrendered else ok
+            elif target_unrendered:
                 ok = bool(trans_clean) and (src_folded in trans_folded or canon_folded in trans_folded)
             elif src_folded not in trans_folded and canon_folded not in trans_folded:
                 ok = False
@@ -595,7 +664,7 @@ def verify_translation(
                     f"术语未按规定译法输出: 原词 '{h['source_term']}' 必须译为 '{h['target_zh']}'"
                 )
         # A correct label elsewhere does not legitimise an everyday mistranslation.
-        if h.get("concept_code") == "data_controller" and "控制器" in trans_clean:
+        if h.get("concept_code") == "data_controller" and _BARE_CONTROLLER_RE.search(trans_clean):
             issues.append("法律语境中的 controller 不得译为控制器")
         if h.get("concept_code") == "data_processor" and _BARE_PROCESSOR_RE.search(trans_clean):
             issues.append("法律语境中的 processor 不得译为处理器")
@@ -605,6 +674,30 @@ def verify_translation(
         and not any("processor 不得译为处理器" in x for x in issues)
     ):
         issues.append("法律语境中的 processor/sous-traitant 应译为数据处理者，不得译为处理器")
+    if re.search(r"(?:数据|个人数据|个人信息|联合|共同|独立|单独|主)控制器", trans_clean) and not any(
+        "controller" in x and "控制器" in x for x in issues
+    ):
+        issues.append("法律语境中的 controller 应译为数据控制者/联合控制者，不得译为控制器")
+    if (
+        (
+            re.search(
+                r"\b(?:data|primary|joint|independent)\s+controllers?\b|\bresponsables?\s+d[eu]\s+traitement\b|المتحكم|(?:ال)?مسؤول\s+(?:عن\s+)?المعالجة|\btitolare\s+del\s+trattamento\b|\bresponsable\s+del\s+tratamiento\b",
+                orig_clean,
+                re.IGNORECASE,
+            )
+            or (
+                re.search(r"\bcontrollers?\b", orig_clean, re.IGNORECASE)
+                and re.search(
+                    r"\b(?:authority|supervisory|personal|data|processing|breach|subject|notify|notification|consent|gdpr|pdpa|privacy|lawful|erasure|rectification)\b",
+                    orig_clean,
+                    re.IGNORECASE,
+                )
+            )
+        )
+        and _BARE_CONTROLLER_RE.search(trans_clean)
+        and not any("控制器" in x for x in issues)
+    ):
+        issues.append("法律语境中的 controller/responsable du traitement 应译为数据控制者，不得译为控制器")
 
     # ② 原文中的数字、金额、百分比、年份、条号在译文中全部出现
     translated_norm = _normalize_digits(trans_clean)
@@ -724,8 +817,16 @@ def _build_translation_prompts(
         sys_lines.append("\n【强制法律术语表（原词 -> 规定译法 -> 法定定义）】：")
         for h in glossary_hits:
             defn = (h.get("statutory_definition") or "仅规范译名，不能据此推定本国法定含义").strip()
+            unrendered_orig = h.get("preserve_original") and not any(
+                "\u4e00" <= ch <= "\u9fff" for ch in (h.get("target_zh") or "")
+            )
+            prescribed = (
+                f"须译为恰当中文并在紧随括号内保留原词（{h['target_zh']}）"
+                if unrendered_orig
+                else h["target_zh"]
+            )
             sys_lines.append(
-                f"- 原词: {h['source_term']} -> 规定译法: {h['target_zh']} -> 来源释义: {defn}"
+                f"- 原词: {h['source_term']} -> 规定译法: {prescribed} -> 来源释义: {defn}"
                 f"；来源类型: {h.get('source_kind', 'legacy_rendering')}"
                 f"；出处: {h.get('source_reference', '')}"
             )
@@ -764,7 +865,7 @@ def _build_translation_prompts(
         user_parts.append(f"必须在译文中原样保留的数字/金额/百分比/条号: {', '.join(req_nums)}")
     if glossary_hits:
         must_zh = ", ".join(
-            f"中文译名（{h['target_zh']}）"
+            f"括号保留原词（{h['target_zh']}）"
             if h.get("preserve_original") and not any("\u4e00" <= ch <= "\u9fff" for ch in (h.get("target_zh") or ""))
             else f"'{h['target_zh']}'"
             for h in glossary_hits
@@ -978,6 +1079,7 @@ def _reusable(
         hits,
         clause_number=clause.clause_number if whole else None,
         allow_flex_cjk=False if whole else allow_flex_cjk,
+        arabic_parens_stripped=True,
     )
     return ok
 
@@ -1006,8 +1108,7 @@ async def _store_chunk_cache(
 ) -> None:
     """items: key -> (language, translated text). Only passages that passed every check.
 
-    Conflicts are ignored: two workers translating the same passage at once, or a deliberate
-    re-translation of a clause, must never fail on a row that is already there.
+    Upserts on conflict so a deliberate re-translation overwrites any stale cached entry cleanly.
     """
     from sqlalchemy.dialects.postgresql import insert
 
@@ -1019,13 +1120,18 @@ async def _store_chunk_cache(
             "translated_text": zh,
         }
         for key, (language, zh) in items.items()
-        if key not in known and zh.strip()
+        if zh.strip() and known.get(key) != zh
     ]
     if rows:
+        stmt = insert(TranslationChunkCache).values(rows)
         await session.execute(
-            insert(TranslationChunkCache)
-            .values(rows)
-            .on_conflict_do_nothing(constraint="uq_translation_chunk_cache")
+            stmt.on_conflict_do_update(
+                constraint="uq_translation_chunk_cache",
+                set_={
+                    "translated_text": stmt.excluded.translated_text,
+                    "language": stmt.excluded.language,
+                },
+            )
         )
 
 
@@ -1097,16 +1203,30 @@ async def translate_clause(
             for row in current_rows
             if row.engine == "llm"
             and row.quality_check_passed
-            and verify_translation(source_text, row.translated_text, row.glossary_hits or [])[0]
+            and verify_translation(
+                source_text,
+                row.translated_text,
+                row.glossary_hits or [],
+                arabic_parens_stripped=True,
+            )[0]
         ),
         None,
     )
 
     chunks = split_clause_into_chunks(source_text, max_chars=MAX_CHUNK_CHARS)
-    # 已有合格译文的条款是要重新翻译：必须拿到新的模型输出，不复用缓存
-    chunk_cache = (
-        await _load_chunk_cache(session, chunks, clause.language) if previous_good is None else {}
-    )
+    has_rejected = any(row.review_status == "rejected" for row in existing_rows)
+    if previous_good is not None or has_rejected:
+        # Redline 2.3: 重译或曾被人工驳回的条款必须同步清理 translation_chunk_cache 污染条目，绝不复活旧缓存
+        from sqlalchemy import delete as sa_delete
+
+        purge_keys = [chunk_key(c, clause.language) for c in chunks]
+        if purge_keys:
+            await session.execute(
+                sa_delete(TranslationChunkCache).where(TranslationChunkCache.chunk_hash.in_(purge_keys))
+            )
+        chunk_cache = {}
+    else:
+        chunk_cache = await _load_chunk_cache(session, chunks, clause.language)
     new_cache: dict[str, tuple[str, str]] = {}
 
     total_tokens_in = 0
@@ -1286,6 +1406,7 @@ async def translate_clause(
             translated_text,
             hits,
             clause_number=clause.clause_number,
+            arabic_parens_stripped=True,
         )
         if passed and len(chunks) == 1 and translated_text:
             # 单块条款：重译后的最终文本也要过语义核验（首次通过的已在缓存里，不会重复调用）
@@ -1327,11 +1448,7 @@ async def translate_clause(
         translated_text=translated_text,
         engine="none" if model_name == "not_called" else "llm",
         model_name=model_name,
-        prompt_version=(
-            PROMPT_VERSION + "-direct"
-            if settings.llm_translation_thinking == "disabled"
-            else PROMPT_VERSION
-        ),
+        prompt_version=PROMPT_VERSION,
         tokens_in=total_tokens_in,
         tokens_out=total_tokens_out,
         duration_ms=total_duration_ms,

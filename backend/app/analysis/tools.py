@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -124,7 +125,7 @@ DIMENSION_KEYWORDS: dict[str, list[str]] = {
 }
 
 _TOC_DOTS = re.compile(r"\.{5,}")
-_LETTER = re.compile(r"[A-Za-z\u00c0-\u024f\u0600-\u06ff\u4e00-\u9fff]")
+_BROKEN_GLYPH_RE = re.compile(r"[\ufffd\ue000-\uf8ff\ufb50-\ufdff\ufe70-\ufeff]")
 MIN_CLAUSE_CHARS = 80
 
 
@@ -193,13 +194,19 @@ def _norm(text: str) -> str:
 
 
 def is_usable_clause_text(text: str) -> bool:
-    """过滤目录页、过短片段和乱码(字母占比过低)。"""
+    """过滤目录页、过短片段和乱码(全文字体系字母与元音附标占比过低)。"""
     t = _norm(text)
     if len(t) < MIN_CLAUSE_CHARS:
         return False
     if len(_TOC_DOTS.findall(t)) >= 2:
         return False
-    letters = len(_LETTER.findall(t))
+    if len(_BROKEN_GLYPH_RE.findall(t)) > max(5, len(t) * 0.05):
+        return False
+    letters = sum(
+        1
+        for ch in t
+        if unicodedata.category(ch)[0] in ("L", "M") and not _BROKEN_GLYPH_RE.match(ch)
+    )
     return letters / max(len(t), 1) >= 0.5
 
 

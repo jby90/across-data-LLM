@@ -51,15 +51,16 @@ def main():
             "CYSH_PG_SHARED_BUFFERS": "96MB",
             "CYSH_PG_WORK_MEM": "2MB",
             "CYSH_PG_MAX_CONNECTIONS": "40",
-            "CYSH_API_MEM_LIMIT": "544m",
+            "CYSH_API_MEM_LIMIT": "512m",
             "CYSH_DB_POOL_SIZE": "6",
             "CYSH_DB_MAX_OVERFLOW": "6",
-            "CYSH_WORKER_MEM_LIMIT": "224m",
+            "CYSH_MAX_CONCURRENT_PDF_RENDERS": "1",
+            "CYSH_WORKER_MEM_LIMIT": "192m",
             "CYSH_WORKER_POOL_SIZE": "1",
             "CYSH_WORKER_MAX_OVERFLOW": "1",
         }
         for k, v in low_ram_defaults.items():
-            env[k] = caller_env.get(k, v)
+            env[k] = caller_env.get(k) or api.get(k) or v
     env.update(
         POSTGRES_PASSWORD=db["POSTGRES_PASSWORD"],
         CYSH_RUNTIME_DB_PASSWORD=migration["CYSH_RUNTIME_DB_PASSWORD"],

@@ -114,7 +114,7 @@ async def mark(session) -> str:
                 " (select count(*)::text || md5(coalesce(string_agg(review_status || coalesce(merged_into::text, ''), ',' order by id), '')) from admission_entries),"
                 " (select count(*)::text || md5(coalesce(string_agg(status || coalesce(target_type, ''), ',' order by id), '')) from knowledge_change_proposals),"
                 " (select count(*)::text || md5(coalesce(string_agg(status, ',' order by id), '')) from standard_entries),"
-                " (select count(*)::text || coalesce(max(version_no)::text, '') from country_whitepapers)"
+                " (select count(*)::text || ':' || md5(coalesce(string_agg(country_code || ':' || version_no::text || ':' || coalesce(source_hash, ''), ',' order by id), '')) from country_whitepapers)"
             )
         )
     ).one()
@@ -251,23 +251,5 @@ def changes_admin_data(method: str, path: str, status: int) -> bool:
 
 
 def after_admin_change() -> None:
-    from app.admission import router as adm_router
-    from app.analysis import doc_applicability, doc_projects
-    from app.iam import cockpit_router
-    from app.ingestion.quality_card import clear_cards_cache
-    from app.knowledge import router, whitepaper_graph
-
-    clear_cards_cache()
-    cockpit_router._KB_POSTURE_CACHE.clear()
-    doc_projects._COMPLIANCE_OVERVIEW_CACHE.clear()
-    doc_applicability._SOURCE_GROUNDS_CACHE.clear()
-    whitepaper_graph._MENTIONS.clear()
-    whitepaper_graph._CLAUSES.clear()
-    whitepaper_graph._PRIMARY_CLAUSE.clear()
-    whitepaper_graph._KEYS.clear()
-    router._GRAPH_JSON_CACHE.clear()
-    router._REGULATIONS_LIST_CACHE.clear()
-    adm_router._BASIS_MEMO.clear()
-    adm_router._LISTED_MEMO.clear()
-    adm_router._DETAIL_MEMO.clear()
+    clear_user_caches()
     schedule_rebuild()

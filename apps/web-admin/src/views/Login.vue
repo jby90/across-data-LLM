@@ -170,7 +170,7 @@ async function submit() {
 }
 .login-form :deep(.el-input__inner) {
   color: #0f172a;
-  font-weight: 500;
+  font-weight: 600;
 }
 .login-form :deep(.el-input__inner::placeholder) {
   color: #64748b;
@@ -187,19 +187,19 @@ async function submit() {
   font-weight: 600 !important;
   letter-spacing: 0.02em;
   opacity: 1 !important;
-  box-shadow: 0 4px 12px rgba(29, 78, 216, 0.24) !important;
+  box-shadow: none !important;
 }
 .login-submit:hover,
 .login-submit:focus-visible {
   background-color: #1e40af !important;
   border-color: #1e40af !important;
   color: #ffffff !important;
-  box-shadow: 0 6px 16px rgba(30, 64, 175, 0.32) !important;
+  box-shadow: none !important;
 }
 .login-submit.is-ready {
   background-color: #1e40af !important;
   border-color: #1e40af !important;
-  box-shadow: 0 6px 18px rgba(29, 78, 216, 0.34) !important;
+  box-shadow: none !important;
 }
 .login-submit.is-disabled,
 .login-submit:disabled {

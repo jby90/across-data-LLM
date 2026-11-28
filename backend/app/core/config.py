@@ -58,9 +58,9 @@ class Settings(BaseSettings):
     )
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-flash"
-    llm_timeout_seconds: float = 30.0
-    llm_translation_thinking: Literal["enabled", "disabled"] = "enabled"
-    llm_kg_extraction_thinking: Literal["enabled", "disabled"] = "enabled"
+    llm_timeout_seconds: float = 90.0
+    llm_translation_thinking: Literal["enabled", "disabled"] = "disabled"
+    llm_kg_extraction_thinking: Literal["enabled", "disabled"] = "disabled"
     # 多智能体合规分析单次调用允许更长的生成时间
     llm_analysis_timeout_seconds: float = 150.0
     # 咨询层:在已核验证据之上写结论、差距、风险与建议;关闭后只生成证据版报告

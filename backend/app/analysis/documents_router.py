@@ -9,6 +9,7 @@ import logging
 import re
 import time
 import uuid
+import weakref as _weakref
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -78,10 +79,19 @@ class TemplateIn(BaseModel):
     definition: dict[str, Any]
 
 
-async def _task(session: AsyncSession, task_id: uuid.UUID, user: Principal) -> AnalysisTask:
+async def _task(session: AsyncSession, task_id: uuid.UUID, user: Principal, *, writable: bool = False) -> AnalysisTask:
+    from app.analysis.chat_advisor import viewer_owner
+
     task = await session.get(AnalysisTask, task_id)
     if task is None or task.org_id != user.org_id:
         raise HTTPException(404, "未找到该合规评估项目")
+    owner = viewer_owner(task)
+    if owner is not None and owner != str(user.user_id):
+        raise HTTPException(404, "未找到该合规评估项目")
+    if writable and owner is not None:
+        raise HTTPException(403, "查看账号只能查看，不能新建或修改")
+    if writable and task.archived_at is not None:
+        raise HTTPException(409, "这个项目在归档里，恢复后才能继续")
     return task
 
 
@@ -312,9 +322,10 @@ def _as_uuid(value) -> uuid.UUID | None:
 log = logging.getLogger(__name__)
 PAGE_LABEL = re.compile(r"^\s*第\s*\d+\s*页\s*$")
 BASIS_TTL_SECONDS = 6 * 3600
+
 _COUNTRY_BASIS: dict[tuple, tuple[float, list[dict]]] = {}
 _BASIS_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
-_BASIS_LOCKS: dict[tuple, asyncio.Lock] = {}
+_BASIS_LOCKS: _weakref.WeakValueDictionary[tuple, asyncio.Lock] = _weakref.WeakValueDictionary()
 
 
 async def library_countries(session: AsyncSession) -> frozenset[str]:
@@ -1056,13 +1067,13 @@ async def _write_paper(
         return paper.blocks
 
 
-_PAPER_WRITE_LOCKS: dict[tuple[int, str, str], object] = {}
+_PAPER_WRITE_LOCKS: _weakref.WeakValueDictionary[tuple[int, str, str], asyncio.Lock] = _weakref.WeakValueDictionary()
 
 
 _UNMAPPED_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-def sanitize_custom_tag(val: object, *, max_len: int = 40) -> str:
+def sanitize_custom_tag(val: object, *, max_len: int = 48) -> str:
     """Clean a preset scenario key or a user-entered custom scenario label safely."""
     raw = str(val or "")
     cleaned = "".join(
@@ -1164,7 +1175,7 @@ async def answer_document_questions(
     task_id: uuid.UUID, code: str, body: AnswersIn, user: UserDep, session: SessionDep
 ) -> dict:
     """Store the user's own words for the questions this document asked."""
-    task = await _task(session, task_id, user)
+    task = await _task(session, task_id, user, writable=True)
     template, rendered = await _prepare(session, task, code)
     asked = {q.key for q in rendered.missing}
     facts = dict(task.facts_json or {})
@@ -1208,9 +1219,11 @@ async def _export_source(session: AsyncSession, task: AnalysisTask, code: str, d
     template, rendered = await _prepare(session, task, code, draft=draft, write_draft=False, clean_names=True)
     _, eff_values, _ = await _inputs(session, task, code)
     eff_name = _effective_doc_name(code, template.name_zh, eff_values)
+    from app.knowledge.whitepaper import _clean as _tidy_excerpt_tails
+
     saved = await _instance(session, task, code)
     if saved is not None:
-        blocks, name = saved.blocks, (eff_name if code == "declaration" and eff_name != template.name_zh else saved.name_zh)
+        blocks, name = _tidy_excerpt_tails(saved.blocks), (eff_name if code == "declaration" and eff_name != template.name_zh else saved.name_zh)
     else:
         if rendered.missing and not draft:
             raise HTTPException(
@@ -1218,7 +1231,7 @@ async def _export_source(session: AsyncSession, task: AnalysisTask, code: str, d
             )
         if rendered.needs_paper and not draft:
             raise HTTPException(409, "论述部分还没有生成，请先点击“生成论述”")
-        blocks, name = rendered.blocks, eff_name
+        blocks, name = _tidy_excerpt_tails(rendered.blocks), eff_name
     # 页眉只写文件名：这是企业要递交的文件，平台的对话编号属于内部信息，不印在文件上（Word 与 PDF 相同）
     context = name
     return blocks, name, context
@@ -1230,7 +1243,7 @@ async def write_document_paper(
 ) -> dict:
     """Write the argumentative part of a document (DPIA, LIA, TIA) from the facts and the target
     country's clauses. Every figure and every cited clause is checked; what fails is not shown."""
-    task = await _task(session, task_id, user)
+    task = await _task(session, task_id, user, writable=True)
     template, values, citations = await _inputs(session, task, code)
     if not template.definition.get("narrative"):
         raise HTTPException(409, "这种文件没有需要生成的论述部分")
@@ -1369,8 +1382,7 @@ async def official_docx(session: AsyncSession, task: AnalysisTask, code: str, dr
             await session.scalars(
                 select(DocumentEdit)
                 .where(DocumentEdit.instance_id == inst.id)
-                .order_by(DocumentEdit.at.asc())
-                .limit(500)
+                .order_by(DocumentEdit.at.asc(), DocumentEdit.id.asc())
             )
         ).all()
     )
@@ -1388,11 +1400,12 @@ async def preview_document(
     """Online read-only preview of any compliance document (official Word template or standard EU/platform layout)
     without blocking on synchronous LLM generation."""
     from app.analysis import official_docx as od
+    from app.knowledge.whitepaper import _clean as _tidy_excerpt_tails
 
     task = await _task(session, task_id, user)
     saved = await _instance(session, task, code)
     if saved is not None:
-        return {"name": saved.name_zh, "kind": "edited", "blocks": saved.blocks}
+        return {"name": saved.name_zh, "kind": "edited", "blocks": _tidy_excerpt_tails(saved.blocks)}
     official = await official_docx(session, task, code, draft=True)
     if official is not None:
         return {
@@ -1718,6 +1731,7 @@ async def export_document_i18n_docx(
         header_tr,
         foreign=True,
         table_style="formal_black",
+        rtl=(lang == "ar"),
     )
     return Response(
         docx_bytes,
@@ -1753,6 +1767,7 @@ async def export_document_i18n_pdf(
         header_tr,
         foreign=True,
         table_style="formal_black",
+        rtl=(lang == "ar"),
     )
     return Response(
         pdf_bytes,
@@ -1801,7 +1816,14 @@ async def export_document_en_docx(
 
         _tpl, in_vals, _cits = await _inputs(session, task, "dpia")
         if involves_eu_eea(in_vals.get("source_country"), in_vals.get("recipient_country")) and country_of(in_vals.get("source_country")) != CN:
-            return await export_edpb_en_docx(task_id=task_id, user=user, session=session, draft=draft)
+            try:
+                return await export_edpb_en_docx(task_id=task_id, user=user, session=session, draft=draft)
+            except HTTPException as exc:
+                if exc.status_code not in (502, 503):
+                    raise
+                await session.rollback()
+                session.info.pop("latest_templates", None)
+                task = await _task(session, task_id, user)
 
     en_blocks, label_en, header_en = await _build_en_doc(session, task, code, user, draft)
     task_en = strip_and_translate_cjk(task_title_raw, fallback="Compliance_Project")
@@ -1812,6 +1834,7 @@ async def export_document_en_docx(
         header_en,
         foreign=True,
         table_style="formal_black",
+        rtl=False,
     )
     return Response(
         docx_bytes,
@@ -1834,7 +1857,14 @@ async def export_document_en_pdf(
 
         _tpl, in_vals, _cits = await _inputs(session, task, "dpia")
         if involves_eu_eea(in_vals.get("source_country"), in_vals.get("recipient_country")) and country_of(in_vals.get("source_country")) != CN:
-            return await export_edpb_en_pdf(task_id=task_id, user=user, session=session, draft=draft)
+            try:
+                return await export_edpb_en_pdf(task_id=task_id, user=user, session=session, draft=draft)
+            except HTTPException as exc:
+                if exc.status_code not in (502, 503):
+                    raise
+                await session.rollback()
+                session.info.pop("latest_templates", None)
+                task = await _task(session, task_id, user)
 
     en_blocks, label_en, header_en = await _build_en_doc(session, task, code, user, draft)
     task_en = strip_and_translate_cjk(task_title_raw, fallback="Compliance_Project")
@@ -1845,6 +1875,7 @@ async def export_document_en_pdf(
         header_en,
         foreign=True,
         table_style="formal_black",
+        rtl=False,
     )
     return Response(
         pdf_bytes,
@@ -1864,7 +1895,15 @@ async def preview_document_en(
 
         _tpl, in_vals, _cits = await _inputs(session, task, "dpia")
         if involves_eu_eea(in_vals.get("source_country"), in_vals.get("recipient_country")) and country_of(in_vals.get("source_country")) != CN:
-            return await preview_edpb_en(task_id=task_id, user=user, session=session, draft=draft)
+            try:
+                edpb_res = await preview_edpb_en(task_id=task_id, user=user, session=session, draft=draft)
+                return {**edpb_res, "name": "Data Protection Impact Assessment (Official EU Stand.)"}
+            except HTTPException as exc:
+                if exc.status_code not in (403, 502, 503):
+                    raise
+                await session.rollback()
+                session.info.pop("latest_templates", None)
+                task = await _task(session, task_id, user)
 
     en_blocks, label_en, _header_en = await _build_en_doc(session, task, code, user, draft)
     return {
@@ -1929,11 +1968,18 @@ def _instance_view(
 
 
 async def _edits(session: AsyncSession, inst: DocumentInstance) -> list[DocumentEdit]:
+    from sqlalchemy import and_, or_
+
     return list(
         (
             await session.scalars(
                 select(DocumentEdit)
-                .where(DocumentEdit.instance_id == inst.id)
+                .where(
+                    or_(
+                        DocumentEdit.instance_id == inst.id,
+                        and_(DocumentEdit.task_id == inst.task_id, DocumentEdit.doc_code == inst.code),
+                    )
+                )
                 .order_by(DocumentEdit.at.desc())
                 .limit(200)
             )
@@ -2011,7 +2057,7 @@ async def save_document(
     """Keep a copy of the document so its wording can be adjusted online by hand."""
     from app.analysis import official_docx as od
 
-    task = await _task(session, task_id, user)
+    task = await _task(session, task_id, user, writable=True)
     await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
     inst = await _instance(session, task, code, for_update=True)
     if inst is None:
@@ -2069,11 +2115,26 @@ async def reset_saved_document(
     """Discard manual online edits for this document and restore the auto-generated version."""
     from sqlalchemy import delete as sa_delete
 
-    task = await _task(session, task_id, user)
+    task = await _task(session, task_id, user, writable=True)
     await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
     inst = await _instance(session, task, code)
     if inst is not None:
         doc_name = inst.name_zh
+        account = await session.get(User, user.user_id)
+        session.add(
+            DocumentEdit(
+                instance_id=inst.id,
+                org_id=task.org_id,
+                task_id=task.id,
+                doc_code=code,
+                user_id=user.user_id,
+                user_name=_user_label(account),
+                place="恢复自动生成版",
+                before=f"累计 {inst.edit_count} 处人工修订",
+                after="恢复默认自动生成版",
+            )
+        )
+        await session.flush()
         await session.execute(
             sa_delete(DocumentInstance).where(
                 DocumentInstance.task_id == task.id, DocumentInstance.code == code
@@ -2114,7 +2175,7 @@ async def edit_document(
     task_id: uuid.UUID, code: str, body: EditIn, request: Request, user: UserDep, session: SessionDep
 ) -> dict:
     """Change one piece of text and log who changed what, from what, to what."""
-    task = await _task(session, task_id, user)
+    task = await _task(session, task_id, user, writable=True)
     await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
     inst = await _instance(session, task, code, for_update=True)
     if inst is None:
@@ -2149,6 +2210,9 @@ async def edit_document(
     session.add(
         DocumentEdit(
             instance_id=inst.id,
+            org_id=task.org_id,
+            task_id=task.id,
+            doc_code=code,
             user_id=user.user_id,
             user_name=uname,
             place=place,
@@ -2195,7 +2259,7 @@ async def seal_document_version(
     body: SealVersionIn | None = None,
 ) -> dict:
     """Automatically seal a dated version snapshot when the user stops editing (idempotent)."""
-    task = await _task(session, task_id, user)
+    task = await _task(session, task_id, user, writable=True)
     await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
     inst = await _instance(session, task, code, for_update=True)
     if inst is None:
@@ -2271,7 +2335,7 @@ async def rollback_document_version(
     """Roll back a compliance document to a selected dated version while keeping append-only edit logs intact."""
     if version_no < 1 or version_no > 100000:
         raise HTTPException(422, "历史版本号超出有效范围")
-    task = await _task(session, task_id, user)
+    task = await _task(session, task_id, user, writable=True)
     await session.scalar(select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update())
     inst = await _instance(session, task, code, for_update=True)
     if inst is None:
@@ -2300,20 +2364,26 @@ async def rollback_document_version(
             **_instance_view(inst, await _edits(session, inst), await _versions(session, inst)),
         }
 
+    from datetime import UTC, datetime, timedelta, timezone
+
+    base_edit_at = datetime.now(UTC)
     inst.blocks = copy.deepcopy(target_ver.blocks)
     inst.edit_count += max(1, len(diffs))
-    for place, before_txt, after_txt in diffs:
+    for edit_idx, (place, before_txt, after_txt) in enumerate(diffs):
         session.add(
             DocumentEdit(
                 instance_id=inst.id,
+                org_id=task.org_id,
+                task_id=task.id,
+                doc_code=code,
                 user_id=user.user_id,
                 user_name=uname,
                 place=f"{place}（回退至第 {version_no} 版）"[:128],
                 before=before_txt,
                 after=after_txt,
+                at=base_edit_at + timedelta(microseconds=edit_idx),
             )
         )
-    from datetime import timedelta, timezone
 
     cst = timezone(timedelta(hours=8))
     ts_str = (

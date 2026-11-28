@@ -429,7 +429,7 @@ onUnmounted(() => {
         </template>
       </el-table-column>
       <el-table-column label="时间" width="156" class-name="cy-col-nowrap"><template #default="{ row }">{{ time(row.at) }}</template></el-table-column>
-      <el-table-column label="人员" width="208"><template #default="{ row }"><span class="actor-main" :title="formatActor(row)">{{ formatActor(row) }}</span><small class="sub">{{ ROLE[row.actor_role] ?? '平台账号' }} · {{ row.ip || '—' }}</small></template></el-table-column>
+      <el-table-column label="人员" min-width="248"><template #default="{ row }"><span class="actor-main" :title="formatActor(row)">{{ formatActor(row) }}</span><small class="sub">{{ ROLE[row.actor_role] ?? '平台账号' }} · {{ row.ip || '—' }}</small></template></el-table-column>
       <el-table-column prop="category_zh" label="类型" width="96" class-name="cy-col-nowrap" />
       <el-table-column label="动作与说明" min-width="240" class-name="cy-clamp-2"><template #default="{ row }">{{ cleanAuditCodes(row.action) }}<small v-if="row.summary" class="sub">{{ formatAuditText(row.summary) }}</small></template></el-table-column>
       <el-table-column label="结果" width="92" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap"><template #default="{ row }"><el-tag size="small" :type="row.status < 400 ? 'success' : 'danger'">{{ row.status < 400 ? '成功' : '失败' }}</el-tag></template></el-table-column>
@@ -506,7 +506,7 @@ onUnmounted(() => {
 .page-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
 .audit-clickable-table :deep(.el-table__row) { cursor: pointer; }
-.actor-main { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actor-main { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub { display: block; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.5; }
 .detail { padding: 6px 24px 14px; font-size: 13px; }
 .diff { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }

@@ -18,17 +18,27 @@ export interface FgCategory {
 }
 
 function cleanGraphNodeLabel(raw: string): string {
-  const s = (raw || '').trim()
+  let s = (raw || '').trim()
+  s = s.replace(/\s*[（(][^）)]*(?:修订版|合订本|综合版|汇编版|非官方|官方文本|转载版)[^）)]*[）)]$/u, '').trim()
   const m = s.match(/^(.*[\u4e00-\u9fff])\s*[（(]\s*([A-Za-zÀ-ÿ\u0600-\u06FF][^）)]*)\s*[）)]$/)
   return m ? m[1].trim() : s
 }
 
 export function graphSeries(
   nodes: FgNode[], edges: FgEdge[], categories: FgCategory[],
-  options: { overview?: boolean; selectedId?: string; reducedMotion?: boolean; viewportWidth?: number } = {},
+  options: {
+    overview?: boolean
+    selectedId?: string
+    reducedMotion?: boolean
+    viewportWidth?: number
+    viewportHeight?: number
+  } = {},
 ) {
   const overview = !!options.overview
-  const labelBudget = Math.max(2, Math.min(12, Math.floor((options.viewportWidth || 960) / 140)))
+  const vw = options.viewportWidth || 960
+  const vh = options.viewportHeight || 520
+  const aspectScale = Math.max(0.76, Math.min(1, vh / Math.max(1, vw * 0.45)))
+  const labelBudget = Math.max(2, Math.min(12, Math.floor(vw / 140)))
   const labelled = new Set(nodes
     .filter(n => n.type === 'INSTRUMENT' || (!overview && n.degree >= 10))
     .sort((a, b) => b.degree - a.degree || a.id.localeCompare(b.id))
@@ -36,8 +46,12 @@ export function graphSeries(
   return {
     type: 'graph' as const,
     layout: 'force' as const,
-    // Larger graphs start farther out, rather than clipping the overview at its edges.
-    zoom: Math.max(0.12, Math.min(0.8, 8 / Math.sqrt(Math.max(1, nodes.length)))),
+    top: 52,
+    bottom: 38,
+    left: 38,
+    right: 38,
+    // Larger graphs and wide/short viewports start farther out so top clusters & labels never clip.
+    zoom: Math.max(0.12, Math.min(0.48, (4.8 * aspectScale) / Math.sqrt(Math.max(1, nodes.length)))),
     scaleLimit: { min: 0.08, max: 3 },
     roam: true,
     draggable: true,
@@ -69,7 +83,7 @@ export function graphSeries(
       },
     })),
     force: {
-      repulsion: 420, edgeLength: [95, 185], gravity: 0.08, friction: 0.6,
+      repulsion: 380, edgeLength: [85, 165], gravity: 0.14, friction: 0.6,
       layoutAnimation: !options.reducedMotion,
     },
     edgeSymbol: ['none', 'arrow'],
@@ -80,8 +94,8 @@ export function graphSeries(
     emphasis: { focus: 'adjacency' as const, label: { fontSize: 13 } },
     lineStyle: { width: overview ? 0.8 : 1 },
     label: {
-      position: 'right' as const, fontSize: 13, color: '#334155',
-      overflow: 'truncate' as const, width: 160,
+      position: 'top' as const, fontSize: 13, color: '#334155',
+      overflow: 'break' as const, width: 176,
     },
   }
 }

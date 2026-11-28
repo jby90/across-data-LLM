@@ -663,13 +663,18 @@ async function fromRoute() {
   const pid = route.query.project
   const tid = route.query.task
   const qTab = route.query.tab
+  const qCountry = typeof route.query.country === 'string' ? route.query.country.trim().toUpperCase() : ''
   if (qTab === 'forms' || qTab === 'library' || qTab === 'prepare') {
     tab.value = qTab
   }
-  if (typeof tid === 'string' && planTask.value !== tid) { planTask.value = tid; taskOriginCountry.value = ''; planCountry.value = ''; planFunction.value = ''; await loadPlan() }
+  if (typeof tid === 'string' && planTask.value !== tid) {
+    planTask.value = tid; taskOriginCountry.value = ''; planCountry.value = ''; planFunction.value = ''; await loadPlan()
+  } else if (qCountry && !tid && !pid && planCountry.value !== qCountry) {
+    planTask.value = null; taskOriginCountry.value = ''; planCountry.value = qCountry; await loadPlan()
+  }
   if (typeof pid === 'string' && project.value?.id !== pid) await openProject(pid)
 }
-watch(() => [route.query.project, route.query.task, route.query.tab], fromRoute)
+watch(() => [route.query.project, route.query.task, route.query.tab, route.query.country], fromRoute)
 onMounted(async () => { loadCountries(); loadFunctions(); loadProjects(); loadLibrary(); loadFormCatalog(); loadDocProjects(); await fromRoute() })
 </script>
 

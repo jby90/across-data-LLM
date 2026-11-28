@@ -20,6 +20,7 @@ interface SelfAccountInfo {
   org_name: string | null
   signup_source: string
   can_export: boolean
+  is_trial?: boolean
 }
 
 const auth = useAuth()
@@ -74,7 +75,26 @@ const groups = [
     items: [{ path: '/help', title: '使用帮助', icon: 'book' }],
   },
 ]
-const navigation = computed(() => groups)
+const isPortalTrial = computed(() => auth.user?.signup_source === 'portal' && auth.user?.role === 'viewer')
+const navigation = computed(() =>
+  isPortalTrial.value
+    ? [
+        {
+          label: '独立体验空间',
+          items: [
+            { path: '/', title: '工作概览', icon: 'grid' },
+            { path: '/knowledge', title: '法规知识库', icon: 'book' },
+            { path: '/analysis', title: '法规咨询助手', icon: 'shield' },
+            { path: '/notifications', title: '更新通知', icon: 'check' },
+          ],
+        },
+        {
+          label: '帮助',
+          items: [{ path: '/help', title: '使用帮助', icon: 'book' }],
+        },
+      ]
+    : groups,
+)
 const current = computed(() =>
   navigation.value.flatMap((group) => group.items).find((item) => isActive(item.path)),
 )
@@ -234,7 +254,7 @@ async function savePassword() {
           <el-tooltip
             v-if="auth.user.role === 'viewer'"
             :content="
-              auth.user.signup_source === 'portal'
+              auth.user.signup_source === 'portal' && auth.user.role === 'viewer'
                 ? '独立体验空间账号，可查阅法规知识库、标准目录与咨询助手'
                 : auth.user.can_export
                   ? '可只读查看并下载本单位项目文件，不能新建或修改'
@@ -279,7 +299,7 @@ async function savePassword() {
             <span>{{ accountDialog.info.can_export ? '已开启' : '未开启' }}</span>
           </div>
           <p v-if="accountDialog.info.role === 'viewer'" class="acct-upgrade-note">
-            <template v-if="accountDialog.info.signup_source === 'portal'">
+            <template v-if="accountDialog.info.is_trial ?? accountDialog.info.signup_source === 'portal'">
               当前为独立体验空间账号，可查阅法规知识库、标准目录与咨询助手；如需办理企业合规评估与准入材料，请联系平台超级管理员开通企业用户权限。
             </template>
             <template v-else-if="accountDialog.info.can_export">

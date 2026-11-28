@@ -798,7 +798,7 @@ def _check_paragraph(
     text = str(item.get("text") or "").strip()
     if not text:
         return None, "空段落"
-    if re.search(r"条文\s*\d|第\s*\d+\s*号条文|\bfacts?\b|\bclauses?\b|\bcites?\b", text, re.I):
+    if re.search(r"CYSH_SECRET|条文\s*\d|第\s*\d+\s*号条文|\bfacts?\b|\bclauses?\b|\bcites?\b", text, re.I):
         return None, "正文里出现内部编号或字段名"
     cites = [c for c in (item.get("cites") or []) if isinstance(c, int)]
     bad = [c for c in cites if c not in offered]

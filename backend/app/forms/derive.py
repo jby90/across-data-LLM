@@ -50,6 +50,28 @@ _NAMES = {
 _AUTHORITY = {"CN", "MA", "EG", "TN", "SG", "FR", "DE", "ES", "IT", "NL", "BE", "SE", "PL", "AT", "IE", "PT", "CZ", "HU", "GB", "CH", "NO", "JP", "KR", "TH", "MY", "ID", "VN", "PH", "IN", "TR", "AE", "SA", "QA", "IL", "JO", "DZ", "ZA", "NG", "KE", "BR", "AR", "CL", "PE", "CO", "MX", "CA", "AU", "NZ", "HK", "MO"}
 
 
+def _load_extended_form_country_names() -> None:
+    import json
+    from pathlib import Path
+
+    base_dir = Path(__file__).resolve().parent.parent / "analysis"
+    iso_path = base_dir / "iso_countries.json"
+    if iso_path.exists():
+        data = json.loads(iso_path.read_text(encoding="utf-8"))
+        for cc, item in data.items():
+            if isinstance(item, dict) and item.get("en"):
+                _NAMES["en"].setdefault(cc.upper(), str(item["en"]))
+    fr_path = base_dir / "lexicons" / "fr.json"
+    if fr_path.exists():
+        fr_data = json.loads(fr_path.read_text(encoding="utf-8")).get("countries") or {}
+        for cc, fr_name in fr_data.items():
+            if fr_name:
+                _NAMES["fr"].setdefault(cc.upper(), str(fr_name))
+
+
+_load_extended_form_country_names()
+
+
 def country_name(code: str | None, lang: str) -> str:
     if not code:
         return ""

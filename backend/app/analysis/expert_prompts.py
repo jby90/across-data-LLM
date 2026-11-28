@@ -17,16 +17,20 @@ _CACHE: tuple[float, dict[str, Any]] | None = None
 def load_expert_profiles() -> dict[str, Any]:
     """Load expert role prompts & standard style rules with mtime-based zero-restart hot reload."""
     global _CACHE
-    if not PROFILES_PATH.exists():
-        return {"version": "2026.11.26", "experts": {}, "section_overrides": {}}
-    mtime = PROFILES_PATH.stat().st_mtime
-    if _CACHE is not None and _CACHE[0] == mtime:
-        return _CACHE[1]
-    data = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        data = {"version": "2026.11.26", "experts": {}, "section_overrides": {}}
-    _CACHE = (mtime, data)
-    return data
+    default_cfg = {"version": "2026.11.28", "experts": {}, "section_overrides": {}}
+    try:
+        if not PROFILES_PATH.exists():
+            return _CACHE[1] if _CACHE is not None else default_cfg
+        mtime = PROFILES_PATH.stat().st_mtime
+        if _CACHE is not None and _CACHE[0] == mtime:
+            return _CACHE[1]
+        data = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = default_cfg
+        _CACHE = (mtime, data)
+        return data
+    except (OSError, ValueError):
+        return _CACHE[1] if _CACHE is not None else default_cfg
 
 
 def section_expert_guidance(role_key: str) -> str:

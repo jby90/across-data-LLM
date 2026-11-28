@@ -260,21 +260,38 @@ PAGE_TEXT_WIDTH = 9026  # A4 去掉左右各 2.54cm 页边距后的可用宽度�
 
 # Word 不接受的字符（控制符、U+FFFE/U+FFFF 等）：原文提取里偶尔混入，写进去整份文件就打不开
 _XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+_PUA_CHAR_MAP = str.maketrans(
+    {
+        "\uf0b7": "\u2022",
+        "\uf0a7": "\u25aa",
+        "\uf0fc": "\u2713",
+        "\uf076": "\u2713",
+        "\uf0fe": "\u2611",
+        "\uf052": "\u2611",
+        "\uf0a8": "\u2610",
+        "\uf06f": "\u2610",
+        "\uf02a": "\u2610",
+    }
+)
+_PUA_RE = re.compile(r"[\ue000-\uf8ff]")
 _CITE_CHAIN = re.compile(r"((?:\[\d+\])+)")
 _ARABIC_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")
 _RTL_TOKEN_SPLIT = re.compile(
-    r"(\([A-Za-z0-9@._:/+\-\s,&']+\)|\+\d[\d\s\-]{4,}\d|[A-Za-z0-9@._:/+-]+(?:\s+[A-Za-z0-9@._:/+-]+)*)"
+    r"(\([A-Za-z0-9\u00C0-\u024F@._:/+\-\s,&']+\)|\+\d[\d\s\-()]{4,}\d|[A-Za-z0-9\u00C0-\u024F@._:/+-]+(?:\s+[A-Za-z0-9\u00C0-\u024F@._:/+-]+)*)"
 )
 
 
 def xml_safe(text: str) -> str:
-    return _XML_BAD.sub("", text or "")
+    cleaned = (text or "").translate(_PUA_CHAR_MAP)
+    cleaned = _PUA_RE.sub("", cleaned)
+    return _XML_BAD.sub("", cleaned)
 
 
 def _w_one_run(text: str, bold: bool, size: int, color: str, *, superscript: bool = False, is_rtl: bool = False) -> str:
     b_tag = "<w:b/><w:bCs/>" if bold else ""
     va_tag = "<w:vertAlign w:val='superscript'/>" if superscript else ""
-    rtl_tag = "<w:lang w:bidi='ar-SA'/><w:rtl/>" if is_rtl else ""
+    bidi_locale = "he-IL" if re.search(r"[\u0590-\u05ff]", text or "") else "ar-SA"
+    rtl_tag = f"<w:lang w:bidi='{bidi_locale}'/><w:rtl/>" if is_rtl else ""
     return (
         f"<w:r><w:rPr>{b_tag}{FONTS}<w:color w:val='{color}'/>"
         f"<w:sz w:val='{size}'/><w:szCs w:val='{size}'/>{va_tag}{rtl_tag}</w:rPr>"
@@ -293,15 +310,20 @@ def _w_run(
 ) -> str:
     if not rtl or not text:
         return _w_one_run(text, bold, size, color, superscript=superscript, is_rtl=False)
-    # 在阿拉伯语 RTL 段落中：阿语与中性括号标点走 <w:rtl/>（保证 (الختم)/(قرار ... 2025) 正常镜像），
-    # 英文括注 (Qiheng ... LLC)、国际电话 +20 2 2736 4810 与纯拉丁词段包裹 LRM 保持原子 LTR 顺序
+    # 先剥除上游可能已注入的双向隔离控制符，避免跨 <w:r> 劈裂控制符或把多词拉丁词间空格打上 <w:rtl/>
+    clean_text = (
+        text.replace("\u2066", "")
+        .replace("\u2068", "")
+        .replace("\u2069", "")
+        .replace("\u200e", "")
+    )
     out: list[str] = []
-    for part in _RTL_TOKEN_SPLIT.split(text):
+    for part in _RTL_TOKEN_SPLIT.split(clean_text):
         if not part:
             continue
         is_ltr_span = (
             not _ARABIC_RE.search(part)
-            and bool(re.search(r"[A-Za-z]", part) or re.match(r"^\+\d", part))
+            and bool(re.search(r"[A-Za-z\u00C0-\u024F]", part) or re.match(r"^\+\d", part))
         )
         if is_ltr_span:
             wrapped = f"\u200e{part}\u200e" if (part.startswith(("(", "+")) or " " in part) else part
@@ -447,7 +469,7 @@ def _w_tc(
     rich: bool = False,
     width: int | None = None,
     *,
-    size: int = 19,
+    size: int = 20,
     keep_header: bool = False,
     tc_borders: str = "",
     rtl: bool = False,
@@ -494,11 +516,111 @@ def report_notices(rv) -> list[str]:
     ]
 
 
+def _w_grid_table(
+    rows: list[list[str]],
+    widths: list[int] | None,
+    spans: list[list[list[int]]] | list[dict] | None = None,
+    *,
+    table_style: str = "formal_black",
+    rtl: bool = False,
+) -> str:
+    ncols = max((len(r) for r in rows), default=1)
+    if ncols <= 0:
+        return ""
+    if spans and isinstance(spans, list) and spans and isinstance(spans[0], dict):
+        norm_spans: list[list[list[int]]] = [[[1, 1] for _ in range(ncols)] for _ in range(len(rows))]
+        for sp_item in spans:
+            sr = int(sp_item.get("r", 0))
+            sc = int(sp_item.get("c", 0))
+            srs = max(1, int(sp_item.get("rs", 1)))
+            scs = max(1, int(sp_item.get("cs", 1)))
+            if 0 <= sr < len(norm_spans) and 0 <= sc < ncols:
+                for dr in range(srs):
+                    for dc in range(scs):
+                        if sr + dr < len(norm_spans) and sc + dc < ncols:
+                            norm_spans[sr + dr][sc + dc] = [srs, scs] if (dr == 0 and dc == 0) else [0, 0]
+        spans = norm_spans
+    if table_style == "edpb":
+        outer = "<w:{0} w:val='single' w:sz='4' w:space='0' w:color='0A105D'/>"
+        inner = "<w:{0} w:val='single' w:sz='4' w:space='0' w:color='0A105D'/>"
+    else:
+        outer = "<w:{0} w:val='single' w:sz='6' w:space='0' w:color='000000'/>"
+        inner = "<w:{0} w:val='single' w:sz='4' w:space='0' w:color='000000'/>"
+    borders = "".join(outer.format(n) for n in ("top", "bottom", "left", "right")) + "".join(
+        inner.format(n) for n in ("insideH", "insideV")
+    )
+    pct = (
+        [int(p) for p in widths]
+        if widths
+        and len(widths) == ncols
+        and all(isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0 for p in widths)
+        else [max(1, 100 // ncols)] * ncols
+    )
+    cols = [max(120, PAGE_TEXT_WIDTH * p // max(1, sum(pct))) for p in pct]
+    grid = "<w:tblGrid>" + "".join(f"<w:gridCol w:w='{c}'/>" for c in cols) + "</w:tblGrid>"
+
+    vmerge_rem = [0] * ncols
+    body: list[str] = []
+    for r_idx, row in enumerate(rows):
+        padded = [str(row[i]) if i < len(row) else "" for i in range(ncols)]
+        tr_cells: list[str] = []
+        c_idx = 0
+        while c_idx < ncols:
+            if vmerge_rem[c_idx] > 0:
+                vmerge_rem[c_idx] -= 1
+                w_c = cols[c_idx]
+                tr_cells.append(
+                    f"<w:tc><w:tcPr><w:tcW w:w='{w_c}' w:type='dxa'/><w:vMerge/></w:tcPr>"
+                    f"<w:p><w:pPr>{'<w:bidi/>' if rtl else ''}</w:pPr></w:p></w:tc>"
+                )
+                c_idx += 1
+                continue
+            sp = (
+                spans[r_idx][c_idx]
+                if spans
+                and r_idx < len(spans)
+                and c_idx < len(spans[r_idx])
+                and isinstance(spans[r_idx][c_idx], list)
+                and len(spans[r_idx][c_idx]) >= 2
+                else [1, 1]
+            )
+            rs, cs = int(sp[0]), int(sp[1])
+            if rs == 0 or cs == 0:
+                c_idx += 1
+                continue
+            cs = max(1, min(cs, ncols - c_idx))
+            rs = max(1, rs)
+            span_w = sum(cols[c_idx : c_idx + cs])
+            extra_pr = ""
+            if cs > 1:
+                extra_pr += f"<w:gridSpan w:val='{cs}'/>"
+            if rs > 1:
+                extra_pr += "<w:vMerge w:val='restart'/>"
+                for k_c in range(c_idx, c_idx + cs):
+                    vmerge_rem[k_c] = rs - 1
+            raw_tc = _w_tc(padded[c_idx], rich=True, width=span_w, rtl=rtl)
+            if extra_pr:
+                raw_tc = raw_tc.replace("<w:tcPr>", f"<w:tcPr>{extra_pr}", 1)
+            tr_cells.append(raw_tc)
+            c_idx += cs
+        body.append("<w:tr><w:trPr><w:cantSplit/></w:trPr>" + "".join(tr_cells) + "</w:tr>")
+
+    bidi_vis = "<w:bidiVisual/>" if rtl else ""
+    return (
+        f"<w:tbl><w:tblPr>{bidi_vis}<w:tblW w:w='{sum(cols)}' w:type='dxa'/><w:tblLayout w:type='fixed'/>"
+        f"<w:tblBorders>{borders}</w:tblBorders>"
+        "<w:tblCellMar><w:top w:w='60' w:type='dxa'/><w:left w:w='100' w:type='dxa'/>"
+        "<w:bottom w:w='60' w:type='dxa'/><w:right w:w='100' w:type='dxa'/></w:tblCellMar>"
+        "</w:tblPr>" + grid + "".join(body) + "</w:tbl>"
+    )
+
+
 def _w_table(
     head: list[str],
     rows: list[list[str]],
     widths: list[int] | None = None,
     *,
+    spans: list[list[list[int]]] | list[dict] | None = None,
     table_style: str = "formal_black",
     rtl: bool = False,
 ) -> str:
@@ -518,10 +640,20 @@ def _w_table(
             inner.format(n) for n in ("insideH", "insideV")
         )
         head_tcb = "<w:tcBorders><w:bottom w:val='single' w:sz='6' w:space='0' w:color='000000'/></w:tcBorders>"
-        head_sz = 19
-    # 列宽：百分比换算成 twip；不给就均分。固定布局 + tblGrid，Word 才不会按内容挤列
-    pct = widths or [100 // len(head)] * len(head)
-    cols = [PAGE_TEXT_WIDTH * p // sum(pct) for p in pct]
+        head_sz = 20
+    if not head:
+        return _w_grid_table(rows, widths, spans, table_style=table_style, rtl=rtl) if rows else ""
+    ncols = len(head)
+    valid_widths = (
+        widths
+        if widths
+        and len(widths) == ncols
+        and all(isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0 for p in widths)
+        else None
+    )
+    pct = [int(p) for p in valid_widths] if valid_widths else [max(1, 100 // ncols)] * ncols
+    total_pct = max(1, sum(pct))
+    cols = [max(120, PAGE_TEXT_WIDTH * p // total_pct) for p in pct]
     grid = "<w:tblGrid>" + "".join(f"<w:gridCol w:w='{c}'/>" for c in cols) + "</w:tblGrid>"
     # 表头行跨页重复；行内不拆页，避免一行被劈成两半
     row_pr = "<w:trPr><w:cantSplit/>{0}</w:trPr>"
@@ -534,13 +666,71 @@ def _w_table(
         )
         + "</w:tr>"
     ]
-    body += [
-        "<w:tr>"
-        + row_pr.format("")
-        + "".join(_w_tc(str(c), rich=True, width=w, rtl=rtl) for c, w in zip(row, cols, strict=True))
-        + "</w:tr>"
-        for row in rows
-    ]
+    norm_rows = [[str(row[i]) if i < len(row) else "" for i in range(ncols)] for row in rows]
+    if spans:
+        if isinstance(spans, list) and spans and isinstance(spans[0], dict):
+            norm_spans: list[list[list[int]]] = [[[1, 1] for _ in range(ncols)] for _ in range(len(norm_rows))]
+            for sp_item in spans:
+                sr = int(sp_item.get("r", 0))
+                sc = int(sp_item.get("c", 0))
+                srs = max(1, int(sp_item.get("rs", 1)))
+                scs = max(1, int(sp_item.get("cs", 1)))
+                if 0 <= sr < len(norm_spans) and 0 <= sc < ncols:
+                    for dr in range(srs):
+                        for dc in range(scs):
+                            if sr + dr < len(norm_spans) and sc + dc < ncols:
+                                norm_spans[sr + dr][sc + dc] = [srs, scs] if (dr == 0 and dc == 0) else [0, 0]
+            spans = norm_spans
+        vmerge_rem = [0] * ncols
+        for r_idx, nrow in enumerate(norm_rows):
+            tr_cells: list[str] = []
+            c_idx = 0
+            while c_idx < ncols:
+                if vmerge_rem[c_idx] > 0:
+                    vmerge_rem[c_idx] -= 1
+                    w_c = cols[c_idx]
+                    tr_cells.append(
+                        f"<w:tc><w:tcPr><w:tcW w:w='{w_c}' w:type='dxa'/><w:vMerge/></w:tcPr>"
+                        f"<w:p><w:pPr>{'<w:bidi/>' if rtl else ''}</w:pPr></w:p></w:tc>"
+                    )
+                    c_idx += 1
+                    continue
+                sp = (
+                    spans[r_idx][c_idx]
+                    if r_idx < len(spans)
+                    and c_idx < len(spans[r_idx])
+                    and isinstance(spans[r_idx][c_idx], list)
+                    and len(spans[r_idx][c_idx]) >= 2
+                    else [1, 1]
+                )
+                rs, cs = int(sp[0]), int(sp[1])
+                if rs == 0 or cs == 0:
+                    c_idx += 1
+                    continue
+                cs = max(1, min(cs, ncols - c_idx))
+                rs = max(1, rs)
+                span_w = sum(cols[c_idx : c_idx + cs])
+                extra_pr = ""
+                if cs > 1:
+                    extra_pr += f"<w:gridSpan w:val='{cs}'/>"
+                if rs > 1:
+                    extra_pr += "<w:vMerge w:val='restart'/>"
+                    for k_c in range(c_idx, c_idx + cs):
+                        vmerge_rem[k_c] = rs - 1
+                raw_tc = _w_tc(nrow[c_idx], rich=True, width=span_w, rtl=rtl)
+                if extra_pr:
+                    raw_tc = raw_tc.replace("<w:tcPr>", f"<w:tcPr>{extra_pr}", 1)
+                tr_cells.append(raw_tc)
+                c_idx += cs
+            body.append("<w:tr>" + row_pr.format("") + "".join(tr_cells) + "</w:tr>")
+    else:
+        body += [
+            "<w:tr>"
+            + row_pr.format("")
+            + "".join(_w_tc(c, rich=True, width=w, rtl=rtl) for c, w in zip(nrow, cols, strict=True))
+            + "</w:tr>"
+            for nrow in norm_rows
+        ]
     bidi_vis = "<w:bidiVisual/>" if rtl else ""
     return (
         f"<w:tbl><w:tblPr>{bidi_vis}<w:tblW w:w='{sum(cols)}' w:type='dxa'/><w:tblLayout w:type='fixed'/>"
@@ -558,9 +748,9 @@ def _w_blocks(blocks: list[dict]) -> list[str]:
         if kind == "h1":
             parts.append(_w_p(blk["text"], bold=True, size=32, color="000000", style="Title"))
         elif kind == "meta":
-            parts.append(_w_p(blk["text"], size=19, color="475569"))
+            parts.append(_w_p(blk["text"], size=20, color="000000"))
         elif kind == "notice":
-            parts.append(_w_p(blk["text"], size=18, color="92400E"))
+            parts.append(_w_p(blk["text"], size=20, color="000000"))
         elif kind == "verdict":
             parts.append(
                 _w_p(
@@ -599,7 +789,7 @@ def _w_blocks(blocks: list[dict]) -> list[str]:
         elif kind == "item":
             parts.append(_w_p(f"{blk['n']}. {blk['text']}", rich=True, indent=240))
         elif kind == "finding":
-            bar = "334155"
+            bar = "000000"
             parts.append(
                 _w_p(
                     f"{blk['title']}{blk['refs']}（{blk['chips']}）",
@@ -628,10 +818,10 @@ def _w_blocks(blocks: list[dict]) -> list[str]:
             )
         elif kind == "table":
             parts.append(_w_table(blk["head"], blk["rows"], blk.get("widths")))
-            parts.append(_w_p("", size=10))
+            parts.append(_w_p("", size=20))
         elif kind == "ref":
-            parts.append(_w_p(f"[{blk['n']}] {blk['text']}", bold=True, size=19, keep_next=True))
-            parts.extend(_w_p(s, size=18, color="475569", keep_lines=True) for s in blk["sub"])
+            parts.append(_w_p(f"[{blk['n']}] {blk['text']}", bold=True, size=20, color="000000", keep_next=True))
+            parts.extend(_w_p(s, size=20, color="000000", keep_lines=True) for s in blk["sub"])
     return parts
 
 
@@ -661,16 +851,16 @@ def build_report_docx(task: AnalysisTask, rv: ReportVersion, dimension: str | No
         ),
         _w_p(
             f"任务:{task.title} | 版本:v{rv.version_no} | 车型:{task.vehicle_model} | {now}",
-            size=19,
-            color="475569",
+            size=20,
+            color="000000",
         ),
     ]
-    parts.extend([_w_p(EXPORT_NOTICE, size=19), _w_p(DISCLAIMER, size=19)])
-    parts.append(_w_p(review_overview(rv.dimensions_json), size=19))
-    parts.extend(_w_p(notice, True, 19, "B45309") for notice in update_notices(rv))
-    parts.append(_w_p(f"生成时引用策略：{policy_label(rv.citation_policy)}", size=18))
+    parts.extend([_w_p(EXPORT_NOTICE, size=20), _w_p(DISCLAIMER, size=20)])
+    parts.append(_w_p(review_overview(rv.dimensions_json), size=20))
+    parts.extend(_w_p(notice, True, 20, "000000") for notice in update_notices(rv))
+    parts.append(_w_p(f"生成时引用策略：{policy_label(rv.citation_policy)}", size=20))
     if rv.is_partial_sample:
-        parts.append(_w_p(PARTIAL_NOTICE, bold=True, size=20, color="B45309"))
+        parts.append(_w_p(PARTIAL_NOTICE, bold=True, size=20, color="000000"))
     parts.append(_w_p("一、执行摘要", bold=True, size=26, color="000000"))
     parts.extend(_w_p(ln.strip()) for ln in (rv.executive_summary or "").splitlines() if ln.strip())
 
@@ -734,9 +924,9 @@ def build_report_docx(task: AnalysisTask, rv: ReportVersion, dimension: str | No
             f"【{dim.get('dimension_code', '')}】{dim.get('dimension_title', '')} "
             f"（风险：{rl_disp}｜状态：{st_disp}）"
         )
-        parts.append(_w_p(title, bold=True, size=24, color="0F172A"))
+        parts.append(_w_p(title, bold=True, size=24, color="000000"))
         if dim.get("missing_gap_note"):
-            parts.append(_w_p(f"核查缺口:{dim['missing_gap_note']}", True, 20, "B45309"))
+            parts.append(_w_p(f"核查缺口:{dim['missing_gap_note']}", True, 20, "000000"))
         for line in str(dim.get("content_markdown", "")).splitlines():
             if line.strip():
                 parts.append(_w_p(_clean_dim_line(line.strip().lstrip("#").strip())))
@@ -745,8 +935,8 @@ def build_report_docx(task: AnalysisTask, rv: ReportVersion, dimension: str | No
                 _w_p(
                     f"  引用 {cite.get('citation_tag', '')}:{_clause_ref(cite)} — "
                     f'原文:"{cite.get("quote_original", "")}" | 译文:{cite.get("quote_zh", "")}',
-                    size=18,
-                    color="334155",
+                    size=20,
+                    color="000000",
                     keep_next=True,
                 )
             )
@@ -755,7 +945,8 @@ def build_report_docx(task: AnalysisTask, rv: ReportVersion, dimension: str | No
                     f"来源：{cite.get('source_url') or '未提供'}；"
                     f"人工复核：{review_label(cite)}；"
                     f"{review_detail(cite)}",
-                    size=18,
+                    size=20,
+                    color="000000",
                     keep_lines=True,
                 )
             )
@@ -796,7 +987,7 @@ def _footer_xml(ns: str, *, foreign: bool = False, rtl: bool = False) -> str:
     """页脚：居中的“第 N 页 / 共 M 页”（外文正式稿用通用“N / M”页码，不夹中文）。"""
 
     def fld(code: str) -> str:
-        rpr = f"<w:rPr>{FONTS}<w:color w:val='64748B'/><w:sz w:val='16'/></w:rPr>"
+        rpr = f"<w:rPr>{FONTS}<w:color w:val='000000'/><w:sz w:val='20'/><w:szCs w:val='20'/></w:rPr>"
         return (
             f"<w:r>{rpr}<w:fldChar w:fldCharType='begin' w:dirty='true'/></w:r>"
             f"<w:r>{rpr}<w:instrText xml:space='preserve'> {code} </w:instrText></w:r>"
@@ -808,20 +999,20 @@ def _footer_xml(ns: str, *, foreign: bool = False, rtl: bool = False) -> str:
     if foreign:
         return (
             f"<w:ftr xmlns:w='{ns}'><w:p><w:pPr><w:bidi w:val='0'/><w:jc w:val='center'/></w:pPr>"
-            + _w_run("\u200e", False, 16, "64748B")
+            + _w_run("\u200e", False, 20, "000000")
             + fld("PAGE")
-            + _w_run(" / ", False, 16, "64748B")
+            + _w_run(" / ", False, 20, "000000")
             + fld("NUMPAGES")
-            + _w_run("\u200e", False, 16, "64748B")
+            + _w_run("\u200e", False, 20, "000000")
             + "</w:p></w:ftr>"
         )
     return (
         f"<w:ftr xmlns:w='{ns}'><w:p><w:pPr><w:jc w:val='center'/></w:pPr>"
-        + _w_run("第 ", False, 16, "64748B")
+        + _w_run("第 ", False, 20, "000000")
         + fld("PAGE")
-        + _w_run(" 页 / 共 ", False, 16, "64748B")
+        + _w_run(" 页 / 共 ", False, 20, "000000")
         + fld("NUMPAGES")
-        + _w_run(" 页", False, 16, "64748B")
+        + _w_run(" 页", False, 20, "000000")
         + "</w:p></w:ftr>"
     )
 
@@ -917,11 +1108,11 @@ def _docx_package(
         zf.writestr(
             "word/header1.xml",
             f"<w:hdr xmlns:w='{ns}'>"
-            + _w_p(context, size=16, rtl=rtl)
+            + _w_p(context, size=20, color="000000", rtl=rtl)
             + (
                 ""
                 if foreign or (clean and not get_settings().report_review_notices)
-                else _w_p(EXPORT_NOTICE + DISCLAIMER, size=16)
+                else _w_p(EXPORT_NOTICE + DISCLAIMER, size=20, color="000000")
             )
             + "</w:hdr>",
         )

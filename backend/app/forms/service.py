@@ -301,7 +301,64 @@ def clean_answers(form: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _render_docx(form: dict[str, Any], answers: dict[str, Any], facts: dict[str, str]) -> tuple[bytes, FillReport, list[dict]]:
+_FULLWIDTH_ASCII_TRANS = str.maketrans(
+    {
+        "（": "(",
+        "）": ")",
+        "：": ": ",
+        "；": "; ",
+        "，": ", ",
+        "。": ". ",
+        "、": ", ",
+        "【": "[",
+        "】": "]",
+        "《": '"',
+        "》": '"',
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "　": " ",
+    }
+)
+
+
+def _translate_cjk_for_foreign_form(val: str, form: dict[str, Any]) -> str:
+    import re as _re
+    import unicodedata as _ud
+
+    if not val or not _re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60]", val):
+        return val
+    norm_val = " ".join(_ud.normalize("NFKC", val).translate(_FULLWIDTH_ASCII_TRANS).split())
+    if not _re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", norm_val):
+        return norm_val
+    flang = str(form.get("language") or "fr").lower()
+    country = str(form.get("country") or "").upper()
+    if flang in ("ar", "he", "th"):
+        target_lg = "fr" if country in ("TN", "MA", "LB", "DZ") else "en"
+    else:
+        from app.analysis.multilingual_report import ALL_REPORT_LANGS
+
+        target_lg = flang if flang in ALL_REPORT_LANGS and flang != "zh" else "fr"
+    if target_lg == "en":
+        from app.analysis.english_report import strip_and_translate_cjk
+
+        out = strip_and_translate_cjk(norm_val, fallback="Declared in attached dossier")
+        return _ud.normalize("NFKC", out).translate(_FULLWIDTH_ASCII_TRANS)
+    from app.analysis.multilingual_report import clean_and_gate_target_text
+
+    fb = "Voir dossier joint" if target_lg == "fr" else "Declared in attached dossier"
+    out = clean_and_gate_target_text(norm_val, target_lg, fallback=fb)
+    return _ud.normalize("NFKC", out).translate(_FULLWIDTH_ASCII_TRANS)
+
+
+def _render_docx(
+    form: dict[str, Any],
+    answers: dict[str, Any],
+    facts: dict[str, str],
+    *,
+    foreign_only: bool = False,
+) -> tuple[bytes, FillReport, list[dict]]:
     """A Word form: each item's ``pdf_key`` is the cell it goes in, ``t{table}/r{row}/c{col}`` with
     ``/a`` when the value follows the printed words of that cell."""
     import re
@@ -313,7 +370,10 @@ def _render_docx(form: dict[str, Any], answers: dict[str, Any], facts: dict[str,
         for st in states:
             m = re.fullmatch(r"t(\d+)/r(\d+)/c(\d+)(/a)?", st.item.get("pdf_key") or "")
             if st.source != "missing" and m and st.item["kind"] == "text":
-                cells.append((int(m[1]), int(m[2]), int(m[3]), str(st.value), bool(m[4])))
+                cell_val = str(st.value)
+                if foreign_only:
+                    cell_val = _translate_cjk_for_foreign_form(cell_val, form)
+                cells.append((int(m[1]), int(m[2]), int(m[3]), cell_val, bool(m[4])))
     res = fill_cells((OFFICIAL / form["file"]).read_bytes(), cells)
     return res.data, FillReport(placed=res.filled, unknown=res.missing_labels), []
 
@@ -323,9 +383,9 @@ def _foreign_clean_version(raw_ver: str, use_fr: bool) -> str:
 
     if not raw_ver:
         return "Édition officielle" if use_fr else "Official Edition"
-    if not _re.search(r"[\u4e00-\u9fff]", raw_ver):
+    if not _re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60]", raw_ver):
         return raw_ver
-    ascii_keep = _re.sub(r"[\u4e00-\u9fff（）()]+", " ", raw_ver)
+    ascii_keep = _re.sub(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60（）()]+", " ", raw_ver)
     ascii_keep = " ".join(ascii_keep.split()).strip(" -·/—")
     if len(ascii_keep) >= 4:
         return ascii_keep
@@ -349,7 +409,12 @@ def _foreign_fallback_field_label(meta: dict[str, Any], idx: int, use_fr: bool) 
 
 
 def _build_overflow_annex_pdf(
-    form: dict[str, Any], annex_rows: list[list[str]], *, cjk_filled: bool = False
+    form: dict[str, Any],
+    annex_rows: list[list[str]],
+    *,
+    cjk_filled: bool = False,
+    foreign_only: bool = False,
+    foreign_annex: bool = False,
 ) -> bytes:
     """Render a clean A4 continuation sheet PDF for text fields whose full content exceeded the
     fixed official form box capacity."""
@@ -358,7 +423,7 @@ def _build_overflow_annex_pdf(
     lang = str(form.get("language") or "fr").lower()
     country = str(form.get("country") or "").upper()
     use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB", "DZ"))
-    use_zh_annex = lang == "zh" or cjk_filled
+    use_zh_annex = lang == "zh" or (cjk_filled and not foreign_only and not foreign_annex)
     if use_zh_annex:
         code_ver = f"{form.get('code', '')} ({form.get('version', '')})".strip()
     else:
@@ -378,7 +443,7 @@ def _build_overflow_annex_pdf(
                     ),
                 },
                 {"type": "heading", "text": "超长栏目完整申报内容对照表"},
-                {"type": "table", "head": ["附页索引", "原表栏目名称", "完整申报内容"], "widths": [12, 28, 60], "rows": annex_rows},
+                {"type": "table", "head": ["附页索引", "原表栏目名称", "完整申报内容"], "widths": [10, 35, 55], "rows": annex_rows},
             ]
         elif use_fr:
             title = f"Annexe complémentaire / 官方申报表附页续表 — {code_ver}"
@@ -393,7 +458,7 @@ def _build_overflow_annex_pdf(
                     ),
                 },
                 {"type": "heading", "text": "Contenu intégral des rubriques reportées / 超长栏目完整申报内容"},
-                {"type": "table", "head": ["Réf. / 附页索引", "Rubrique / 原表栏目", "Contenu intégral / 完整申报内容"], "widths": [14, 28, 58], "rows": annex_rows},
+                {"type": "table", "head": ["Réf. / 附页索引", "Rubrique / 原表栏目", "Contenu intégral / 完整申报内容"], "widths": [12, 34, 54], "rows": annex_rows},
             ]
         else:
             title = f"Continuation Sheet / 官方申报表附页续表 — {code_ver}"
@@ -408,7 +473,7 @@ def _build_overflow_annex_pdf(
                     ),
                 },
                 {"type": "heading", "text": "Full Declared Content of Continued Fields / 超长栏目完整申报内容"},
-                {"type": "table", "head": ["Ref. / 附页索引", "Field / 原表栏目", "Full Declared Content / 完整申报内容"], "widths": [14, 28, 58], "rows": annex_rows},
+                {"type": "table", "head": ["Ref. / 附页索引", "Field / 原表栏目", "Full Declared Content / 完整申报内容"], "widths": [12, 34, 54], "rows": annex_rows},
             ]
         return _render_pdf(Rendered(blocks=blocks), title, foreign=False)
     use_fr = lang == "fr" or (lang == "ar" and country in ("TN", "MA", "LB", "DZ"))
@@ -428,7 +493,7 @@ def _build_overflow_annex_pdf(
             {
                 "type": "table",
                 "head": ["Réf.", "Rubrique du formulaire", "Contenu intégral déclaré"],
-                "widths": [12, 28, 60],
+                "widths": [10, 35, 55],
                 "rows": annex_rows,
             },
         ]
@@ -448,7 +513,7 @@ def _build_overflow_annex_pdf(
         {
             "type": "table",
             "head": ["Ref.", "Official Form Field", "Full Declared Content"],
-            "widths": [12, 28, 60],
+            "widths": [10, 35, 55],
             "rows": annex_rows,
         },
     ]
@@ -461,10 +526,12 @@ def render(
     facts: dict[str, str],
     *,
     allow_annex: bool = False,
+    foreign_only: bool = False,
+    foreign_annex: bool = False,
 ) -> tuple[bytes, FillReport, list[dict]]:
     """(filled official file, fill report, items that did not fit their box)."""
     if form.get("kind") == "docx":
-        return _render_docx(form, answers, facts)
+        return _render_docx(form, answers, facts, foreign_only=foreign_only)
     texts: dict[str, str] = {}
     checked: set[str] = set()
     labels: dict[str, dict] = {}
@@ -497,6 +564,8 @@ def render(
                 vals = st.value if isinstance(st.value, list) else [st.value]
                 checked.update(item["options"][v] for v in vals if isinstance(v, str) and v in (item["options"] or {}))
     # 汉字名称等放在法语表格里：填值本身不翻译，企业按官方语言填写；这里只负责放进格子
+    if foreign_only and str(form.get("country") or "").upper() not in ("", "CN"):
+        texts = {k: _translate_cjk_for_foreign_form(str(v or ""), form) for k, v in texts.items()}
     data = (OFFICIAL / form["file"]).read_bytes()
     fixed = fixed_fields(form)
     if fixed:
@@ -532,7 +601,10 @@ def render(
         field_map = {f.key: f for f in (fixed or list_fields(data))}
         annex_rows: list[list[str]] = []
         lang = form.get("language", "fr")
-        cjk_filled = any(_re.search(r"[\u4e00-\u9fff]", str(v or "")) for v in texts.values())
+        cjk_filled = False if foreign_only else any(
+            _re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60]", str(v or ""))
+            for v in texts.values()
+        )
         patched_texts = dict(texts)
         for k in list(report.overflow):
             f_obj = field_map.get(k)
@@ -548,20 +620,33 @@ def render(
             )
             ref_tag = (
                 f"（详见附页 #{idx}）"
-                if str(lang).lower() == "zh"
+                if (str(lang).lower() == "zh" and not foreign_only)
                 else (f"(Voir Annexe #{idx})" if use_fr_col else f"(See Annex #{idx})")
             )
             patched_texts[k] = fit_summary_for_box(data, f_obj, full_text, ref_tag)
             lbl_zh = meta.get("label_zh") or k
             lbl_orig = str(meta.get("label_original") or meta.get("label_fr") or "").strip()
-            if str(lang).lower() == "zh" or cjk_filled:
+            if (str(lang).lower() == "zh" or cjk_filled) and not foreign_only and not foreign_annex:
                 col_label = f"{lbl_zh} / {lbl_orig}" if lbl_orig and lbl_orig not in lbl_zh else lbl_zh
+                annex_cell_text = full_text
             else:
                 col_label = lbl_orig or _foreign_fallback_field_label(meta, idx, use_fr_col)
-            annex_rows.append([f"#{idx}", col_label, full_text])
+                annex_cell_text = (
+                    _translate_cjk_for_foreign_form(full_text, form)
+                    if (foreign_annex or foreign_only)
+                    and _re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60]", full_text)
+                    else full_text
+                )
+            annex_rows.append([f"#{idx}", col_label, annex_cell_text])
         if annex_rows:
             filled, report = fill_pdf(data, patched_texts, checked, fields=fixed)
-            annex_pdf = _build_overflow_annex_pdf(form, annex_rows, cjk_filled=cjk_filled)
+            annex_pdf = _build_overflow_annex_pdf(
+                form,
+                annex_rows,
+                cjk_filled=cjk_filled,
+                foreign_only=foreign_only,
+                foreign_annex=foreign_annex,
+            )
             filled = append_pdf_pages(filled, annex_pdf)
     field_map_all = {f.key: f for f in (fixed or list_fields(data))}
     too_long = []

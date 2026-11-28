@@ -698,10 +698,25 @@ async def _process_candidate(
             await s.commit()
             return
 
+        from sqlalchemy import text as sa_text
+
+        await s.execute(
+            sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"doc_ver:{site.country_code}:{cand.url}"},
+        )
+        await s.scalar(select(Document.id).where(Document.id == doc.id).with_for_update())
+        latest_no = (
+            await s.execute(
+                select(DocumentVersion.version_no)
+                .where(DocumentVersion.document_id == doc.id)
+                .order_by(DocumentVersion.version_no.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
         digest, rel = archive.put(res.content)
         version = DocumentVersion(
             document_id=doc.id,
-            version_no=(latest.version_no + 1) if latest else 1,
+            version_no=(latest_no + 1) if latest_no else 1,
             content_hash=digest,
             archive_path=rel,
             size_bytes=len(res.content),

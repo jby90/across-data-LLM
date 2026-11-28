@@ -1133,6 +1133,37 @@ async def _apply_translation_review(session, tr, clause, doc, body, proposed_tex
     await session.execute(select(Clause.id).where(Clause.id == clause.id).with_for_update())
     snapshot(session, tr, "before_human_review", actor_id)
     effective_passed = False if body.decision == "rejected" else passed
+    if body.decision == "rejected" or proposed_text != tr.translated_text:
+        from sqlalchemy import delete as sa_delete
+
+        from app.ingestion.models import ClauseReading
+        from app.ingestion.noise import clean_text
+        from app.knowledge.models import TranslationChunkCache
+        from app.knowledge.translator import (
+            MAX_CHUNK_CHARS,
+            chunk_key,
+            split_clause_into_chunks,
+            unwrap_layout_lines,
+        )
+
+        rd_txt_rev = await session.scalar(
+            select(ClauseReading.reading_text).where(ClauseReading.clause_id == clause.id)
+        )
+        lang_tag = clause.language or (doc.language if doc else "") or ""
+        purge_keys: set[str] = set()
+        for cand_src in {
+            clause.original_text or "",
+            unwrap_layout_lines(clean_text(rd_txt_rev or clause.original_text or "")),
+        }:
+            if cand_src:
+                for ch in split_clause_into_chunks(cand_src, max_chars=MAX_CHUNK_CHARS):
+                    purge_keys.add(chunk_key(ch, lang_tag))
+        if purge_keys:
+            await session.execute(
+                sa_delete(TranslationChunkCache).where(
+                    TranslationChunkCache.chunk_hash.in_(list(purge_keys))
+                )
+            )
     if proposed_text != tr.translated_text:
         # Corrections are new revisions. Approval of the old text is never inherited.
         old = tr
@@ -1385,6 +1416,8 @@ async def get_admin_knowledge_graph(
     payload = await _build_graph_payload(session, country_code, only_approved=only_approved)
     raw = payload.model_dump_json()
     if use_cached(True):
+        while len(_GRAPH_JSON_CACHE) >= 24:
+            _GRAPH_JSON_CACHE.pop(next(iter(_GRAPH_JSON_CACHE)), None)
         _GRAPH_JSON_CACHE[key] = raw
     return Response(content=raw, media_type="application/json")
 
@@ -1403,28 +1436,51 @@ async def get_graph_validation(
 @admin_router.get("/history/{target_id}")
 async def knowledge_history(
     target_id: uuid.UUID,
-    _: AdminSideDep,
+    admin: AdminSideDep,
     session: SessionDep,
     offset: int = Query(default=0, ge=0, le=2147483647),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
+    from app.core.rls import PUBLIC_AUDIT_TYPES
+    from app.iam.models import Role
     from app.knowledge.history import record_payload
     from app.knowledge.models import KnowledgeAuditRecord, KnowledgeChangeProposal
 
+    rec_stmt = select(KnowledgeAuditRecord).where(KnowledgeAuditRecord.target_id == target_id)
+    prop_stmt = select(KnowledgeChangeProposal).where(KnowledgeChangeProposal.target_id == target_id)
+    if admin.role == Role.OPS_ADMIN:
+        from app.analysis.models import AgentWorkflowConfig
+        from app.core.rls import DatabaseIdentity, bind_identity, bind_principal
+        from app.iam.models import Organization
+
+        try:
+            await bind_identity(session, DatabaseIdentity(scope="system"))
+            is_restricted_target = bool(
+                await session.scalar(select(Organization.id).where(Organization.id == target_id))
+                or await session.scalar(
+                    select(AgentWorkflowConfig.id).where(AgentWorkflowConfig.id == target_id)
+                )
+            )
+        finally:
+            await bind_principal(session, admin)
+        if is_restricted_target:
+            raise HTTPException(status_code=403, detail="这一项只有超级管理员能用")
+        rec_stmt = rec_stmt.where(
+            KnowledgeAuditRecord.target_type.in_(PUBLIC_AUDIT_TYPES),
+            KnowledgeAuditRecord.org_id.is_(None),
+        )
+        prop_stmt = prop_stmt.where(KnowledgeChangeProposal.target_type.in_(PUBLIC_AUDIT_TYPES))
+
     records = (
         await session.scalars(
-            select(KnowledgeAuditRecord)
-            .where(KnowledgeAuditRecord.target_id == target_id)
-            .order_by(KnowledgeAuditRecord.created_at.desc(), KnowledgeAuditRecord.id)
+            rec_stmt.order_by(KnowledgeAuditRecord.created_at.desc(), KnowledgeAuditRecord.id)
             .offset(offset)
             .limit(limit)
         )
     ).all()
     proposals = (
         await session.scalars(
-            select(KnowledgeChangeProposal)
-            .where(KnowledgeChangeProposal.target_id == target_id)
-            .order_by(KnowledgeChangeProposal.created_at.desc(), KnowledgeChangeProposal.id)
+            prop_stmt.order_by(KnowledgeChangeProposal.created_at.desc(), KnowledgeChangeProposal.id)
             .offset(offset)
             .limit(limit)
         )
@@ -2746,6 +2802,8 @@ async def _topics_cached(session: AsyncSession, cc: str) -> list[dict]:
     if use_cached(hit):
         return hit[1]
     items = await requirement_topics(session, cc)
+    while len(_TOPICS_CACHE) >= 32:
+        _TOPICS_CACHE.pop(next(iter(_TOPICS_CACHE)), None)
     _TOPICS_CACHE[cc] = (time.monotonic(), items)
     return items
 
@@ -3509,13 +3567,13 @@ async def admin_knowledge_posture(
 ) -> dict[str, Any]:
     """Return global regulatory, translation, knowledge-graph, briefing, official-form, and source-patrol
     posture metrics without touching tenant organizations, accounts, enterprise projects, or audit logs."""
-    from sqlalchemy import text as sql_text
-
     from app.analysis.documents_router import _CN_OFFICIAL
     from app.analysis.workflow_engine import country_name_zh
     from app.forms import service as forms_service
     from app.iam.cockpit_router import _kb_posture, _safe_pct
+    from app.opinion.models import OpinionItem
     from app.sources.attention import attention_of
+    from app.updates.router import discovery_query
 
     now = datetime.now(UTC)
     kb = await _kb_posture(session)
@@ -3559,17 +3617,19 @@ async def admin_knowledge_posture(
             sites_attention_by_cc[cc] = sites_attention_by_cc.get(cc, 0) + 1
             attention_sites_total += 1
 
+    tracked_disc = discovery_query().subquery()
     pending_updates = int(
-        (
-            await session.execute(
-                sql_text("SELECT count(DISTINCT change_id) FROM update_impacts WHERE state = 'open'")
+        await session.scalar(
+            select(func.count())
+            .select_from(tracked_disc)
+            .where(
+                tracked_disc.c.history_unknown.is_(False),
+                tracked_disc.c.first_parsed_at.is_(None),
             )
-        ).scalar_one()
+        )
         or 0
     )
-    opinion_total = int(
-        (await session.execute(sql_text("SELECT count(*) FROM opinion_items"))).scalar_one() or 0
-    )
+    opinion_total = int(await session.scalar(select(func.count(OpinionItem.id))) or 0)
 
     non_sovereign = {"ZZ", "INTL", "--", ""}
     candidate_codes = (
@@ -3644,7 +3704,7 @@ async def admin_knowledge_posture(
             "standards_active": sum(standards_by_cc.values()),
             "intl_standards_count": intl_standards_count,
             "national_standards_count": national_standards_count,
-            "standards_cn": standards_by_cc.get("CN", national_standards_count),
+            "standards_cn": standards_by_cc.get("CN", 0),
             "standards_intl": intl_standards_count,
             "standards_international": intl_standards_count,
             "kg_nodes_total": sum(kg_nodes_by_cc.values()),
@@ -3683,6 +3743,7 @@ async def admin_knowledge_posture(
             "attention_sites_total": attention_sites_total,
             "pending_updates": pending_updates,
             "quality_unpassed": quality_unpassed,
+            "translation_pending_docs": kb.get("translation_pending_docs", 0),
             "whitepapers_outdated": whitepapers_outdated,
             "audit_events_7d": 0,
         },
@@ -3747,13 +3808,17 @@ async def user_knowledge_posture_summary(
     total_foreign = sum(foreign_clauses_by_cc.values())
     total_translated = sum(translated_by_cc.values())
     intl_std = sum(v for k, v in standards_by_cc.items() if k in ("ZZ", "INTL"))
-    cn_std = standards_by_cc.get("CN", sum(v for k, v in standards_by_cc.items() if k not in ("ZZ", "INTL")))
+    cn_std = standards_by_cc.get("CN", 0)
 
     return {
         "covered_jurisdictions": len(countries),
         "laws_in_force": sum(docs_by_cc.values()),
         "clauses_total": sum(clauses_by_cc.values()),
-        "translation_coverage_pct": _safe_pct(total_translated, total_foreign) or 100.0,
+        "translation_coverage_pct": (
+            _safe_pct(total_translated, total_foreign)
+            if total_foreign > 0
+            else (100.0 if sum(clauses_by_cc.values()) > 0 else None)
+        ),
         "standards_active": sum(standards_by_cc.values()),
         "standards_cn": cn_std,
         "standards_intl": intl_std,

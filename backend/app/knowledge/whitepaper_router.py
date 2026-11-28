@@ -68,6 +68,7 @@ async def list_whitepapers(user: UserDep, session: SessionDep) -> list[dict]:
 
 _page_cache: dict[str, tuple[float, dict]] = {}
 _hash_cache: dict[str, str] = {}
+_hash_cache_kb_mark: str = ""
 
 
 async def known_hash(session: AsyncSession, code: str) -> str | None:
@@ -234,6 +235,8 @@ async def _generate(factory: async_sessionmaker, code: str) -> None:
                     blocks, meta = await wp.write_whitepaper(session, code)
                     await wp.save(session, code, blocks, meta)
                     await session.commit()
+                    _invalidate_wp_caches(code)
+                    await current_hash(session, code)
     except wp.WhitepaperError as exc:
         log.warning("白皮书生成未完成：%s — %s", code, exc)
     except Exception:  # noqa: BLE001 - 后台任务：失败只记录，用户端仍看到上一版
@@ -279,6 +282,8 @@ async def _sync_dims_job(factory: async_sessionmaker, code: str, dims: list[str]
                     blocks, meta = await wp.sync_dimensions(session, code, dims)
                     await wp.save(session, code, blocks, meta)
                     await session.commit()
+                    _invalidate_wp_caches(code)
+                    await current_hash(session, code)
     except wp.WhitepaperError as exc:
         log.warning("白皮书受影响维度增量同步未完成：%s %s — %s", code, dims, exc)
     except Exception:  # noqa: BLE001
@@ -311,6 +316,14 @@ async def sync_whitepaper_dimensions(
         raise HTTPException(422, "请至少选择一个需要更新的简报章节")
     if admin.role != Role.PLATFORM_ADMIN and len(dims) >= len(valid):
         raise HTTPException(403, "全篇重生成须由超级管理员发起，按章节更新最多勾选7个受影响章节")
+    cur_existing = await wp.latest(session, code)
+    if (
+        cur_existing is not None
+        and isinstance(cur_existing.report, dict)
+        and cur_existing.report.get("review_status") == "approved"
+        and len(dims) >= len(valid)
+    ):
+        raise HTTPException(409, "当前简报已人工审核归档锁定，如需全篇重生成请先解除归档锁定")
     if code in _running:
         raise HTTPException(409, "这个国家的简报正在更新")
     _running.add(code)
@@ -431,25 +444,44 @@ def _sanitize_wp_blocks(raw_blocks: list[dict]) -> list[dict]:
                 continue
             clean_blk["items"] = items[:100]
         elif btype == "table":
-            head = [_clean_str(h, max_len=200) for h in (blk.get("head") or [])] if isinstance(blk.get("head"), list) else []
+            if not isinstance(blk.get("head"), list):
+                raise HTTPException(422, "表格必须包含表头列表")
+            head = [_clean_str(h, max_len=200) for h in blk["head"][:12]]
+            if not head or len(blk["head"]) > 12:
+                raise HTTPException(422, "表格表头须包含 1 至 12 列")
+            ncols = len(head)
             rows = []
             if isinstance(blk.get("rows"), list):
                 for r in blk["rows"][:300]:
-                    if isinstance(r, list):
-                        rows.append([_clean_str(c, max_len=3000) for c in r[:12]])
+                    if not isinstance(r, list) or len(r) != ncols:
+                        raise HTTPException(422, "表格每一行的列数必须与表头列数一致")
+                    rows.append([_clean_str(c, max_len=3000) for c in r])
             clean_blk["head"] = head
             clean_blk["rows"] = rows
-            if isinstance(blk.get("widths"), list):
-                clean_blk["widths"] = [int(w) for w in blk["widths"][:12] if isinstance(w, (int, float))]
+            if "widths" in blk and blk.get("widths") is not None:
+                raw_w = blk.get("widths")
+                if (
+                    not isinstance(raw_w, list)
+                    or len(raw_w) != ncols
+                    or not all(
+                        isinstance(w, (int, float))
+                        and not isinstance(w, bool)
+                        and 1 <= int(w) <= 100
+                        for w in raw_w
+                    )
+                ):
+                    raise HTTPException(422, "表格列宽比例必须为与表头等长的正整数列表（1–100）")
+                clean_blk["widths"] = [int(w) for w in raw_w]
         out.append(clean_blk)
     if not out:
         raise HTTPException(422, "简报有效正文内容不能为空")
     return out
 
 
-def _invalidate_wp_caches(code: str) -> None:
+def _invalidate_wp_caches(code: str, *, keep_hash: bool = False) -> None:
     _page_cache.pop(code, None)
-    _hash_cache.pop(code, None)
+    if not keep_hash:
+        _hash_cache.pop(code, None)
     try:
         from app.iam.cockpit_router import _KB_POSTURE_CACHE
 
@@ -547,11 +579,17 @@ async def admin_edit_whitepaper_blocks(
     """管理员在线修改国家合规简报正文并生成新版本快照（防篡改历史链），可同步标记为已人工审核归档。"""
     from datetime import UTC, datetime
 
+    from sqlalchemy import text as sa_text
+
     from app.audit.service import set_detail
 
     code = _country(country_code)
     if code in _running:
         raise HTTPException(409, "当前国家简报正在后台更新中，请稍后再编辑保存")
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"whitepaper:{code}"},
+    )
     cur = await wp.latest(session, code)
     if cur is None:
         raise HTTPException(404, "这个国家的简报还没有生成")
@@ -560,20 +598,21 @@ async def admin_edit_whitepaper_blocks(
     clean_note = _clean_str(body.note, max_len=200) or "人工在线修订定稿"
     now_iso = datetime.now(UTC).isoformat()
     prev_rep = dict(cur.report) if isinstance(cur.report, dict) else {}
-    stamp = await country_lib_stamp(session, code)
-    shash = await current_hash(session, code) if cur.source_hash else cur.source_hash
+    shash = cur.source_hash
     new_rep = {
         **prev_rep,
         "manual_edited": True,
         "edit_note": clean_note,
         "edited_by": str(admin.user_id),
         "edited_at": now_iso,
-        "lib_stamp": stamp,
     }
     if body.approve:
         new_rep["review_status"] = "approved"
         new_rep["reviewed_by"] = str(admin.user_id)
         new_rep["reviewed_at"] = now_iso
+    else:
+        new_rep["review_status"] = "auto_verified"
+        new_rep.pop("reviewed_at", None)
 
     saved = await wp.save(
         session,
@@ -582,7 +621,9 @@ async def admin_edit_whitepaper_blocks(
         {"source_hash": shash, "tokens": cur.tokens or 0, "report": new_rep},
     )
     await session.commit()
-    _invalidate_wp_caches(code)
+    _invalidate_wp_caches(code, keep_hash=True)
+    if code not in _hash_cache:
+        await current_hash(session, code)
     set_detail(
         request,
         summary=f"在线修订{country_name_zh(code)}合规简报并保存为第 {saved.version_no} 版（{clean_note}）",
@@ -602,11 +643,18 @@ async def admin_review_whitepaper(
     """标记国家合规简报为「已人工审核归档」（锁定防全篇覆盖漂移）或解除锁定。"""
     from datetime import UTC, datetime
 
+    from sqlalchemy import text as sa_text
     from sqlalchemy.orm.attributes import flag_modified
 
     from app.audit.service import set_detail
 
     code = _country(country_code)
+    if code in _running:
+        raise HTTPException(409, "当前国家简报正在后台更新中，请稍后再执行审核锁定")
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"whitepaper:{code}"},
+    )
     cur = await wp.latest(session, code)
     if cur is None:
         raise HTTPException(404, "这个国家的简报还没有生成")
@@ -624,7 +672,9 @@ async def admin_review_whitepaper(
     cur.report = rep
     flag_modified(cur, "report")
     await session.commit()
-    _invalidate_wp_caches(code)
+    _invalidate_wp_caches(code, keep_hash=True)
+    if code not in _hash_cache:
+        await current_hash(session, code)
     action_zh = "审核归档锁定" if body.approved else "解除归档锁定"
     set_detail(
         request,
@@ -647,6 +697,7 @@ async def admin_rollback_whitepaper(
     from datetime import UTC, datetime
 
     from sqlalchemy import select
+    from sqlalchemy import text as sa_text
 
     from app.audit.service import set_detail
 
@@ -655,6 +706,10 @@ async def admin_rollback_whitepaper(
     code = _country(country_code)
     if code in _running:
         raise HTTPException(409, "当前国家简报正在后台更新中，请稍后再执行回退")
+    await session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+        {"k": f"whitepaper:{code}"},
+    )
     target = await session.scalar(
         select(wp.CountryWhitepaper).where(
             wp.CountryWhitepaper.country_code == code,
@@ -669,14 +724,12 @@ async def admin_rollback_whitepaper(
 
     date_lbl = target.created_at.astimezone().strftime("%Y-%m-%d %H:%M") if target.created_at else f"第{version_no}版"
     target_rep = dict(target.report) if isinstance(target.report, dict) else {}
-    stamp = await country_lib_stamp(session, code)
-    shash = await current_hash(session, code)
+    shash = target.source_hash
     new_rep = {
         **target_rep,
         "edit_note": f"回退恢复至第 {version_no} 版（{date_lbl}）",
         "rolled_back_from": version_no,
         "rolled_back_at": datetime.now(UTC).isoformat(),
-        "lib_stamp": stamp,
     }
     saved = await wp.save(
         session,
@@ -686,6 +739,7 @@ async def admin_rollback_whitepaper(
     )
     await session.commit()
     _invalidate_wp_caches(code)
+    await current_hash(session, code)
     set_detail(
         request,
         summary=f"将{country_name_zh(code)}合规简报回退至第 {version_no} 版（生成第 {saved.version_no} 版）",

@@ -303,7 +303,7 @@ function isProsePara(raw?: string): boolean {
 .doc li { margin: 4px 0; }
 .bv-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; margin: 10px 0 14px; }
 .doc :deep(.el-table) { --el-table-border-color: #1e293b; --el-table-header-bg-color: #ffffff; --el-table-header-text-color: #000000; --el-table-text-color: #000000; width: 100% !important; margin: 0; border: 1px solid #1e293b; }
-.doc :deep(.el-table th.el-table__cell) { font-weight: 700; color: #000000; background: #ffffff; border-bottom: 1.5px solid #1e293b; height: auto; padding: 8px 0; }
+.doc :deep(.el-table th.el-table__cell) { font-weight: 600; color: #000000; background: #ffffff; border-bottom: 1.5px solid #1e293b; height: auto; padding: 8px 0; }
 .doc :deep(.el-table th.el-table__cell > .cell) { white-space: normal; word-break: keep-all; overflow-wrap: break-word; line-height: 1.45; padding: 0 8px; }
 .doc :deep(.el-table--small td.el-table__cell > .cell) { padding: 0 8px; }
 .d-sup { font-size: 13px; color: #0f172a; font-weight: 600; margin-left: 1px; line-height: 0; }

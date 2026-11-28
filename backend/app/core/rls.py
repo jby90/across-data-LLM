@@ -40,6 +40,7 @@ PUBLIC_AUDIT_TYPES = (
     "kg_country",
     "glossary_terms",
     "source_sites",
+    "agent_workflow_configs",
 )
 SET_IDENTITY = text("""SELECT set_config('app.scope', :scope, true),
     set_config('app.org_id', :org_id, true),
@@ -80,9 +81,12 @@ def system_scope(reason):
 
 def principal_identity(principal):
     role = str(principal.role)
-    scope = (
-        "platform" if role in ("platform_admin", "ops_admin") else "tenant"
-    )
+    if role == "platform_admin":
+        scope = "platform"
+    elif role == "ops_admin":
+        scope = "ops"
+    else:
+        scope = "tenant"
     return DatabaseIdentity(scope, principal.org_id, principal.user_id)
 
 

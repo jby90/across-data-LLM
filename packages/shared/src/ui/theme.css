@@ -236,6 +236,14 @@ small {
   font-size: 13px;
   font-weight: 600;
 }
+.sidebar-footer a {
+  color: #9ab5ff;
+  text-decoration: none;
+}
+.sidebar-footer a:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
 .app-body {
   margin-left: 224px;
   min-width: 0;
@@ -2004,7 +2012,11 @@ a.cy-danger-quiet:hover {
   border-radius: 999px;
   padding: 6px 16px;
   font-size: 14px;
+  font-weight: 400 !important;
   line-height: 1.5;
+}
+.el-check-tag.is-checked {
+  font-weight: 600 !important;
 }
 /* 分页统一：底部留白，靠右 */
 .el-pagination {

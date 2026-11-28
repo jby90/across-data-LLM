@@ -101,6 +101,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("POST", "/api/admin/knowledge/terminology/rebuild"): "重建法律术语",
     ("POST", "/api/admin/knowledge/terminology/references"): "登记术语出处",
     ("POST", "/api/admin/knowledge/terminology/ambiguities"): "处理术语歧义",
+    ("POST", "/api/admin/users/{user_id}/promote"): "将体验账号转入签约企业",
     ("POST", "/api/admin/agent-studio/workflow/versions/{version}/activate"): "启用流程版本",
     ("GET", "/api/admin/agent-studio/workflow/export"): "导出流程配置",
     ("POST", "/api/admin/agent-studio/workflow/import"): "导入流程配置",

@@ -92,12 +92,14 @@ def move(project, to: str, *, on: str = "", reason: str = "", by: str = "", open
     m.setdefault("history", [])
     entry: dict[str, Any] = {"state": to, "at": datetime.now(UTC).isoformat(), "by": by}
     if to == "submitted":
-        if now == "correcting" and open_authority:
+        if open_authority:
             raise FilingError(f"受理机构提的问题还有 {open_authority} 条没处理完，处理完再递交")
         m["submitted_on"] = entry["on"] = _day(on, "递交日期")
     elif to == "correcting":
         m["correction_on"] = entry["on"] = _day(on, "收到补正通知的日期")
     elif to in ("approved", "rejected"):
+        if to == "approved" and open_authority:
+            raise FilingError(f"受理机构提的问题还有 {open_authority} 条没处理完，处理完再登记批文")
         m["result_on"] = entry["on"] = _day(on, "结果日期")
         if to == "rejected":
             if not reason.strip():

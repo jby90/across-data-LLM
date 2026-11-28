@@ -172,6 +172,14 @@ def match_country(text: str) -> str | None:
     for code in COUNTRY_NAMES_ZH:
         if re.search(rf"(?<![A-Z]){code}(?![A-Z])", upper):
             matches.add(code)
+    if not matches and "SG" in COUNTRY_NAMES_ZH:
+        ambig_en_words = {
+            "IN", "IT", "AT", "NO", "US", "OR", "BY", "IS", "MY", "ME", "TO", "DO", "BE", "SO", "AS", "AM", "ID"
+        }
+        for m_iso in re.finditer(r"(?<![A-Za-z])([A-Z]{2})(?![A-Za-z])", raw):
+            cand_iso = m_iso.group(1)
+            if cand_iso in overseas_zh and cand_iso not in ambig_en_words:
+                matches.add(cand_iso)
     if not matches:
         other = country_of(raw)
         if other and other not in ("CN", "ZZ", "--"):
@@ -367,11 +375,11 @@ async def add_message(
 
 
 async def _ask(session: AsyncSession, task: AnalysisTask, slot: str, prefix: str = "") -> None:
-    countries = (
-        {c["code"]: c["name"] for c in await active_overseas_countries(session)}
-        if slot == "country_code"
-        else None
-    )
+    countries = None
+    if slot == "country_code":
+        countries = dict(COUNTRY_NAMES_ZH)
+        for c in await active_overseas_countries(session):
+            countries.setdefault(c["code"], c["name"])
     text, options = question_for(slot, countries=countries)
     await add_message(session, task.id, "assistant", (prefix + text).strip(), options, slot)
 

@@ -121,19 +121,24 @@ def create_app() -> FastAPI:
         ):
             return JSONResponse(status_code=422, content=_NUL_ERR)
         media_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
-        if media_type == "application/json" or media_type.endswith("+json"):
+        is_binary_upload = (
+            media_type.startswith("multipart/") or media_type == "application/octet-stream"
+        )
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and not is_binary_upload:
             raw_body = await request.body()
             if raw_body:
                 try:
-                    raw_body.decode("utf-8")
+                    decoded_body = raw_body.decode("utf-8")
                 except UnicodeDecodeError:
                     return JSONResponse(status_code=422, content=_UTF8_ERR)
+                if b"\x00" in raw_body or _SURROGATE_OR_NUL_RE.search(decoded_body):
+                    return JSONResponse(status_code=422, content=_NUL_ERR)
                 if _RAW_BODY_SUSPECT_RE.search(raw_body):
                     try:
                         parsed_json = _json.loads(raw_body)
                     except Exception:  # noqa: BLE001
                         parsed_json = None
-                    if b"\x00" in raw_body or _has_illegal_json_val(parsed_json):
+                    if _has_illegal_json_val(parsed_json):
                         return JSONResponse(status_code=422, content=_NUL_ERR)
 
         from app.audit import describe as audit_describe
@@ -465,11 +470,25 @@ def create_app() -> FastAPI:
             "no_change",
             "禁止修改",
             "禁止删除",
+            "严禁修改",
+            "严禁删除",
+            "不可变审计存证",
             "不可修改",
             "不可删除",
             "不可单独删除",
         )
-        if any(k in orig_msg for k in immutable_tokens):
+        protected_audit_tables = (
+            "audit_logs",
+            "llm_call_audit",
+            "source_fetch_observations",
+            "version_changes",
+            "knowledge_audit_records",
+            "document_edits",
+        )
+        if any(k in orig_msg for k in immutable_tokens) or (
+            orig_cls == "InsufficientPrivilegeError"
+            and any(tbl in orig_msg for tbl in protected_audit_tables)
+        ):
             return JSONResponse(
                 status_code=409,
                 content={"detail": "审计或存证记录受防篡改保护，禁止修改或删除"},

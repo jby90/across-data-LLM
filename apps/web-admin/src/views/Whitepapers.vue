@@ -60,19 +60,27 @@ async function update(r: Row) {
     await load()
   } catch (e) { ElMessage.error((e as Error).message) }
 }
+const downloadingKey = ref('')
 async function download(r: Row, kind: 'pdf' | 'docx') {
+  const key = `${r.country_code}-${kind}`
+  if (downloadingKey.value) return
+  downloadingKey.value = key
   try {
     const res = await fetch(`/api/admin/knowledge/whitepapers/${r.country_code}/export.${kind}`, { headers: { Authorization: `Bearer ${api.token()}` } })
-    if (!res.ok) throw new Error('下载失败，可重试')
+    if (!res.ok) {
+      let msg = '下载失败，可重试'
+      try { msg = (await res.json()).detail || msg } catch { /* 非结构化错误 */ }
+      throw new Error(msg)
+    }
     const url = URL.createObjectURL(await res.blob())
     const a = document.createElement('a'); a.href = url; a.download = serverFilename(res, `${r.country_name_zh}汽车数据合规洞察简报.${kind}`)
     document.body.appendChild(a); a.click(); a.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 30000)
-  } catch (e) { ElMessage.error((e as Error).message) }
+  } catch (e) { ElMessage.error((e as Error).message) } finally { downloadingKey.value = '' }
 }
 const highlightedCountry = ref('')
-const isMobile = ref(typeof window !== 'undefined' ? window.innerWidth <= 768 : false)
+const isMobile = ref(typeof window !== 'undefined' ? window.innerWidth <= 1360 : false)
 function syncViewport() {
-  if (typeof window !== 'undefined') isMobile.value = window.innerWidth <= 768
+  if (typeof window !== 'undefined') isMobile.value = window.innerWidth <= 1360
 }
 
 function focusCountryRow(code: string) {
@@ -104,7 +112,9 @@ onMounted(async () => {
   window.addEventListener('resize', syncViewport)
   await load()
   applyRouteCountryQuery()
-  timer = window.setInterval(() => { if (rows.value.some((r) => r.updating)) load() }, 8000)
+  timer = window.setInterval(() => {
+    if (rows.value.some((r) => r.updating || r.outdated === null)) load()
+  }, 5000)
 })
 onUnmounted(() => {
   window.removeEventListener('resize', syncViewport)
@@ -133,7 +143,16 @@ const VALID_DIM_CODES = new Set(DIMENSIONS_META.map((d) => d.code))
 const syncDialogRow = ref<Row | null>(null)
 const selectedDims = ref<string[]>([])
 const syncingDims = ref(false)
-function openSyncDialog(r: Row, presetDims: string[] = []) {
+async function openSyncDialog(r: Row, presetDims: string[] = []) {
+  if ((r.review_status === 'approved' || r.manual_edited) && !presetDims.length) {
+    try {
+      await ElMessageBox.confirm(
+        `《${r.country_name_zh}合规简报》当前包含人工审定或归档锁定内容。按章节更新将重新生成所勾选章节（未勾选章节与已锁定篇首摘要保持不变）。确认继续选择受影响章节？`,
+        '按受影响章节更新确认',
+        { confirmButtonText: '继续选择章节', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch { return }
+  }
   syncDialogRow.value = r
   const validPreset = presetDims.filter((c) => VALID_DIM_CODES.has(c))
   selectedDims.value = !isAdmin.value && validPreset.length >= DIMENSIONS_META.length
@@ -172,15 +191,19 @@ async function submitSyncDims() {
 
 // 核对时去掉的句子：每一句写了什么、为什么去掉、它引的是哪几条
 interface Dropped { dimension: string; title: string; text: string; why: string; cites: { document: string; clause: string; text: string }[] }
+const droppedLoading = ref('')
 const droppedOf = ref<{ row: Row; items: Dropped[] } | null>(null)
 async function showDropped(r: Row) {
+  droppedLoading.value = r.country_code
   try {
     const res = await api.get<{ items: Dropped[] }>(`/admin/knowledge/whitepapers/${r.country_code}/dropped`)
     droppedOf.value = { row: r, items: res.items }
-  } catch (e) { ElMessage.error((e as Error).message) }
+  } catch (e) { ElMessage.error((e as Error).message) } finally { droppedLoading.value = '' }
 }
 
 // 在线人工修订、审核归档锁定与历史版本回退
+const origBlocksJson = ref('')
+const previewVerLoading = ref<number | null>(null)
 const editorDrawer = reactive({
   open: false,
   loading: false,
@@ -203,7 +226,7 @@ async function openEditor(r: Row, defaultTab: 'edit' | 'versions' = 'edit') {
   editorDrawer.tab = defaultTab
   editorDrawer.row = r
   editorDrawer.note = ''
-  editorDrawer.approveOnSave = true
+  editorDrawer.approveOnSave = r.review_status === 'approved'
   editorDrawer.previewVerNo = null
   editorDrawer.previewBlocks = []
   try {
@@ -215,7 +238,9 @@ async function openEditor(r: Row, defaultTab: 'edit' | 'versions' = 'edit') {
     }>(`/admin/knowledge/whitepapers/${r.country_code}/versions`)
     editorDrawer.versionNo = res.version_no
     editorDrawer.reviewStatus = res.review_status || 'auto_verified'
+    editorDrawer.approveOnSave = editorDrawer.reviewStatus === 'approved'
     editorDrawer.blocks = JSON.parse(JSON.stringify(res.blocks || []))
+    origBlocksJson.value = JSON.stringify(editorDrawer.blocks)
     editorDrawer.versions = res.versions || []
   } catch (e) {
     ElMessage.error((e as Error).message)
@@ -247,6 +272,18 @@ async function saveEditedBriefing() {
 
 async function toggleReviewLock(nextApproved: boolean) {
   if (!editorDrawer.row || editorDrawer.saving) return
+  if (nextApproved && JSON.stringify(editorDrawer.blocks) !== origBlocksJson.value) {
+    try {
+      await ElMessageBox.confirm(
+        '检测到当前抽屉有尚未保存的在线修订正文，是否一并保存为新版本并标记为人工审核归档？',
+        '一并保存未提交修订',
+        { confirmButtonText: '保存并归档锁定', cancelButtonText: '取消', type: 'info' },
+      )
+    } catch { return }
+    editorDrawer.approveOnSave = true
+    await saveEditedBriefing()
+    return
+  }
   editorDrawer.saving = true
   try {
     await api.post(`/admin/knowledge/whitepapers/${editorDrawer.row.country_code}/review`, {
@@ -254,7 +291,10 @@ async function toggleReviewLock(nextApproved: boolean) {
       note: nextApproved ? '人工复核通过并归档锁定' : '解除归档锁定',
     })
     editorDrawer.reviewStatus = nextApproved ? 'approved' : 'auto_verified'
-    ElMessage.success(nextApproved ? '已标记为人工审核归档，防止自动全篇重做造成内容漂移' : '已解除归档锁定')
+    editorDrawer.approveOnSave = nextApproved
+    const verRes = await api.get<{ versions: WpVersionItem[] }>(`/admin/knowledge/whitepapers/${editorDrawer.row.country_code}/versions`).catch(() => null)
+    if (verRes?.versions) editorDrawer.versions = verRes.versions
+    ElMessage.success(nextApproved ? '已标记为人工审核归档，防止自动全篇重做造成内容漂移' : '已解除归档锁定，保存时默认保留待审状态')
     await load()
   } catch (e) {
     ElMessage.error((e as Error).message)
@@ -270,6 +310,7 @@ async function previewHistoricalVersion(v: WpVersionItem) {
     editorDrawer.previewBlocks = []
     return
   }
+  previewVerLoading.value = v.version_no
   try {
     const res = await api.get<{ blocks: WpBlock[] }>(
       `/admin/knowledge/whitepapers/${editorDrawer.row.country_code}/versions/${v.version_no}`,
@@ -278,6 +319,8 @@ async function previewHistoricalVersion(v: WpVersionItem) {
     editorDrawer.previewBlocks = res.blocks || []
   } catch (e) {
     ElMessage.error((e as Error).message)
+  } finally {
+    previewVerLoading.value = null
   }
 }
 
@@ -319,7 +362,7 @@ async function rollbackVersion(v: WpVersionItem) {
       data-testid="whitepaper-table"
       :row-class-name="({ row }: { row: Row }) => (row.country_code === highlightedCountry ? 'wp-row-highlight' : '')"
     >
-      <el-table-column label="国家" width="84" class-name="cy-col-nowrap"><template #default="{ row }"><span :data-wp-country="row.country_code">{{ row.country_name_zh }}</span></template></el-table-column>
+      <el-table-column label="国家" width="124" class-name="cy-col-nowrap"><template #default="{ row }"><span :data-wp-country="row.country_code">{{ row.country_name_zh }}</span></template></el-table-column>
       <el-table-column label="状态" min-width="144">
         <template #default="{ row }">
           <el-tag v-if="row.updating" type="warning" size="small">更新中…</el-tag>
@@ -335,15 +378,15 @@ async function rollbackVersion(v: WpVersionItem) {
       </el-table-column>
       <el-table-column label="正文篇幅" width="96" class-name="cy-col-nowrap"><template #default="{ row }">{{ row.chars ? `${row.chars.toLocaleString()} 字` : '—' }}</template></el-table-column>
       <el-table-column label="核心引证依据" min-width="186" class-name="cy-col-nowrap"><template #default="{ row }"><span class="wp-cite-basis">{{ row.documents ? `引证 ${row.documents} 部法规 · ${row.clauses} 条` : '—' }}</span></template></el-table-column>
-      <el-table-column label="引文逐句核验" min-width="148" class-name="cy-col-nowrap"><template #default="{ row }"><el-button v-if="row.available && row.dropped" link type="primary" :data-testid="`wp-dropped-${row.country_code}`" @click="showDropped(row)">已拦截剔除 {{ row.dropped }} 句</el-button><span v-else class="cy-status cy-status--done">{{ row.available ? '全部引证已核验' : '—' }}</span></template></el-table-column>
-      <el-table-column label="操作" width="380" :fixed="isMobile ? false : 'right'">
+      <el-table-column label="引文逐句核验" min-width="148" class-name="cy-col-nowrap"><template #default="{ row }"><el-button v-if="row.available && row.dropped" link type="primary" :loading="droppedLoading === row.country_code" :data-testid="`wp-dropped-${row.country_code}`" @click="showDropped(row)">已拦截剔除 {{ row.dropped }} 句</el-button><span v-else class="cy-status cy-status--done">{{ row.available ? '全部引证已核验' : '—' }}</span></template></el-table-column>
+      <el-table-column label="操作" width="426" :fixed="isMobile ? false : 'right'">
         <template #default="{ row }">
           <div class="wp-ops">
             <el-button v-if="canSyncDims && row.available" size="small" :disabled="row.updating" :data-testid="`wp-edit-${row.country_code}`" @click="openEditor(row, 'edit')">在线修订/版本</el-button>
             <el-button v-if="canSyncDims && row.available" size="small" type="primary" plain :disabled="row.updating" :data-testid="`wp-sync-${row.country_code}`" @click="openSyncDialog(row)">按章节更新</el-button>
             <el-button v-if="isAdmin" size="small" :disabled="row.updating" :data-testid="`wp-update-${row.country_code}`" @click="update(row)">{{ row.available ? '全篇更新' : '生成' }}</el-button>
-            <el-button v-if="row.available" size="small" link type="primary" @click="download(row, 'pdf')">PDF</el-button>
-            <el-button v-if="row.available" size="small" link type="primary" @click="download(row, 'docx')">Word</el-button>
+            <el-button v-if="row.available" size="small" link type="primary" :loading="downloadingKey === `${row.country_code}-pdf`" @click="download(row, 'pdf')">PDF</el-button>
+            <el-button v-if="row.available" size="small" link type="primary" :loading="downloadingKey === `${row.country_code}-docx`" @click="download(row, 'docx')">Word</el-button>
           </div>
         </template>
       </el-table-column>
@@ -351,7 +394,7 @@ async function rollbackVersion(v: WpVersionItem) {
 
     <el-dialog :model-value="!!syncDialogRow" :title="syncDialogRow ? `按受影响章节更新 · ${syncDialogRow.country_name_zh}合规简报` : ''" width="min(620px, 94vw)" @close="syncDialogRow = null">
       <div v-if="syncDialogRow" class="sync-body">
-        <p class="drop-lead">法规发生局部修订并完成审核后，请勾选本次受影响的简报章节。系统将重新检索对应条文并编写所选章节，同步刷新篇首摘要，其余未变动章节原样保留。</p>
+        <p class="drop-lead">法规发生局部修订并完成审核后，请勾选本次受影响的简报章节（<template v-if="!isAdmin">运维权限单次最多勾选 7 个受影响章节；</template>其余未变动章节原样保留）。</p>
         <div class="dim-tags" data-testid="wp-sync-dims">
           <el-check-tag v-for="d in DIMENSIONS_META" :key="d.code" :checked="selectedDims.includes(d.code)" :data-testid="`wp-dim-${d.code}`" @change="toggleDim(d.code)">{{ d.label }}</el-check-tag>
         </div>
@@ -454,7 +497,7 @@ async function rollbackVersion(v: WpVersionItem) {
                 <span v-if="v.review_status === 'approved'" class="wp-sub-note"> · 已审核归档</span>
               </div>
               <div class="wp-ops">
-                <el-button size="small" link type="primary" :data-testid="`wp-ver-preview-${v.version_no}`" @click="previewHistoricalVersion(v)">{{ editorDrawer.previewVerNo === v.version_no ? '收起预览' : '预览正文' }}</el-button>
+                <el-button size="small" link type="primary" :loading="previewVerLoading === v.version_no" :data-testid="`wp-ver-preview-${v.version_no}`" @click="previewHistoricalVersion(v)">{{ editorDrawer.previewVerNo === v.version_no ? '收起预览' : '预览正文' }}</el-button>
                 <el-button v-if="!v.is_latest" size="small" type="primary" plain :loading="editorDrawer.saving" :data-testid="`wp-ver-rollback-${v.version_no}`" @click="rollbackVersion(v)">一键回退至此版</el-button>
               </div>
             </div>

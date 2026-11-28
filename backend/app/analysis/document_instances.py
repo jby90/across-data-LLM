@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -47,11 +47,13 @@ class DocumentInstance(Base):
 
 class DocumentEdit(Base):
     __tablename__ = "document_edits"
+    __table_args__ = (Index("ix_document_edits_task_code", "task_id", "doc_code"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    instance_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("document_instances.id", ondelete="CASCADE"), index=True
-    )
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    org_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    doc_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     user_name: Mapped[str] = mapped_column(String(128), default="")
     place: Mapped[str] = mapped_column(String(128))
@@ -83,6 +85,20 @@ class DocumentInstanceVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+def _block_summary_text(b: dict) -> str:
+    kind = b.get("type")
+    if kind in ("title", "heading", "subheading", "paragraph"):
+        return str(b.get("text") or "")
+    if kind == "list":
+        return "；".join(str(x or "") for x in (b.get("items") or []))
+    if kind == "table":
+        return " | ".join(
+            " / ".join(str(c or "") for c in (r or []))
+            for r in (b.get("rows") or [])
+        )
+    return ""
+
+
 def diff_blocks(cur_blocks: list[dict], target_blocks: list[dict]) -> list[tuple[str, str, str]]:
     """Compute (place, before_text, after_text) differences from cur_blocks to target_blocks."""
     diffs: list[tuple[str, str, str]] = []
@@ -91,6 +107,9 @@ def diff_blocks(cur_blocks: list[dict], target_blocks: list[dict]) -> list[tuple
         cb, tb = cur_blocks[b_idx], target_blocks[b_idx]
         kind = cb.get("type")
         if kind != tb.get("type"):
+            c_sum, t_sum = _block_summary_text(cb), _block_summary_text(tb)
+            if c_sum != t_sum:
+                diffs.append((f"第 {b_idx + 1} 段结构调整", c_sum, t_sum))
             continue
         if kind in ("title", "heading", "subheading", "paragraph"):
             c_txt = str(cb.get("text") or "")
@@ -100,23 +119,37 @@ def diff_blocks(cur_blocks: list[dict], target_blocks: list[dict]) -> list[tuple
         elif kind == "list":
             c_items = cb.get("items") or []
             t_items = tb.get("items") or []
-            for i_idx in range(min(len(c_items), len(t_items))):
-                c_txt = str(c_items[i_idx] or "")
-                t_txt = str(t_items[i_idx] or "")
+            max_i = max(len(c_items), len(t_items))
+            for i_idx in range(max_i):
+                c_txt = str(c_items[i_idx] or "") if i_idx < len(c_items) else ""
+                t_txt = str(t_items[i_idx] or "") if i_idx < len(t_items) else ""
                 if c_txt != t_txt:
                     diffs.append((f"第 {b_idx + 1} 段第 {i_idx + 1} 条", c_txt, t_txt))
         elif kind == "table":
             c_rows = cb.get("rows") or []
             t_rows = tb.get("rows") or []
-            for r_idx in range(min(len(c_rows), len(t_rows))):
-                cr, tr = c_rows[r_idx] or [], t_rows[r_idx] or []
-                for col_idx in range(min(len(cr), len(tr))):
-                    c_txt = str(cr[col_idx] or "")
-                    t_txt = str(tr[col_idx] or "")
+            max_r = max(len(c_rows), len(t_rows))
+            for r_idx in range(max_r):
+                cr = (c_rows[r_idx] or []) if r_idx < len(c_rows) else []
+                tr = (t_rows[r_idx] or []) if r_idx < len(t_rows) else []
+                max_c = max(len(cr), len(tr))
+                for col_idx in range(max_c):
+                    c_txt = str(cr[col_idx] or "") if col_idx < len(cr) else ""
+                    t_txt = str(tr[col_idx] or "") if col_idx < len(tr) else ""
                     if c_txt != t_txt:
                         diffs.append(
                             (f"第 {b_idx + 1} 段表格第 {r_idx + 1} 行第 {col_idx + 1} 列", c_txt, t_txt)
                         )
+    if len(cur_blocks) > limit:
+        for b_idx in range(limit, len(cur_blocks)):
+            c_sum = _block_summary_text(cur_blocks[b_idx])
+            if c_sum:
+                diffs.append((f"第 {b_idx + 1} 段移除", c_sum, ""))
+    elif len(target_blocks) > limit:
+        for b_idx in range(limit, len(target_blocks)):
+            t_sum = _block_summary_text(target_blocks[b_idx])
+            if t_sum:
+                diffs.append((f"第 {b_idx + 1} 段恢复", "", t_sum))
     return diffs
 
 
@@ -168,9 +201,16 @@ def apply_edit(
     return place, before, text
 
 
-def build_xlsx(blocks: list[dict], title: str) -> bytes:
-    """Workbook with one sheet: clean typography, no raw Markdown markers, semantic 8-column widths, bordered tables, and merged prose spans."""
+def build_xlsx(
+    blocks: list[dict],
+    title: str,
+    *,
+    foreign: bool = False,
+    rtl: bool = False,
+) -> bytes:
+    """Workbook with one sheet: clean typography, no raw Markdown markers, semantic column widths, bordered tables, and merged prose/grid spans."""
     import math
+    import re
 
     from openpyxl import Workbook
     from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
@@ -185,24 +225,36 @@ def build_xlsx(blocks: list[dict], title: str) -> bytes:
 
     wb = Workbook()
     ws = wb.active
-    clean_sheet = _safe_xlsx_str(title or "合规文件").translate(str.maketrans("", "", r"[]:*?/\\"))[:28] or "合规文件"
+    fallback_sheet = "Sheet1" if (foreign or rtl) else "合规文件"
+    raw_sheet = _safe_xlsx_str(title or fallback_sheet).translate(str.maketrans("", "", r"[]:*?/\\")).strip()
+    if (foreign or rtl) and re.search(r"[\u3400-\u9fff]", raw_sheet):
+        raw_sheet = re.sub(r"[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]+", " ", raw_sheet).strip(" -_·")
+    clean_sheet = raw_sheet[:28].strip() or fallback_sheet
     ws.title = clean_sheet
+    if rtl and ws.views.sheetView:
+        ws.views.sheetView[0].rightToLeft = True
 
-    max_cols = max([len(b.get("head") or []) for b in blocks if b.get("type") == "table"] + [3])
-    max_cols = min(max(max_cols, 3), 8)
+    table_col_counts = [
+        max([len(b.get("head") or []), *(len(row) for row in (b.get("rows") or [])), 0])
+        for b in blocks
+        if b.get("type") == "table"
+    ]
+    max_cols = min(max([*table_col_counts, 3]), 12)
 
-    wrap = Alignment(wrap_text=True, vertical="top")
-    head_align = Alignment(wrap_text=True, vertical="center")
-    title_font = Font(name="Microsoft YaHei", bold=True, size=14, color="000000")
-    h1_font = Font(name="Microsoft YaHei", bold=True, size=12, color="000000")
-    h2_font = Font(name="Microsoft YaHei", bold=True, size=11, color="000000")
-    body_font = Font(name="Microsoft YaHei", bold=False, size=10, color="000000")
-    th_font = Font(name="Microsoft YaHei", bold=True, size=10, color="000000")
-    th_fill = PatternFill("solid", fgColor="F5F5F5")
+    horiz = "right" if rtl else "left"
+    wrap = Alignment(horizontal=horiz, wrap_text=True, vertical="top", readingOrder=2 if rtl else 0)
+    head_align = Alignment(horizontal=horiz, wrap_text=True, vertical="center", readingOrder=2 if rtl else 0)
+    font_family = "Arial" if (foreign or rtl) else "Microsoft YaHei"
+    title_font = Font(name=font_family, bold=True, size=14, color="000000")
+    h1_font = Font(name=font_family, bold=True, size=12, color="000000")
+    h2_font = Font(name=font_family, bold=True, size=11, color="000000")
+    body_font = Font(name=font_family, bold=False, size=10, color="000000")
+    th_font = Font(name=font_family, bold=True, size=10, color="000000")
+    th_fill = PatternFill("solid", fgColor="FFFFFF")
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    col_widths = [24, 34, 38, 34, 24, 24, 22, 22]
+    col_widths = [24, 34, 38, 34, 24, 24, 22, 22, 20, 20, 18, 18]
     for idx in range(1, max_cols + 1):
         ws.column_dimensions[get_column_letter(idx)].width = col_widths[idx - 1]
     total_char_width = sum(col_widths[:max_cols])
@@ -248,7 +300,9 @@ def build_xlsx(blocks: list[dict], title: str) -> bytes:
                     cell.border = border
                 ws.row_dimensions[r].height = 24
                 r += 1
-            for row in b.get("rows") or []:
+            data_start_row = r
+            rows_list = b.get("rows") or []
+            for row in rows_list:
                 max_lines = 1
                 for j, v in enumerate(row, 1):
                     val = _safe_xlsx_str(v)
@@ -261,6 +315,35 @@ def build_xlsx(blocks: list[dict], title: str) -> bytes:
                     max_lines = max(max_lines, ln_cnt)
                 ws.row_dimensions[r].height = max(20, max_lines * 15 + 6)
                 r += 1
+            raw_spans = b.get("spans") or []
+            if raw_spans and isinstance(raw_spans[0], list):
+                for r_off, sp_row in enumerate(raw_spans):
+                    if not isinstance(sp_row, list):
+                        continue
+                    for c_off, pair in enumerate(sp_row):
+                        if not isinstance(pair, list) or len(pair) < 2:
+                            continue
+                        try:
+                            rs, cs = int(pair[0]), int(pair[1])
+                            sr = data_start_row + r_off
+                            sc = c_off + 1
+                            er = sr + rs - 1
+                            ec = sc + cs - 1
+                            if (rs > 1 or cs > 1) and sr >= data_start_row and er < r and sc >= 1 and ec <= max_cols:
+                                ws.merge_cells(start_row=sr, start_column=sc, end_row=er, end_column=ec)
+                        except Exception:  # noqa: BLE001
+                            continue
+            else:
+                for sp in raw_spans:
+                    try:
+                        sr = data_start_row + int(sp.get("r", 0))
+                        sc = int(sp.get("c", 0)) + 1
+                        er = sr + int(sp.get("rs", 1)) - 1
+                        ec = sc + int(sp.get("cs", 1)) - 1
+                        if (er > sr or ec > sc) and sr >= data_start_row and er < r and sc >= 1 and ec <= max_cols:
+                            ws.merge_cells(start_row=sr, start_column=sc, end_row=er, end_column=ec)
+                    except Exception:  # noqa: BLE001
+                        continue
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

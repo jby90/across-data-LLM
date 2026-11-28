@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -75,7 +76,29 @@ DIMENSION_TITLE_EN: dict[str, str] = {
     "D8": "VIII. Compliance Implementation Roadmap & Technical Safeguards",
 }
 
+def _load_iso_country_en() -> dict[str, str]:
+    import json
+    from pathlib import Path
+
+    p = Path(__file__).with_name("iso_countries.json")
+    if not p.exists():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        out: dict[str, str] = {}
+        for code, info in raw.items():
+            if isinstance(info, dict) and info.get("en"):
+                en_name = str(info["en"])
+                out[code.upper()] = en_name
+                if info.get("zh"):
+                    out[str(info["zh"])] = en_name
+        return out
+    except (OSError, ValueError):
+        return {}
+
+
 COUNTRY_EN: dict[str, str] = {
+    **_load_iso_country_en(),
     "CN": "China", "中国": "China",
     "SG": "Singapore", "新加坡": "Singapore",
     "MA": "Morocco", "摩洛哥": "Morocco",
@@ -406,6 +429,17 @@ PHRASE_DICT_EN: tuple[tuple[str, str], ...] = (
     ("数据出境安全评估", "CAC Outbound Data Security Assessment"),
     ("个人信息出境标准合同备案", "PRC Standard Contract Filing"),
     ("免予申报安全评估、订立标准合同、通过认证", "Statutory Exemption Route"),
+    ("正式申报递交前人工核签清单", "Pre-Submission Manual Sign-Off Checklist"),
+    ("出境路径判断待补", "Outbound Transfer Route Determination Pending"),
+    ("签署标准合同条款并采取加密措施", "Execute Standard Contractual Clauses (SCCs) and implement encryption safeguards"),
+    ("禁止向境外提供重要信息", "Prohibit outbound transfer of important data without statutory clearance"),
+    ("实施端到端加密", "Implement end-to-end encryption safeguards"),
+    ("未按规定履行告知义务", "Failure to fulfill statutory transparency notice obligations"),
+    ("标准合同条款", "Standard Contractual Clauses (SCCs)"),
+    ("加密措施", "encryption safeguards"),
+    ("端到端加密", "end-to-end encryption"),
+    ("告知义务", "transparency notice obligations"),
+    ("重要信息", "important data"),
 )
 
 SYSTEM_DOC_EN = (
@@ -427,6 +461,7 @@ def strip_and_translate_cjk(text: Any, fallback: str = "—") -> str:
     if text is None:
         return fallback
     s = _CTRL_RE.sub("", str(text)).strip()
+    s = re.sub(r"_{0,2}CYSH_SECRET_[A-Za-z0-9_.\-]*_{0,2}", "", s, flags=re.IGNORECASE).strip()
     if not s:
         return fallback
 
@@ -476,7 +511,12 @@ def strip_and_translate_cjk(text: Any, fallback: str = "—") -> str:
     s = re.sub(r"\s+([,.;:)])", r"\1", s)
     s = re.sub(r"([(])\s+", r"\1", s)
     s = s.strip(" -;,:")
-    return s if s else fallback
+    if not s or not re.search(r"[A-Za-z0-9]", s):
+        return fallback
+    if _CJK_RE.search(str(text)):
+        if s.lower() in {"co., ltd.", "ltd.", "inc.", "corp.", "llc", "plc", "gmbh", "s.a."}:
+            return "Designated Corporate Entity" if fallback in ("", "—") else fallback
+    return s
 
 
 def _collect_translatable_slots(blocks: list[dict]) -> list[str]:
@@ -520,12 +560,28 @@ def _apply_translated_slots(blocks: list[dict], translated: list[str]) -> list[d
             if items:
                 out.append({"type": "list", "items": items})
         elif btype == "table":
-            head = [_next(fallback="Column") for _ in (b.get("head") or [])]
+            is_no_head = bool(b.get("no_head"))
+            spans = b.get("spans") if isinstance(b.get("spans"), list) else None
+            head = [_next(fallback="" if is_no_head else "Column") for _ in (b.get("head") or [])]
             rows: list[list[str]] = []
-            for r in b.get("rows") or []:
+            for r_i, r in enumerate(b.get("rows") or []):
                 if isinstance(r, list):
-                    rows.append([_next(fallback="—") for _ in r])
+                    row_out: list[str] = []
+                    for c_i, _ in enumerate(r):
+                        covered = bool(
+                            spans
+                            and r_i < len(spans)
+                            and isinstance(spans[r_i], list)
+                            and c_i < len(spans[r_i])
+                            and spans[r_i][c_i] == [0, 0]
+                        )
+                        row_out.append(_next(fallback="" if covered else "—"))
+                    rows.append(row_out)
             tbl: dict[str, Any] = {"type": "table", "head": head, "rows": rows}
+            if is_no_head:
+                tbl["no_head"] = True
+            if spans is not None:
+                tbl["spans"] = spans
             if b.get("widths"):
                 tbl["widths"] = list(b["widths"])
             out.append(tbl)
@@ -555,6 +611,28 @@ def _zh_numeral_to_int(s: str) -> int | None:
     return total if total > 0 else None
 
 
+_NON_LATIN_SCRIPT_RE = re.compile(
+    r"[\u0370-\u04ff\u0530-\u077f\u08a0-\u0dff\u0e00-\u10ff\u1780-\u17ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]"
+)
+
+
+def _is_clean_latin_quote(orig_q: str) -> bool:
+    return bool(orig_q and not _NON_LATIN_SCRIPT_RE.search(orig_q) and re.search(r"[A-Za-z]", orig_q))
+
+
+def _valid_slot_strings(src_slots: list[str], cand: object) -> list[str] | None:
+    if not isinstance(cand, list) or len(cand) != len(src_slots):
+        return None
+    out: list[str] = []
+    for src_s, val in zip(src_slots, cand, strict=True):
+        if not isinstance(val, str) or val.strip() == "None":
+            return None
+        if str(src_s).strip() and not val.strip():
+            return None
+        out.append(val)
+    return out
+
+
 def _build_english_citation_table(
     citations: list[dict],
     translated_excerpts: dict[int, str] | None = None,
@@ -562,13 +640,15 @@ def _build_english_citation_table(
     """Build a verbatim original-language / English statutory reference table with zero CJK characters."""
     if not citations:
         return []
+    from app.analysis.multilingual_report import _truncate_at_sentence_or_word
+
     rows: list[list[str]] = []
     tr_map = translated_excerpts or {}
     for i, c in enumerate(citations[:16], 1):
         orig_title = str(c.get("original_title") or "").strip()
         zh_title = str(c.get("document_title") or "").strip()
         law_en = strip_and_translate_cjk(
-            orig_title if orig_title and not _CJK_RE.search(orig_title) else zh_title,
+            orig_title if _is_clean_latin_quote(orig_title) else zh_title,
             fallback="Applicable Data Protection Statute",
         )
         clause_raw = str(c.get("clause_number") or "").strip()
@@ -583,15 +663,13 @@ def _build_english_citation_table(
         orig_q = str(c.get("quote_original") or "").strip()
         if i in tr_map and tr_map[i].strip():
             excerpt = strip_and_translate_cjk(tr_map[i], fallback="")
-        elif orig_q and not _CJK_RE.search(orig_q) and re.search(r"[A-Za-z]", orig_q):
-            excerpt = _CTRL_RE.sub("", orig_q)[:420].strip()
-            if len(orig_q) > 420:
-                excerpt = excerpt.rsplit(" ", 1)[0] + "..."
+        elif _is_clean_latin_quote(orig_q):
+            excerpt = _truncate_at_sentence_or_word(orig_q, 420, lang="en")
         else:
             cand = strip_and_translate_cjk(c.get("quote_zh") or orig_q, fallback="")
             words = re.findall(r"[A-Za-z]{3,}", cand)
             if len(words) >= 8 and not re.search(r"(?:[.,;:]\s*){2,}", cand):
-                excerpt = cand[:380]
+                excerpt = _truncate_at_sentence_or_word(cand, 380, lang="en")
             else:
                 excerpt = (
                     f"Mandatory statutory data protection and cross-border compliance requirement under "
@@ -613,7 +691,9 @@ def _build_english_citation_table(
 
 def _allow_live_llm_now() -> bool:
     """Respect explicit env gate; before 22:00 off-peak window or when disabled, use deterministic mode unless forced."""
-    flag = os.environ.get("CYSH_ENGLISH_REPORT_LLM", "auto").strip().lower()
+    raw_en = os.environ.get("CYSH_ENGLISH_REPORT_LLM")
+    raw_ml = os.environ.get("CYSH_MULTILINGUAL_REPORT_LLM")
+    flag = (raw_en if raw_en is not None else (raw_ml if raw_ml is not None else "auto")).strip().lower()
     if flag in ("0", "false", "off", "no"):
         return False
     if flag in ("1", "true", "on", "yes", "force"):
@@ -647,12 +727,20 @@ async def build_english_doc_blocks(
         code,
         ("Cross-Border Automotive Data Compliance Report", f"Compliance_Report_{code.upper()}_EN"),
     )
-    src_en = strip_and_translate_cjk(values.get("source_country") or "", fallback="Source Jurisdiction")
-    rcp_en = strip_and_translate_cjk(values.get("recipient_country") or "", fallback="Recipient Jurisdiction")
+    from app.analysis.document_basis import country_of
+
+    src_raw = str(values.get("source_country") or "").strip()
+    rcp_raw = str(values.get("recipient_country") or "").strip()
+    src_iso = country_of(src_raw) or src_raw.upper()
+    rcp_iso = country_of(rcp_raw) or rcp_raw.upper()
+    src_en = COUNTRY_EN.get(src_iso) or COUNTRY_EN.get(src_raw) or strip_and_translate_cjk(src_raw, fallback="Source Jurisdiction")
+    rcp_en = COUNTRY_EN.get(rcp_iso) or COUNTRY_EN.get(rcp_raw) or strip_and_translate_cjk(rcp_raw, fallback="Recipient Jurisdiction")
     veh_en = strip_and_translate_cjk(veh_raw, fallback="Applicable Connected Vehicle")
     scn_en = strip_and_translate_cjk(scn_raw, fallback="Cross-Border Automotive Telematics & Data Processing")
     comp_raw = str(values.get("company_name") or "").strip()
     comp_en = strip_and_translate_cjk(comp_raw, fallback="Designated Automotive Data Controller") if comp_raw else "Designated Automotive Data Controller"
+    if comp_en.strip().lower() in {"co., ltd.", "ltd.", "inc.", "corp.", "llc", "plc", "gmbh", "s.a."} or len(comp_en.strip()) < 5:
+        comp_en = "Designated Automotive Data Controller"
 
     # Strip trailing Chinese reference table from zh_blocks so we replace it with verbatim foreign/English citations
     core_zh_blocks: list[dict] = []
@@ -671,7 +759,7 @@ async def build_english_doc_blocks(
     cite_zh_slots: list[str] = []
     for idx_c, c in enumerate(citations[:16], 1):
         oq = str(c.get("quote_original") or "").strip()
-        if not (oq and not _CJK_RE.search(oq) and re.search(r"[A-Za-z]", oq)):
+        if not _is_clean_latin_quote(oq):
             non_latin_cite_indices.append(idx_c)
             cite_zh_slots.append(str(c.get("quote_zh") or oq or "")[:360])
 
@@ -689,14 +777,15 @@ async def build_english_doc_blocks(
     )
     translated_slots: list[str] | None = None
     if cached is not None and isinstance(cached.report, dict):
-        cand = cached.report.get("strings")
-        if isinstance(cand, list) and len(cand) == len(slots):
-            translated_slots = [str(x) for x in cand]
+        translated_slots = _valid_slot_strings(slots, cached.report.get("strings"))
 
     if translated_slots is None and (force_llm or _allow_live_llm_now()) and not read_only_viewer and slots and task_org_id is not None:
         try:
             from app.core.config import get_settings
+            from app.core.redaction import bind_egress, llm_scope
+            from app.iam.models import Organization
 
+            org = await session.get(Organization, task_org_id)
             st = get_settings()
             eff_model = (
                 "deepseek-chat"
@@ -707,37 +796,47 @@ async def build_english_doc_blocks(
             merged_out: list[str] = []
             total_tok = 0
             batch_size = 45
-            for start in range(0, len(slots), batch_size):
-                chunk = slots[start : start + batch_size]
-                llm_res = await call_llm_json(
-                    [
-                        {"role": "system", "content": SYSTEM_DOC_EN},
-                        {"role": "user", "content": json.dumps({"strings": chunk}, ensure_ascii=False)},
-                    ],
-                    max_tokens=4096,
-                    model=eff_model,
-                )
-                total_tok += int(llm_res.total_tokens or 0)
-                arr = llm_res.data.get("strings") if isinstance(llm_res.data, dict) else None
-                if not isinstance(arr, list) or len(arr) != len(chunk):
-                    raise LlmUnavailableError("English slot count mismatch")
-                merged_out.extend(str(x) for x in arr)
+            with llm_scope():
+                bind_egress(session, org)
+                for start in range(0, len(slots), batch_size):
+                    chunk = slots[start : start + batch_size]
+                    llm_res = await call_llm_json(
+                        [
+                            {"role": "system", "content": SYSTEM_DOC_EN},
+                            {"role": "user", "content": json.dumps({"strings": chunk}, ensure_ascii=False)},
+                        ],
+                        max_tokens=8192,
+                        model=eff_model,
+                    )
+                    total_tok += int(llm_res.total_tokens or 0)
+                    arr = _valid_slot_strings(chunk, llm_res.data.get("strings") if isinstance(llm_res.data, dict) else None)
+                    if arr is None:
+                        raise LlmUnavailableError("English slot count mismatch or empty/None slot")
+                    merged_out.extend(arr)
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
             translated_slots = merged_out
-            session.add(
-                DocumentNarrative(
-                    org_id=task_org_id,
-                    task_id=task_id,
-                    code=cache_code,
-                    inputs_hash=sig_hash,
-                    blocks=[],
-                    report={"strings": translated_slots},
-                    tokens=total_tok,
+            async with session.begin_nested():
+                await session.execute(
+                    pg_insert(DocumentNarrative)
+                    .values(
+                        id=uuid.uuid4(),
+                        org_id=task_org_id,
+                        task_id=task_id,
+                        code=cache_code,
+                        inputs_hash=sig_hash,
+                        blocks=[],
+                        report={"strings": translated_slots},
+                        tokens=total_tok,
+                    )
+                    .on_conflict_do_nothing(constraint="uq_document_narrative_inputs")
                 )
-            )
             await session.commit()
+            session.info.pop("latest_templates", None)
             await session.refresh(task)
         except Exception:  # noqa: BLE001
             await session.rollback()
+            session.info.pop("latest_templates", None)
             await session.refresh(task)
             translated_slots = None
 
@@ -798,9 +897,15 @@ def build_english_consulting_report_blocks(
     dimension: str | None = None,
 ) -> tuple[list[dict], str, str]:
     """Build zero-CJK English blocks for an 8-dimension consulting ReportVersion."""
-    cc_en = COUNTRY_EN.get(str(task.country_code or "").upper(), str(task.country_code or "Target Jurisdiction"))
+    cc_iso = str(task.country_code or "").strip().upper()
+    cc_en = (
+        COUNTRY_EN.get(cc_iso)
+        or (strip_and_translate_cjk(cc_iso, fallback="Target Jurisdiction") if cc_iso and len(cc_iso) > 2 else "Target Jurisdiction")
+    )
     veh_en = strip_and_translate_cjk(task.vehicle_model or "", fallback="Intelligent Connected Vehicle")
     scn_en = strip_and_translate_cjk(task.scenario_type or "", fallback="Cross-Border Automotive Data Operations")
+    edited_meta = ((getattr(rv, "consulting_json", None) or {}).get("edited") or {}) if isinstance(getattr(rv, "consulting_json", None), dict) else {}
+    edited_dims = set(edited_meta.get("dimensions") or [])
     title_en = (
         f"{cc_en} Automotive Cross-Border Data Compliance Assessment ({dimension})"
         if dimension
@@ -873,11 +978,17 @@ def build_english_consulting_report_blocks(
                     "rows": f_rows,
                 }
             )
+            if (dcode in edited_dims or getattr(rv, "status", "") == "edited") and (d.get("content_markdown") or "").strip():
+                fb_rev = f"Updated counsel assessment recorded in edition v{getattr(rv, 'version_no', 1)} for {dtitle}."
+                md_rev = strip_and_translate_cjk(d.get("content_markdown") or "", fallback=fb_rev)
+                if len(re.sub(r"[^A-Za-z]", "", md_rev)) < 16:
+                    md_rev = fb_rev
+                blocks.append({"type": "paragraph", "text": md_rev})
         else:
-            md_en = strip_and_translate_cjk(
-                d.get("content_markdown") or "",
-                fallback=f"Applicable statutory controls under {dtitle} in {cc_en} must be maintained across vehicle-to-cloud data pipelines.",
-            )
+            fb_md = f"Applicable statutory controls under {dtitle} in {cc_en} must be maintained across vehicle-to-cloud data pipelines."
+            md_en = strip_and_translate_cjk(d.get("content_markdown") or "", fallback=fb_md)
+            if len(re.sub(r"[^A-Za-z]", "", md_en)) < 16:
+                md_en = fb_md
             blocks.append({"type": "paragraph", "text": md_en})
 
         recs = d.get("key_recommendations") or []
@@ -885,11 +996,11 @@ def build_english_consulting_report_blocks(
             rec_items = [
                 strip_and_translate_cjk(
                     r,
-                    fallback=f"Implement verifiable technical and contractual safeguards aligned with {cc_en} statutory requirements.",
+                    fallback=f"Control #{r_idx}: Implement verifiable technical and contractual safeguards aligned with {cc_en} ({dtitle}) statutory requirements.",
                 )
-                for r in recs
+                for r_idx, r in enumerate(recs, 1)
             ]
-            blocks.append({"type": "list", "items": [x for x in rec_items if x]})
+            blocks.append({"type": "list", "items": [x for x in rec_items if x and re.search(r"[A-Za-z0-9]", x)]})
 
         for c in d.get("citations") or []:
             ckey = f"{c.get('document_title')}:{c.get('clause_number')}"

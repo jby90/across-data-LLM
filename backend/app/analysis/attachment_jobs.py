@@ -113,32 +113,37 @@ async def start_review(session: AsyncSession, task: AnalysisTask) -> list[att.Ta
 async def _job(factory: async_sessionmaker, task_id: uuid.UUID, file_ids: list[uuid.UUID]) -> None:
     from app.analysis.chat import add_message
     from app.core.redaction import bind_egress, llm_scope
+    from app.core.resource_gate import background_job_gate
     from app.iam.models import Organization
 
-    async with factory() as session:
-        try:
-            task = await session.get(AnalysisTask, task_id)
-            if task is None:
-                return
-            files = list((await session.scalars(select(att.TaskAttachment).where(att.TaskAttachment.id.in_(file_ids)).order_by(att.TaskAttachment.created_at))).all())
-            org = await session.get(Organization, task.org_id) if task.org_id else None
-            with llm_scope():
-                bind_egress(session, org)  # 公司名称与自定义词在出站前先做脱敏
-                await perform_review(session, task, files)
-        except Exception as exc:  # noqa: BLE001 - 后台任务：失败要写进对话，不能悄悄消失
-            log.exception("文件对照失败")
-            await session.rollback()
-            why = str(exc) if isinstance(exc, NarrativeError) else "服务暂时不可用"
-            await session.execute(
-                select(AnalysisTask.id).where(AnalysisTask.id == task_id).with_for_update()
-            )
-            for f in (await session.scalars(select(att.TaskAttachment).where(att.TaskAttachment.id.in_(file_ids)))).all():
-                f.review_state, f.review_error = "failed", why[:500]
-            await add_message(
-                session, task_id, "assistant",
-                f"文件对照没有完成（{why}）。你可以直接说“重新对照”，或点文件旁的“重试”。",
-            )
-            await session.commit()
+    async with background_job_gate():
+        async with factory() as session:
+            try:
+                task = await session.get(AnalysisTask, task_id)
+                if task is None or task.archived_at is not None:
+                    return
+                files = list((await session.scalars(select(att.TaskAttachment).where(att.TaskAttachment.id.in_(file_ids)).order_by(att.TaskAttachment.created_at))).all())
+                org = await session.get(Organization, task.org_id) if task.org_id else None
+                with llm_scope():
+                    bind_egress(session, org)  # 公司名称与自定义词在出站前先做脱敏
+                    await perform_review(session, task, files)
+            except Exception as exc:  # noqa: BLE001 - 后台任务：失败要写进对话，不能悄悄消失
+                log.exception("文件对照失败")
+                await session.rollback()
+                why = str(exc) if isinstance(exc, NarrativeError) else "服务暂时不可用"
+                locked_task = await session.scalar(
+                    select(AnalysisTask).where(AnalysisTask.id == task_id).with_for_update()
+                )
+                if locked_task is None or locked_task.archived_at is not None:
+                    await session.rollback()
+                    return
+                for f in (await session.scalars(select(att.TaskAttachment).where(att.TaskAttachment.id.in_(file_ids)))).all():
+                    f.review_state, f.review_error = "failed", why[:500]
+                await add_message(
+                    session, task_id, "assistant",
+                    f"文件对照没有完成（{why}）。你可以直接说“重新对照”，或点文件旁的“重试”。",
+                )
+                await session.commit()
 
 
 async def perform_review(session: AsyncSession, task: AnalysisTask, files: list[att.TaskAttachment]) -> None:
@@ -160,6 +165,10 @@ async def perform_review(session: AsyncSession, task: AnalysisTask, files: list[
     await session.execute(
         select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update()
     )
+    await session.refresh(task)
+    if task.archived_at is not None:
+        await session.rollback()
+        return
     session.add(
         att.AttachmentReview(
             org_id=task.org_id, attachment_id=anchor.id, country_code=country,

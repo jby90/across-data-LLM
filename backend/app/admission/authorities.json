@@ -120,5 +120,74 @@
   "负责电信的部": "突尼斯通信技术部",
   "个人数据保护机构（Instance）": "突尼斯国家个人数据保护局（INPDP）",
   "国家个人数据保护机构（Instance Nationale de Protection des Données à Caractère Personnel）": "突尼斯国家个人数据保护局（INPDP）"
+ },
+ "AE": {
+  "数据保护专员": "阿联酋数据办公室（UAE Data Office）",
+  "数据保护专员（Commissioner of Data Protection）": "阿联酋数据办公室（UAE Data Office）"
+ },
+ "AU": {
+  "信息专员（出具证明书）；负责部长（批准）": "澳大利亚信息专员公署（OAIC）；澳大利亚联邦律政部"
+ },
+ "CA": {
+  "部": "",
+  "部（Minister）": "",
+  "部长": "",
+  "部长（Minister）": ""
+ },
+ "DE": {
+  "联邦机动车运输管理局（Kraftfahrt-Bundesamt）": "德国联邦机动车运输管理局（KBA）",
+  "Kraftfahrt-Bundesamt（联邦机动车运输管理局）": "德国联邦机动车运输管理局（KBA）",
+  "联邦网络局（Bundesnetzagentur）": "德国联邦网络局（BNetzA）",
+  "Bundesnetzagentur（联邦网络局）": "德国联邦网络局（BNetzA）",
+  "联邦网络局": "德国联邦网络局（BNetzA）",
+  "联邦网络局（Bundesnetzagentur）和欧盟委员会": "德国联邦网络局（BNetzA）；欧盟委员会",
+  "Zulassungsbehörde": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "Zulassungsbehörde（车辆准入主管机构）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "Zulassungsbehörde（车辆准入主管机关）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "Zulassungsbehörde（车辆登记主管机关）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "Zulassungsbehörde（车辆登记机关）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "车辆登记机关（Zulassungsbehörde）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "机动车登记机关（Zulassungsbehörde）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "主管车辆登记机关（zuständige Zulassungsbehörde）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "机动车登记机关": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "车辆注册主管机构": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "主管机关（车辆登记机关）": "德国地方机动车登记机关（Zulassungsbehörde）",
+  "zuständige Behörde": "",
+  "Genehmigungsbehörde（批准机关）": "德国联邦机动车运输管理局（KBA）",
+  "Genehmigungsbehörde（型式批准主管机关）": "德国联邦机动车运输管理局（KBA）"
+ },
+ "DZ": {
+  "国家个人数据保护局": "阿尔及利亚国家个人数据保护局（ANPDP）"
+ },
+ "ES": {
+  "工业主管部门": "西班牙工业与旅游部（MINTUR）",
+  "交通总局中央交通管理局（Jefatura Central de Tráfico）": "西班牙交通总局（DGT）"
+ },
+ "MY": {
+  "首席执行官": ""
+ },
+ "NG": {
+  "尼日利亚数据保护委员会": "尼日利亚数据保护委员会（NDPC）",
+  "The Commission": "尼日利亚数据保护委员会（NDPC）"
+ },
+ "PK": {
+  "管理局（Authority）或其为此指定的机构": "巴基斯坦电信管理局（PTA）"
+ },
+ "QA": {
+  "最高委员会": "卡塔尔通信与信息技术部（MCIT）"
+ },
+ "SA": {
+  "Competent Authority": "沙特数据与人工智能管理局（SDAIA）",
+  "主管机构（Competent Authority）": "沙特数据与人工智能管理局（SDAIA）"
+ },
+ "SE": {
+  "Transportstyrelsen（瑞典交通局）": "瑞典交通局（Transportstyrelsen）",
+  "godkännandemyndigheten（型式认证主管机构）": "瑞典交通局（Transportstyrelsen）",
+  "Godkännandemyndigheten（型式认证主管机构）": "瑞典交通局（Transportstyrelsen）",
+  "godkännandemyndigheten（型式认证批准机构）": "瑞典交通局（Transportstyrelsen）",
+  "godkännandemyndigheten（认证主管机构）": "瑞典交通局（Transportstyrelsen）"
+ },
+ "ZA": {
+  "Regulator": "南非信息监管机构（Information Regulator）"
  }
 }

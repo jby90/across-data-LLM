@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { COUNTRY_NAMES, localTime } from '@cyshuhe/shared'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import TerminologyLibrary from '../components/TerminologyLibrary.vue'
@@ -413,7 +413,14 @@ async function createTerm() {
   }
 }
 
+const isCompact = ref(typeof window !== 'undefined' ? window.innerWidth <= 1024 : false)
+function syncCompact() {
+  if (typeof window !== 'undefined') isCompact.value = window.innerWidth <= 1024
+}
+
 onMounted(async () => {
+  syncCompact()
+  window.addEventListener('resize', syncCompact)
   await Promise.all([
     api
       .get<typeof countryOptions.value>('/admin/knowledge/countries')
@@ -431,6 +438,10 @@ onMounted(async () => {
       }),
     loadAll(),
   ])
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncCompact)
 })
 </script>
 
@@ -596,7 +607,7 @@ onMounted(async () => {
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="160" fixed="right"
+          <el-table-column label="操作" width="160" :fixed="isCompact ? false : 'right'"
             ><template #default="{ row }"
               ><el-button size="small" type="primary" link @click="openTranslationReview(row)"
                 >查看译文</el-button

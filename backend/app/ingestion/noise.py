@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-_NAV_TOKENS = re.compile(r"学习强国|返回顶部|打印本页|关闭窗口|第\s*\d+\s*页\s*[，,/]?\s*共\s*\d+\s*页|第\s*\d+\s*页\s*of\s*\d+|\bPage\s+\d+\s+of\s+\d+\b|【\s*字体[:：]?\s*大\s*中\s*小\s*】|【\s*打印\s*】|【\s*关闭\s*】")
+_NAV_TOKENS = re.compile(r"学习强国|返回顶部|打印本页|关闭窗口|Nichtamtliches\s+Inhaltsverzeichnis|非官方目录|第\s*\d+\s*页\s*[，,/]?\s*共\s*\d+\s*页|第\s*\d+\s*页\s*of\s*\d+|\bPage\s+\d+\s+of\s+\d+\b|【\s*字体[:：]?\s*大\s*中\s*小\s*】|【\s*打印\s*】|【\s*关闭\s*】", re.IGNORECASE)
 _NAV_LINE = re.compile(
     r"^\s*(分享到[:：]?.*|扫一扫.{0,20}|相关链接[:：]?|附件下载[:：]?|下载附件[:：]?|上一篇[:：].*|下一篇[:：].*|责任编辑[:：].{0,20}|"
     r"来源[:：].{0,30}|浏览次数[:：].{0,10}|字号[:：]?\s*大\s*中\s*小|back to top|print this page|share this page)\s*$",
@@ -53,16 +53,31 @@ _GAZETTE_SEGMENT2 = re.compile(
 )
 
 _CONTACT = re.compile(
-    r"(电话|固定电话|座机|手机|传真|电子邮件|邮箱|网址|T[ée]l\.?|Fax|E-?mail|Phone|Land\s*Line|Mobile|Cell(?:ular)?|هاتف|فاكس)\s*[:：]?\s*[+(\d]|@[\w-]+\.\w|"
-    r"\b(T[ée]l|Fax)\s*[:：]\s*\d"
-    , re.IGNORECASE,
+    r"(电话|固定电话|座机|手机|传真|电子邮件|邮箱|网址|T[ée]l\.?|Telefon|Faks|Telp\.?|Telepon|Fax|E-?mail|Courriel|Phone|Land\s*Line|Mobile|Cell(?:ular)?|هاتف|فاكس)\s*[:：]\s*[+(\dA-Za-z]|"
+    r"\b(T[ée]l|Telefon|Faks|Fax)\s*[:：]\s*\d",
+    re.IGNORECASE,
+)
+_STATUTORY_CLAUSE_LINE_RE = re.compile(
+    r"^\s*(?:[（(][0-9a-zA-Z一二三四五六七八九十]+[）)]|\d+[.、)）]|[a-zA-Z][.)])\s+\S|"
+    r"\b(?:shall|must|may|within|days?|hours?|notify|notification|submit|submitted|sent\s+to|addressed\s+to|article|section|"
+    r"doit|doivent|peut|dans\s+les|jours?|heures?|notifier|d[ée]clar[ée]e?s?|adress[ée]e?s?|transmise?s?|"
+    r"hat|muss|m[üu]ssen|innerhalb|tagen?|stunden?|melden|meldung|artikel|absatz|"
+    r"deber[áa]n?|deve|devem|entro|dentro\s+de|d[íi]as?|horas?|notificar|art[íi]culo|artigo|"
+    r"i[çc]inde|g[üu]n|saat|bildir\w*|madde)\b|"
+    r"应当|必须|不得|可以|日内|小时内|通知|报送|提交|发送至|递交至|申报|يجب|يتعين|خلال|إخطار|إشعار|المادة",
+    re.IGNORECASE,
 )
 _ADDRESS = re.compile(r"大道|大街|大楼|街\s*\d|路\s*\d|\d+\s*号楼|层\b|第\s*\d+\s*层|邮编|B\.?P\.?\s*\d|Avenue|Angle|Rue|Immeuble|Hay\s|Bd\.?|boulevard", re.IGNORECASE)
 
-_FR_ORD = r"(?:[\dIVXLC]+|1er|1[eè]re|Ier|IIe|premier|premi[eè]re|deuxi[eè]me|troisi[eè]me|quatri[eè]me|cinqui[eè]me|sixi[eè]me|septi[eè]me|huiti[eè]me|neuvi[eè]me|dixi[eè]me|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|onze|douze|pr[ée]liminaire|unique)"
+_FR_ORD = r"(?:[\dIVXLC]+|1er|1[eè]re|Ier|IIe|premier|premi[eè]re|deuxi[eè]me|troisi[eè]me|quatri[eè]me|cinqui[eè]me|sixi[eè]me|septi[eè]me|huiti[eè]me|neuvi[eè]me|dixi[eè]me|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|onze|douze|pr[ée]liminaire|unique|primero|primera|segundo|segunda|tercero|tercera|cuarto|cuarta|quinto|quinta|primo|prima|secondo|seconda|terzo|terza|eerste|tweede|derde|vierde|birinci|ikinci|[üu][çc][üu]nc[üu]|pierwszy|drugi|trzeci)"
 _HEADING = re.compile(
     r"^\s*[（(]?\s*(第\s*[一二三四五六七八九十百零\dIVXLC]+\s*(章|编|篇|部分|节|小节|分编|卷)|第\s*[一二三四五六七八九十]+\s*[：:]|序编(?:\s+\S.*)?$|"
-    r"(chapitre|chapter|titre|title|part|partie|livre|kapitel|teil|paragraphe|sous-section|subdivision|division)\s+" + _FR_ORD + r"\b(?:\s*\([*\d]+\))?(?!\s*\()|"
+    r"(chapitre|chapter|titre|title|part|partie|livre|kapitel|teil|abschnitt|unterabschnitt|paragraphe|sous-section|subdivision|division|"
+    r"hoofdstuk|afdeling|onderafdeling|titel|boek|deel|cap[íi]tulo|t[íi]tulo|secci[óo]n|se[çc][ãa]o|sezione|capo|libro|parte|"
+    r"rozdzia[łl]|dzia[łl]|oddzia[łl]|b[öo]l[üu]m|k[ıi]s[ıi]m|bab|bagian|chương|chuong|mục|muc|phần|phan|rule|глава|раздел|подраздел|часть)\s+"
+    + _FR_ORD
+    + r"\.?(\b|(?=\s|$|[:.\-–—]))(?:\s*\([*\d]+\))?(?!\s*\()|"
+    r"(\d+|[IVXLC]+)\.\s*(?:b[öo]l[üu]m|k[ıi]s[ıi]m)\b|"
     r"section\s+" + _FR_ORD + r"\.?(?:\s*\([*\d]+\))?(?:\s*[:.\-–—]\s*\D|\s*$)|"
     r"Section\s+\d+[A-Za-z]*(?:\(\d+\))?\s*$|"
     r"(الباب|الفصل|القسم|الكتاب|الفرع)(?:\s+\S+|(?:ال|األ|الأ)\S*))",
@@ -78,7 +93,12 @@ _INLINE_LAW_REF_RE = re.compile(
     re.IGNORECASE,
 )
 _LINK_INTRO_RE = re.compile(
-    r"(?:\b(?:at|on|via|from|to|in|or|ou|visit|see|website|portal|url|au|sur|à|sous)\s*$|[:：—–-]\s*$|(?:\bonline\s+at|网址为|网站|载于|详见|登录|访问|发送至|发至)\s*$)",
+    r"(?:\b(?:at|on|via|from|to|in|or|ou|visit|see|website|portal|url|au|aux|sur|à|sous|"
+    r"unter|an|[üu]ber|por|para|mediante|en|presso|tramite|naar|op|przez|na|pod|[üu]zerinden|adresine|"
+    r"через|по\s+адресу|на\s+адрес)\s*$|"
+    r"(?:عبر|على|إلى)\s*$|"
+    r"[:：—–-]\s*$|"
+    r"(?:\bonline\s+at|网址为|网站|载于|详见|参见|见|登录|访问|发送至|发至|提交至|报送至|申报至|递交至|寄送至|通过|经由|或|或者|以及|及|至|于|在)\s*$)",
     re.IGNORECASE,
 )
 _BARE_EMAIL_LINE_RE = re.compile(r"^\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}[.;,。；]?\s*$")
@@ -161,10 +181,19 @@ def _drop_contact_block(lines: list[str]) -> list[str]:
     (most of its text is contact lines) is content, not a letterhead, and stays."""
     drop: set[int] = set()
     for i, line in enumerate(lines):
-        if len(line.strip()) <= 120 and _CONTACT.search(line):
-            if _BARE_EMAIL_LINE_RE.match(line):
-                prev_ne = next((lines[p].strip() for p in range(i - 1, -1, -1) if lines[p].strip()), "")
-                if _LINK_INTRO_RE.search(prev_ne):
+        s_ln = line.strip()
+        m_contact = _CONTACT.search(s_ln)
+        is_letterhead_contact = m_contact is not None and m_contact.start() < 24
+        if len(s_ln) <= 120 and not _STATUTORY_CLAUSE_LINE_RE.search(s_ln) and (is_letterhead_contact or _BARE_EMAIL_LINE_RE.match(s_ln)):
+            prev_ne = next((lines[p].strip() for p in range(i - 1, -1, -1) if lines[p].strip()), "")
+            if is_letterhead_contact:
+                if ("@" in s_ln or re.search(r"https?://|www\.", s_ln, re.IGNORECASE)) and prev_ne and _LINK_INTRO_RE.search(prev_ne):
+                    continue
+            elif _BARE_EMAIL_LINE_RE.match(s_ln):
+                if prev_ne and (
+                    _LINK_INTRO_RE.search(prev_ne)
+                    or (_STATUTORY_CLAUSE_LINE_RE.search(prev_ne) and not re.search(r"[.。!！?？]\s*$", prev_ne))
+                ):
                     continue
             drop.add(i)
             j = i - 1
@@ -187,21 +216,28 @@ def _split(text: str) -> list[str]:
 _HIJRI = r"(朱马达|主马达|赖比尔|舍尔邦|斋月|穆哈兰|萨法尔|拉贾布|沙瓦勒|都尔喀尔德|都尔黑哲|回历)"
 _GAZETTE_DATELINE = re.compile(r"^\s*第\s*\d{3,5}\s*号\s*[—–-]+\s*\d{1,2}\s*" + _HIJRI + r".{0,60}$")
 _PAGE_NO_LINE = re.compile(r"^\s*[/／|]\s*\d{1,3}\s*[/／|]\s*$|^\s*[.…·．]{4,}\s*$|^\s*[-–—]\s*\d{1,3}\s*[-–—]\s*$")
-_TABLE_RESIDUE = re.compile(r"现行费率\s*$|^\s*\([A-Za-z]\)\s*车载事件数据记录器|^\s*\d+\s*或签发或续期")
-_FORM_RESIDUE = re.compile(r"w\s*w\s*w\s*\.\s*c\s*n\s*d\s*p\s*\.\s*m\s*a|Strictement réservé à la CNDP|严格保留给\s*CNDP|CNDP-F\d{3}\s*\d+/\d+|^\s*S\s*\d{1,4}\s*/\s*\d{4}\s*$|SAMPLE\s+XYZ|第\s*\d+\s*页的第\s*\d+\s*页|^\s*\d{1,3}\s*$", re.IGNORECASE)
+_FORM_WATERMARK_INLINE = re.compile(
+    r"w(?:\s+w){2}\s*\.\s*c\s+n\s+d\s+p\s*\.\s*m\s+a|Strictement réservé à la CNDP|严格保留给\s*CNDP|CNDP-F\d{3}\s*\d+/\d+|SAMPLE\s+XYZ|第\s*\d+\s*页的第\s*\d+\s*页",
+    re.IGNORECASE,
+)
+_FORM_RESIDUE = re.compile(r"^\s*S\s*\d{1,4}\s*/\s*\d{4}\s*$|^\s*\d{1,3}\s*$", re.IGNORECASE)
 
 
 # 条文开头的小标题和条号乱序（“同意的撤回的同意 16。——（1）”“本法4的适用。——”“需要取得同意\n13。”）、
 # 公报修订标记（“[22/2016]”“1 S 86/2026”）、页眉（“个人数据保护”单独一行）、条文末尾带出的下一章标题
-_AMEND_TAG = re.compile(r"[ \t]*\[\s*(?:\d{1,3}\s*/\s*(?:19|20)\d{2}|Act\s+\d+\s+of\s+(?:19|20)\d{2}[^\]]*|S\s*\d{1,4}\s*/\s*(?:19|20)\d{2}[^\]]*|(?:19|20)\d{2}\s*年第\s*\d+\s*号法[^\]]*)\s*\]|[ \t]*(?:\b\d\s+)?\bS\s*\d{1,4}\s*/\s*20\d{2}\b")
-_SRC_AMEND_TAG = re.compile(r"[ \t]*\[\s*(?:Act\s+\d+\s+of\s+(?:19|20)\d{2}|S\s*\d{1,4}\s*/\s*(?:19|20)\d{2}|\d{1,3}\s*/\s*(?:19|20)\d{2})(?:\s+(?:wef|w\.e\.f\.)\s+[^\]]*)?\s*\]|[ \t]*(?:\b\d\s+)?\bS\s*\d{1,4}\s*/\s*(?:19|20)\d{2}\b")
+_AMEND_TAG = re.compile(r"[ \t]*\[\s*(?:\d{1,3}\s*/\s*(?:19|20)\d{2}|Act\s+\d+\s+of\s+(?:19|20)\d{2}[^\]]*|S\s*\d{1,4}\s*/\s*(?:19|20)\d{2}[^\]]*|(?:19|20)\d{2}\s*年第\s*\d+\s*号法[^\]]*)\s*\]|[ \t]*(?:\b\d\s+)?\bS\s*\d{1,4}\s*/\s*(?:19|20)\d{2}\b")
+_SRC_AMEND_TAG = re.compile(r"[ \t]*\[\s*(?:\d{1,3}\s*/\s*(?:19|20)\d{2}|Act\s+\d+\s+of\s+(?:19|20)\d{2}[^\]]*|S\s*\d{1,4}\s*/\s*(?:19|20)\d{2}[^\]]*)\s*\]|[ \t]*(?:\b\d\s+)?\bS\s*\d{1,4}\s*/\s*(?:19|20)\d{2}\b")
+_SRC_LEAD_SECTION = re.compile(
+    r"^\s*(?:Section|Sec\.|Subdivision|Paragraphe|Sous-section)\s+\d+\s*[—–\-]+\s*[^\n/]{1,60}[\n/]\s*(?=(?:Article|Art\.)\s+\d+\b)",
+    re.IGNORECASE,
+)
 _AR_GAZETTE_LINE = re.compile(r"^\s*(?:[\d٠-٩]{1,4}\s*)?(?:الوقائع\s*المصرية|الجريدة\s*الرسمية)\s*(?:[—–-]+\s*)?(?:العدد|عدد)[^\n.。]{0,90}$")
-_RUNNING_HEAD = re.compile(r"(?m)^[ \t]*个人数据保护(?:（Personal Data Protection）)?[ \t]*$\n?|[ \t]*个人数据保护（Personal Data Protection）")
+_RUNNING_HEAD = re.compile(r"(?m)^[ \t]*个人数据保护(?:（Personal Data Protection）)?[ \t]*$\n?")
 _LEAD_NUM = re.compile(r"^(?!第)(?:[^\n。；：（()\d]|（[^）\n]{1,30}）|\([^)\n]{1,30}\)){1,50}?[ \t]*(?:/[ \t]*|\n+)?(\d{1,3}[A-Z]{0,2})(?:[ \t]*[.。][ \t]*[—–-]{1,3}[ \t]*(?=[（(\d]|[一-鿿A-Za-z])|[ \t]*[.。](?!\d)[ \t]*(?=[（(]|[一-鿿A-Za-z]))")
 _LEAD_NUM_EMBEDDED = re.compile(r"^(?!第)[^\n。；：（()\d]{0,30}?(\d{1,3}[A-Z]{0,2})[^\n。；：（()\d]{0,14}[.。][ \t]*[—–-]{2,3}[ \t]*")
 _LEAD_NUM_ARTICLE = re.compile(r"^(?!第)[^\n。；]{2,60}?第(\d{1,3}[A-Z]{0,2})条[.。]?[ \t]*[—–-]{2,3}[ \t]*")
 _LEAD_NUM_SPACED = re.compile(r"^(?!第)[^\n。；：]{2,50}?\s(\d{1,3}[A-Z]{0,2})[ \t]*。[ \t]*[—–-]{2,3}[ \t]*")
-_LEAD_SECTION = re.compile(r"^第\s*\d+\s*(?:节|条(?=\s*[—–-]+\s*关于))\s*[—–-]*\s*[^\n/]{0,30}[\n/]\s*(?=第\s*\d+\s*条)")
+_LEAD_SECTION = re.compile(r"^第\s*\d+\s*(?:节\s*[—–-]+|条(?=\s*[—–-]+\s*关于)\s*[—–-]+)\s*[^\n/]{0,30}[\n/]\s*(?=第\s*\d+\s*条)")
 _TAIL_HEADING = re.compile(r"(?<=[。；\n])\s*(?:第\s*[一二三四五六七八九十]+\s*[：:][^。；\n]{2,40}|第\s*[IVXLC]+\s*章[^。；\n]{0,40})\s*$")
 
 
@@ -238,24 +274,48 @@ _TAIL_CHAPTER = re.compile(r"(?<=[。；\n])\s*第[一二三四五六七八九�
 _TAIL_ITEM_HEAD = re.compile(r"\n[ \t]*第[一二三四五六七八九十]+[，,][^。；\n]{2,30}。?\s*$")
 
 
+_MARGIN_UNIT_GUARD = (
+    r"(?:(?i:days?|months?|years?|hours?|minutes?|seconds?|weeks?|working|business|calendar|per\s*cent|percent|"
+    r"jours?|mois|ans?|ann[ée]es?|heures?|secondes?|semaines?|ouvrables?|"
+    r"tagen?|monaten?|jahren?|stunden?|sekunden?|wochen?|werktagen?|prozent|"
+    r"d[íi]as?|meses|a[ñn]os?|horas?|segundos?|semanas?|h[áa]biles|[úu]teis|"
+    r"giorn[io]|mesi|ann[io]|ore|settiman[ea]|lavorativ[io]|"
+    r"dagen|maanden|jaren|uren|weken|werkdagen|"
+    r"dni(?:ach)?|miesi[ęe]cy|lat(?:ach)?|godzin\w*|tygodni\w*|roboczych|"
+    r"g[üu]n\w*|ay\w*|y[ıi]l\w*|saat\w*|hafta\w*|i[şs]\s*g[üu]n\w*|"
+    r"hari|bulan|tahun|jam|minggu|ng[àa]y|th[áa]ng|n[ăa]m|gi[ờo]|tu[ầa]n|"
+    r"to|or|and|[àa]|ou|bis|oder|"
+    r"дн(?:ей|я|ень|ями|ях)|суток|сутк\w*|месяц\w*|лет|год\w*|час\w*|минут\w*|секунд\w*|недел\w*|рабоч\w*|календарн\w*|процент\w*|рубл\w*|тысяч\w*|миллион\w*|до|или)\b|"
+    r"(?:يوم(?:اً|ا)?|أيام|شهر(?:اً|ا)?|أشهر|شهور|سن(?:ة|وات)|عام(?:اً|ا)?|أعوام|ساع(?:ة|ات)|دقيق(?:ة|ات)|دقائق|ثاني(?:ة|ات)|ثوان|"
+    r"أسبو(?:ع|عين)|أسابيع|عمل|تقويم\w*|بالمئة|بالمائة|في\s*المئة|في\s*المائة|درهم\w*|دينار\w*|جنيه\w*|ريال\w*|ليرة|ألف|آلاف|مليون|ملايين|إلى|أو)(?![\u0600-\u06ff])|"
+    r"年|个月|月|日|天|周|星期|礼拜|小时|时|分钟|分|秒|工作日|自然日|历日|营业日|人|万|千|百|亿|"
+    r"元|镑|迪拉姆|第纳尔|新元|里拉|美元|欧元|卢布|日元|日圆|韩元|泰铢|盾|比索|雷亚尔|法郎|瑞郎|克朗|兹罗提|谢克尔|卢比|塔卡|兰特|奈拉|坚戈|索姆|林吉特|"
+    r"円|원|บาท|일|개월|월|년|시간|분|초|주|영업일|퍼센트|パーセント|営業日|時間|週間|か月|ヶ月|ヵ月|วัน|เดือน|ปี|ชั่วโมง|นาที|วินาที|สัปดาห์|เปอร์เซ็นต์|"
+    r"项|条|款|目|章|节|段|编|步|处|份|部|类|种|个|次|家|名|位|辆|台|套|张|页|米|千米|公里|倍|成|级|档|号|版|分之|至|到|或|及|与|以上|以下|以内|%|％)"
+)
+
+
 def clean_text(text: str | None) -> str:
     """Any clause text (original or translation)."""
     if not text:
         return text or ""
     text = re.sub(r"[\ufffe\uE000-\uF8FF]", "", text)
     text = re.sub(r"(?i)\bCNDP-F\d{3}[ \t]*\n[ \t]*\d{1,3}/\d{1,3}\b", "", text)
+    text = _FORM_WATERMARK_INLINE.sub("", text)
     text = _SRC_AMEND_TAG.sub("", text)
-    if len(set(re.findall(r"(?m)^[ \t]*(5|10|15|20|25|30|35)[ \t]+", text))) >= 2:
+    text = _SRC_LEAD_SECTION.sub("", text)
+    if len(set(re.findall(r"(?m)^[ \t]*(5|10|15|20|25|30|35|40|45|50)[ \t]+", text))) >= 2:
         text = re.sub(
-            r"(?m)^[ \t]*(?:5|10|15|20|25|30|35)[ \t]+(?=(?!days?\b|months?\b|years?\b|hours?\b|minutes?\b|working\b|business\b|calendar\b|per\s*cent\b)[a-z(（“\"])",
+            rf"(?m)^[ \t]*(?:5|10|15|20|25|30|35|40|45|50)[ \t]+(?=(?!{_MARGIN_UNIT_GUARD})"
+            r"[\u4e00-\u9fffA-Za-zÀ-žА-Яа-яЁё\u0600-\u06ff\u3040-\u30ff\uac00-\ud7af\u0e00-\u0e7f（(第“\"«「『])",
             "",
             text,
         )
-    text = "\n".join(ln for ln in text.split("\n") if not (_GAZETTE_DATELINE.match(ln) or _AR_GAZETTE_LINE.match(ln) or _PAGE_NO_LINE.match(ln) or _FORM_RESIDUE.search(ln) or _TABLE_RESIDUE.search(ln)))
+    text = "\n".join(ln for ln in text.split("\n") if not (_GAZETTE_DATELINE.match(ln) or _AR_GAZETTE_LINE.match(ln) or _PAGE_NO_LINE.match(ln) or _FORM_RESIDUE.match(ln)))
     out = _NAV_TOKENS.sub("", text)
     out = _TRAILING_EXPLANATORY_BILL_RE.sub("", out)
     out = re.sub(r"([；;，,])\s*\1", r"\1", out)  # 去掉页脚后留下的重复标点
-    out = re.sub(r"(电话|固定电话|座机|手机|传真|电子邮件|T[ée]l\.?|Fax|Phone|Land\s*Line|Mobile|Cell(?:ular)?)\s*[:：]\s*[+()\d][\d\s()+/\-–]{5,}[；;，,]?\s*", "", out, flags=re.IGNORECASE) if len(out) > 200 else out
+    out = re.sub(r"(电话|固定电话|座机|手机|传真|电子邮件|T[ée]l\.?|Telefon|Faks|Telp\.?|Telepon|Fax|Phone|Land\s*Line|Mobile|Cell(?:ular)?)\s*[:：]\s*[+()\d][\d\s()+/\-–]{5,}[；;，,]?\s*", "", out, flags=re.IGNORECASE)
     raw_lines = _split(out)
     lines: list[str] = []
     for ln in raw_lines:
@@ -276,15 +336,6 @@ def clean_text(text: str | None) -> str:
     return cleaned if len(cleaned.strip()) >= 10 else text
 
 
-_TERMS = [
-    (re.compile(r"\s*[（(]\s*[lL][’']?Instance\s*[）)]"), ""),
-    (re.compile(r"réception à titre isolé", re.IGNORECASE), "单车验收"),
-    (re.compile(r"(?<![A-Za-z])homologation(?![A-Za-z])", re.IGNORECASE), "型式认证"),
-    (re.compile(r"(?<![A-Za-z])[lL][’']Instance(?![A-Za-z]|\s+Nationale)"), "该机构"),
-    (re.compile(r"(?<![A-Za-z’'])Instance(?![A-Za-z]|\s+Nationale)"), "该机构"),
-]
-
-
 def clean_translation(text: str | None) -> str:
     """A Chinese translation: the rules above, plus gazette segments inside sentences and Arabic
     fragments the translation left behind."""
@@ -301,9 +352,6 @@ def clean_translation(text: str | None) -> str:
     out = "\n".join(ln for ln in out.split("\n") if not _GAZETTE_LINE.match(ln))
     # 译文开头残留的外文条号行（“Article 28”“Art. 5 :”）：条号已在前面写了
     out = re.sub(r"^\s*(Article|Art\.?|Section)\s*\d+[A-Za-z]*\s*[:：.]?\s*(\n|[/／]\s*)", "", out)
-    # 译文里没译的法文、英文术语：固定译法（只换整词）
-    for pat, zh in _TERMS:
-        out = pat.sub(zh, out)
     # 列举项编号：第 9 项之后紧跟的“1 ”其实是“10 ”（识别时丢了 0）；只改紧跟 9 号项、后面接中文的“1 ”
     out = re.sub(r"(?<=\n)(9[ 、.]\s*[^\n]{4,300}[；;。]\s*\n)1(?=\s+[一-鿿])", lambda m: m.group(1) + "10", out)
     # 新加坡等法典修订版标注“2020 Ed.”若被误译为“第2020条 Ed.”，还原为“2020年修订版”
@@ -312,6 +360,17 @@ def clean_translation(text: str | None) -> str:
     out = re.sub(r"(?<=[一-鿿）)》\]\d])\s*(?<![A-Za-z])of(?![A-Za-z])\s*(?=[一-鿿《（(第])", "的", out)
     # 阿拉伯文法律引用“第 173 号、2023 年”译成了“173 年第 2023 号”：年份和编号颠倒的换回来
     out = re.sub(r"(?<![0-9])([0-9]{1,3})\s*年第\s*((?:19|20)[0-9]{2})\s*号", r"\2年第\1号", out)
+    # 欧洲日-月-年语序误排为“30年6月2003日”（不可能存在 2003 日）或德文序数点残留“2014年2月26.日”：确定性归正为“YYYY年M月D日”
+    out = re.sub(
+        r"(?<![0-9])([12]?[0-9]|3[01])\s*年\s*(1[0-2]|0?[1-9])\s*月\s*((?:18|19|20)[0-9]{2})\s*日",
+        lambda m: f"{int(m.group(3))}年{int(m.group(2))}月{int(m.group(1))}日",
+        out,
+    )
+    out = re.sub(
+        r"((?:18|19|20)[0-9]{2})\s*年\s*(1[0-2]|0?[1-9])\s*月\s*([12]?[0-9]|3[01])\.\s*日",
+        lambda m: f"{int(m.group(1))}年{int(m.group(2))}月{int(m.group(3))}日",
+        out,
+    )
     if _CJK.search(out) and re.search(_ARABIC, out):
         out = out.translate(_INDIC_DIGITS)
         out = re.sub(r"٪\s*(\d+(?:,\d{3})*(?:\.\d+)?)", r"\1%", out)

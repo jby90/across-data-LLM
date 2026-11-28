@@ -29,6 +29,8 @@ from app.iam.schemas import (
     PortalRegisterRequest,
     RedactionTermsIn,
     TokenResponse,
+    TrialPromoteIn,
+    TrialUserOut,
     UserCreate,
     UserOut,
     UserUpdate,
@@ -127,6 +129,7 @@ async def admin_exchange(
 
 def _profile_out(user: User, org: Organization | None) -> AccountProfileOut:
     role = Role(user.role)
+    is_trial = bool(org is not None and service.is_trial_org_name(org.name))
     return AccountProfileOut(
         id=user.id,
         email=user.email,
@@ -137,6 +140,7 @@ def _profile_out(user: User, org: Organization | None) -> AccountProfileOut:
         org_name=service.strip_trial_org_suffix(org.name) if org is not None else None,
         signup_source=user.signup_source,
         can_export=role != Role.VIEWER or bool(user.can_export),
+        is_trial=is_trial,
     )
 
 
@@ -369,6 +373,67 @@ async def list_users(
     if org_id is not None:
         stmt = stmt.where(User.org_id == org_id)
     return (await session.execute(stmt)).scalars().all()
+
+
+@admin_router.get("/trial-users", response_model=list[TrialUserOut], summary="门户独立体验空间账号列表")
+async def list_trial_users(
+    _: Principal = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    rows = (
+        await session.execute(
+            select(User, Organization)
+            .join(Organization, Organization.id == User.org_id)
+            .where(Organization.name.like(f"%{service.TRIAL_ORG_MARKER}%"))
+            .order_by(User.created_at.desc())
+        )
+    ).all()
+    return [
+        TrialUserOut(
+            id=u.id,
+            email=u.email,
+            display_name=u.display_name,
+            org_id=u.org_id,
+            org_name=service.strip_trial_org_suffix(o.name),
+            is_active=u.is_active,
+        )
+        for u, o in rows
+    ]
+
+
+@admin_router.post("/users/{user_id}/promote", response_model=UserOut, summary="将体验空间账号转入正式签约企业")
+async def promote_trial_user(
+    user_id: uuid.UUID,
+    body: TrialPromoteIn,
+    request: Request,
+    _: Principal = Depends(require_super_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    from app.audit.service import set_detail
+
+    if body.role not in USER_ROLES:
+        raise HTTPException(422, "仅可转入企业用户（编辑者）或普通查看者角色")
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "账号不存在")
+    cur_org = await session.get(Organization, user.org_id) if user.org_id else None
+    if cur_org is None or not service.is_trial_org_name(cur_org.name):
+        raise HTTPException(422, "该账号已归属正式单位，请直接在企业账号列表中调整角色")
+    dest_org = await session.get(Organization, body.org_id)
+    if dest_org is None or service.is_trial_org_name(dest_org.name) or not dest_org.is_active:
+        raise HTTPException(404, "目标签约企业不存在或已停用")
+    user.org_id = dest_org.id
+    user.role = body.role.value
+    user.signup_source = "admin"
+    user.can_export = bool(body.can_export) and body.role == Role.VIEWER
+    user.is_active = True
+    set_detail(
+        request,
+        summary=f"将体验空间账号“{user.email}”转入签约企业“{dest_org.name}”（{ROLE_ZH.get(body.role, body.role.value)}）",
+        after={"org_id": str(dest_org.id), "role": user.role, "can_export": user.can_export},
+    )
+    await session.commit()
+    return user
 
 
 # ---- 用户端 ----

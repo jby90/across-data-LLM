@@ -9,7 +9,7 @@ import {
   type RunOut,
   type SiteOut, localTime } from '@cyshuhe/shared'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { COUNTRY_NAMES } from '@cyshuhe/shared/src/regulationDirectory'
@@ -227,7 +227,18 @@ async function showRuns(site: SiteOut) {
   runsDrawer.value = true
 }
 
-onMounted(load)
+const isMobile = ref(typeof window !== 'undefined' ? window.innerWidth <= 768 : false)
+function syncViewport() {
+  if (typeof window !== 'undefined') isMobile.value = window.innerWidth <= 768
+}
+onMounted(() => {
+  syncViewport()
+  window.addEventListener('resize', syncViewport)
+  void load()
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', syncViewport)
+})
 </script>
 
 <template>
@@ -279,7 +290,7 @@ onMounted(load)
       max-height="calc(100vh - 240px)"
       scrollbar-always-on
     >
-      <el-table-column v-if="!country" label="国家" width="70" class-name="cy-col-nowrap">
+      <el-table-column v-if="!country" label="国家" width="96" class-name="cy-col-nowrap">
         <template #default="{ row }">{{ COUNTRY_NAMES[row.country_code] || row.country_code }}</template>
       </el-table-column>
       <el-table-column label="官方发布机构与门户入口" min-width="196">
@@ -313,10 +324,10 @@ onMounted(load)
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="最近更新时间" width="144" class-name="cy-col-nowrap">
+      <el-table-column label="最近更新时间" width="168" class-name="cy-col-nowrap">
         <template #default="{ row }">{{ fmt(row.latest_discovered_at || row.last_run_at || row.terms_decided_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="166" fixed="right" class-name="cy-col-nowrap cy-col-ops">
+      <el-table-column label="操作" width="166" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap cy-col-ops">
         <template #default="{ row }">
           <div class="site-ops">
             <el-button v-if="row.attention && row.enabled && row.terms_status === 'approved'" link type="primary" size="small" @click="triggerRunNow(row)">立即检查</el-button>
@@ -346,10 +357,10 @@ onMounted(load)
       max-height="calc(100vh - 240px)"
       scrollbar-always-on
     >
-      <el-table-column v-if="!country" label="国家" width="70" class-name="cy-col-nowrap">
+      <el-table-column v-if="!country" label="国家" width="96" class-name="cy-col-nowrap">
         <template #default="{ row }">{{ COUNTRY_NAMES[row.country_code] || row.country_code }}</template>
       </el-table-column>
-      <el-table-column label="官方发布机构" min-width="156" show-overflow-tooltip>
+      <el-table-column label="官方发布机构" min-width="156">
         <template #default="{ row }"><b>{{ row.publisher }}</b></template>
       </el-table-column>
       <el-table-column label="导入的法规文件" min-width="200">
@@ -368,10 +379,10 @@ onMounted(load)
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="入库时间" width="144" class-name="cy-col-nowrap">
+      <el-table-column label="入库时间" width="168" class-name="cy-col-nowrap">
         <template #default="{ row }">{{ fmt(row.latest_discovered_at || row.terms_decided_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="124" align="center" fixed="right" class-name="cy-col-nowrap">
+      <el-table-column label="操作" width="124" align="center" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap">
         <template #default="{ row }">
           <el-button v-if="row.document_count > 0" link type="primary" size="small" @click="goDocuments(row)">查看法规详情</el-button>
           <span v-else style="color: #909399">已归档</span>
@@ -455,11 +466,11 @@ onMounted(load)
   </div>
 </template>
 <style scoped>
-.site-name { display: flex; align-items: baseline; gap: 10px; }
-.site-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-name { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.site-name b { white-space: normal; overflow-wrap: anywhere; }
 .site-link { flex: none; font-size: 13px; }
 .site-note.terms-note { white-space: normal; overflow: visible; }
-.site-note { display: block; font-size: 13px; line-height: 1.5; color: var(--cy-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-note { display: block; font-size: 13px; line-height: 1.5; color: var(--cy-text-2); white-space: normal; overflow-wrap: anywhere; }
 :deep(.cy-col-ops .cell) { overflow: visible; text-overflow: clip; }
 .site-ops { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .site-ops :deep(.el-button.is-link) { padding: 2px 4px; }

@@ -5,6 +5,8 @@ import asyncio
 import re
 import time as _time
 import uuid
+import weakref as _weakref
+from collections import OrderedDict as _OrderedDict
 from datetime import timedelta
 from typing import Annotated
 
@@ -35,8 +37,8 @@ UserDep = Annotated[Principal, Depends(require_user_side)]
 AdminDep = Annotated[Principal, Depends(require_platform_admin)]
 
 
-_ORG_REFRESH_LOCKS: dict[uuid.UUID, asyncio.Lock] = {}
-_ORG_REFRESH_AT: dict[uuid.UUID, float] = {}
+_ORG_REFRESH_LOCKS: _weakref.WeakValueDictionary[uuid.UUID, asyncio.Lock] = _weakref.WeakValueDictionary()
+_ORG_REFRESH_AT: _OrderedDict[uuid.UUID, float] = _OrderedDict()
 
 
 @user_router.get("")
@@ -1035,11 +1037,11 @@ async def _build_sla_linkage_report(session: AsyncSession) -> dict:
         if cc
         and cc not in ("ZZ", "INTL", "--")
         and (
-            cc != "DE"
-            or docs_by_cc.get(cc, 0) > 0
+            docs_by_cc.get(cc, 0) > 0
             or wp_by_cc.get(cc, 0) > 0
             or adm_by_cc.get(cc, 0) > 0
             or chg_by_cc.get(cc, 0) > 0
+            or disc_by_cc.get(cc, {}).get("discovered", 0) > 0
         )
     ]
     by_country = [
@@ -1115,7 +1117,7 @@ async def export_updates_sla_report(_: AdminDep, session: SessionDep) -> Respons
 
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    head_fill = PatternFill("solid", fgColor="F5F5F5")
+    head_fill = PatternFill("solid", fgColor="FFFFFF")
     head_font = Font(name="Microsoft YaHei", size=11, bold=True, color="000000")
     body_font = Font(name="Microsoft YaHei", size=10, color="000000")
 

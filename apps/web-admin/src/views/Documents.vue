@@ -12,7 +12,7 @@ import {
   type EventOut,
   type SiteOut, localTime, officialTextLabel } from '@cyshuhe/shared'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import RegulationDirectory from '../components/RegulationDirectory.vue'
@@ -35,6 +35,14 @@ const sitePublisher = ref((route.query.publisher as string) || '')
 const loading = ref(false)
 // 第 7.5 项 规则 21：法规目录收起与否记在本机
 const DIR_KEY = 'cyshuhe.admin.docs.dir-collapsed'
+const isMobile = ref(typeof window !== 'undefined' ? window.innerWidth <= 768 : false)
+function syncViewport() {
+  if (typeof window !== 'undefined') isMobile.value = window.innerWidth <= 768
+}
+window.addEventListener('resize', syncViewport)
+onUnmounted(() => {
+  window.removeEventListener('resize', syncViewport)
+})
 const dirCollapsed = ref((localStorage.getItem(DIR_KEY) ?? (window.innerWidth < 1600 ? '1' : '0')) === '1')  // 屏幕不够宽时默认收起，表格不少于约 860px
 watch(dirCollapsed, (v) => localStorage.setItem(DIR_KEY, v ? '1' : '0'))
 const fmt = (s: string | null) => localTime(s) || '—'
@@ -867,7 +875,7 @@ const COMPARE_STATUS_META: Record<
         </div>
         <el-empty v-if="!selectedGroup" :description="matchingDocs.length ? '请展开左侧国家并选择文件层级' : '当前筛选下没有文档'" :image-size="72" />
     <el-table v-if="selectedGroup" :data="visibleDocuments.items" v-loading="loading" border @row-click="open" style="cursor: pointer">
-      <el-table-column v-if="!browseCountry" label="国家" width="82" class-name="cy-col-nowrap">
+      <el-table-column v-if="!browseCountry" label="国家" width="104" class-name="cy-col-nowrap">
         <template #default="{ row }">{{ countryLabel(row.country_code) }}</template>
       </el-table-column>
       <el-table-column label="法规文件 / 官方来源" min-width="210">
@@ -939,7 +947,7 @@ const COMPARE_STATUS_META: Record<
           <el-tag v-else type="info">未取得原文</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="196" fixed="right" class-name="cy-col-nowrap">
+      <el-table-column label="操作" width="196" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap">
         <template #default="{ row }">
           <div class="doc-row-ops">
             <span v-if="row.country_code === 'CN' || row.language === 'zh'" class="sub">中文原文</span>
@@ -1366,12 +1374,11 @@ const COMPARE_STATUS_META: Record<
   color: #263c4b;
 }
 .document-source {
-  color: #8796a2;
   font-size: 13px;
+  color: #64748b;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   margin-top: 5px;
 }
 .document-title {
@@ -1382,11 +1389,9 @@ const COMPARE_STATUS_META: Record<
   text-align: left;
   font: inherit;
   font-weight: 600;
-  line-height: 1.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .document-title:hover {
   color: var(--cy-blue);

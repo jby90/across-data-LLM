@@ -219,6 +219,7 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
 
     from app.ingestion.intake_scope import scoped
     from app.ingestion.models import Clause, Document, DocumentVersion
+    from app.ingestion.noise import clean_text
     from app.knowledge.models import ClauseTranslation
     from app.knowledge.numeric_integrity import is_numeric_only
 
@@ -228,7 +229,9 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
             text(
                 "select (select md5(coalesce(string_agg(id::text || country_code || title || relevance || language || coalesce(instrument_kind,'') || coalesce(intake_scope::text,''), ',' order by id), '')) from documents where relevance in ('relevant','related')),"
                 " (select md5(coalesce(string_agg(id::text || version_no::text || state || coalesce(text_source,'') || coalesce(review_status,'') || coalesce(check_note,'') || coalesce(legal_status,''), ',' order by id), '')) from document_versions where state='parsed'),"
-                " (select count(*)::text || ':' || coalesce(max(id::text), '') || ':' || coalesce(max(updated_at)::text, '') from clause_translations where is_current and quality_check_passed and review_status in ('machine_translated','pending_review','approved'))"
+                " (select count(*)::text || ':' || coalesce(max(id::text), '') || ':' || coalesce(max(updated_at)::text, '') from clause_translations where is_current and quality_check_passed and review_status in ('machine_translated','pending_review','approved')),"
+                " (select count(*)::text || ':' || md5(coalesce(string_agg(coalesce(clause_number,'') || ':' || text_hash, ',' order by id), '')) from clauses),"
+                " (select count(*)::text || ':' || md5(coalesce(string_agg(clause_id::text || ':' || md5(reading_text), ',' order by clause_id), '')) from clause_readings)"
             )
         )
     ).one()
@@ -330,11 +333,16 @@ async def cards_in(s, country: str | None = None) -> list[dict]:
             inside = scoped(intake_sc, ver_id)
             flags = None if inside is None else [o in inside for _, _, o, _, _ in rows]
             def _is_exempt(ver_u, ord_i: int, txt_s: str) -> bool:
-                k = (ver_u, ord_i)
+                k = (ver_u, ord_i, hash(txt_s))
                 hit_ex = _EXEMPT_FRAG_CACHE.get(k)
                 if hit_ex is not None:
                     return hit_ex
-                val = is_short_fragment(txt_s) or is_numeric_only(txt_s)
+                clean_t = clean_text(txt_s)
+                val = (
+                    is_short_fragment(clean_t)
+                    or is_numeric_only(clean_t)
+                    or not any(ch.isalpha() for ch in clean_t)
+                )
                 if len(_EXEMPT_FRAG_CACHE) < 60000:
                     _EXEMPT_FRAG_CACHE[k] = val
                 return val

@@ -302,12 +302,19 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
     }
     whitepapers_outdated = 0
     if wp_by_cc:
-        from app.knowledge.whitepaper_router import known_hash
+        from app.knowledge import whitepaper_router as _wpr
+        from app.knowledge.whitepaper_router import current_hash, known_hash
+
+        if _wpr._hash_cache_kb_mark != kb_mark:
+            _wpr._hash_cache.clear()
+            _wpr._hash_cache_kb_mark = kb_mark
 
         for wp_cc, wp_meta in wp_by_cc.items():
             if wp_cc in ("CN", "ZZ", "INTL") or not wp_meta["ready"]:
                 continue
             cur_hash = await known_hash(session, wp_cc)
+            if cur_hash is None:
+                cur_hash = await current_hash(session, wp_cc)
             if cur_hash is not None and cur_hash != wp_meta["source_hash"]:
                 whitepapers_outdated += 1
 
@@ -357,12 +364,9 @@ async def _kb_posture(session: AsyncSession) -> dict[str, Any]:
         q_cards = await cards_in(session)
         for r in q_cards:
             todos = r.get("todo") or []
-            has_parse_issue = any(t.get("action") != "translate" for t in todos) or (
-                not r["card"].passed and not todos
-            )
-            if has_parse_issue:
+            if not r["card"].passed or todos:
                 quality_unpassed += 1
-            elif any(t.get("action") == "translate" for t in todos):
+            if any(t.get("action") == "translate" for t in todos):
                 translation_pending_docs += 1
     except Exception:  # noqa: BLE001
         quality_unpassed = 0
@@ -757,7 +761,7 @@ async def cockpit_overview(
             "standards_active": sum(standards_by_cc.values()),
             "intl_standards_count": intl_standards_count,
             "national_standards_count": national_standards_count,
-            "standards_cn": standards_by_cc.get("CN", national_standards_count),
+            "standards_cn": standards_by_cc.get("CN", 0),
             "standards_intl": intl_standards_count,
             "standards_international": intl_standards_count,
             "kg_nodes_total": sum(kg_nodes_by_cc.values()),

@@ -14,7 +14,6 @@ process); callers in request handlers run them in a worker thread.
 
 from __future__ import annotations
 
-import gc
 import hashlib
 import io
 import os
@@ -54,7 +53,10 @@ _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 _LOCK = threading.Lock()
 _CACHE: OrderedDict[str, bytes] = OrderedDict()
-CACHE_SIZE = 32
+_CACHE_BYTES = 0
+CACHE_SIZE = 24
+MAX_CACHE_BYTES = 8 * 1024 * 1024
+MAX_ITEM_BYTES = 2 * 1024 * 1024
 TIMEOUT = 180
 
 WORD_SCRIPT = r"""
@@ -137,7 +139,8 @@ def _rewrite_ooxml_symbols(original_xml: bytes, font_name: str, *, for_libreoffi
     import copy
 
     for prefix, uri in re.findall(rb'xmlns:([A-Za-z0-9]+)="([^"]+)"', original_xml[:8000]):
-        ET.register_namespace(prefix.decode(), uri.decode())
+        if not re.fullmatch(rb"ns\d+", prefix):
+            ET.register_namespace(prefix.decode(), uri.decode())
     root = ET.fromstring(original_xml)
     changed = False
 
@@ -334,11 +337,14 @@ def _convert_dir(folder: Path, kind: str) -> None:
 
 def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
     """The PDF of each Word file, in order (batched office-suite run for all that are not cached)."""
+    global _CACHE_BYTES
     if not files:
         return []
     kind = engine()
     if kind == "builtin":
         raise PdfEngineUnavailable("本机没有可把 Word 转成 PDF 的办公软件")
+    from app.core.resource_gate import pdf_render_slot
+
     keys = [hashlib.sha256(f).hexdigest() for f in files]
     sym_font = "DejaVu Sans" if kind == "libreoffice" else "Segoe UI Symbol"
     with _LOCK:
@@ -353,7 +359,7 @@ def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
                 seen_todo.add(k)
                 todo.append((k, f))
         if todo:
-            with tempfile.TemporaryDirectory(prefix="cysh-pdf-") as tmp:
+            with pdf_render_slot(), tempfile.TemporaryDirectory(prefix="cysh-pdf-") as tmp:
                 folder = Path(tmp)
                 for i, (_, data) in enumerate(todo):
                     payload = _materialize_sym_for_libreoffice(
@@ -367,10 +373,14 @@ def docx_to_pdf_many(files: list[bytes]) -> list[bytes]:
                         raise PdfEngineUnavailable("Word 转 PDF 失败")
                     pdf_bytes = sanitize_pdf_metadata(pdf.read_bytes())
                     out[key] = pdf_bytes
-                    _CACHE[key] = pdf_bytes
-                    while len(_CACHE) > CACHE_SIZE:
-                        _CACHE.popitem(last=False)
-            gc.collect()
+                    if len(pdf_bytes) <= MAX_ITEM_BYTES:
+                        if key in _CACHE:
+                            _CACHE_BYTES -= len(_CACHE.pop(key))
+                        _CACHE[key] = pdf_bytes
+                        _CACHE_BYTES += len(pdf_bytes)
+                        while len(_CACHE) > CACHE_SIZE or _CACHE_BYTES > MAX_CACHE_BYTES:
+                            _, evicted = _CACHE.popitem(last=False)
+                            _CACHE_BYTES -= len(evicted)
         for k in keys:
             if k in _CACHE:
                 _CACHE.move_to_end(k)

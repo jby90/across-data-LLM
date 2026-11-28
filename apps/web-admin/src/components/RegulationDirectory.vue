@@ -136,8 +136,8 @@ small { color: #8494a5; margin-left: 4px; font-size: 13px; }
 .directory-file.selected { background: #eef5ff; color: #1d4ed8; box-shadow: inset 3px 0 #3b82f6; }
 .core { font-style: normal; font-size: 13px; color: #1d4ed8; background: #eff6ff; border-radius: 3px; padding: 0 4px; margin-right: 6px; }
 .dup-mark { font-style: normal; color: #4b5e6c; white-space: nowrap; }
-.directory-file .orig { display: block; margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.directory-file span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.directory-file .orig { display: block; margin: 2px 0 0; white-space: normal; line-height: 1.45; overflow-wrap: anywhere; }
+.directory-file span { display: block; line-height: 1.5; overflow-wrap: anywhere; }
 .directory-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; font-size: 13px; color: #8494a5; padding: 8px 0; }
 .directory-pagination button { min-height: 36px; padding: 4px; color: #2563eb; font-size: 13px; }
 @media (prefers-reduced-motion: reduce) { .directory-file { transition: none; } }

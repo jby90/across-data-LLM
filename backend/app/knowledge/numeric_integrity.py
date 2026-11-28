@@ -8,6 +8,82 @@ from decimal import Decimal, InvalidOperation
 NUMBER = r"\d+(?:,\d{3})*(?:\.\d+)?"
 NUMERIC = re.compile(rf"(?<!\d){NUMBER}(?:\s*%)?(?!\d)")
 
+_PERCENT_WORDS_AFTER = (
+    r"percent|per\s*cent|pour\s*cent|pourcent|prozent|procent|"
+    r"per\s*cento|percento|por\s*ciento|por\s*cento|persen|phần\s*trăm|"
+    r"процент(?:а|ов|ам|ами|ах)?|بالمئة|بالمائة|في المئة|في المائة|"
+    r"パーセント|퍼센트|เปอร์เซ็นต์"
+)
+_CURRENCY_DOT_PREFIX_RE = re.compile(
+    r"(?i)(?:€|EUR|US\$|USD|S\$|SGD|A\$|AUD|C\$|CAD|R\$|BRL|Mex\$|MXN|S/\.|PEN|Rp\.?|IDR|RM|MYR|"
+    r"£|GBP|₺|TRY|TL|₫|VND|₱|PHP|₽|RUB|₸|KZT|KGS|₪|ILS|₹|INR|PKR|৳|BDT|₦|NGN|₩|KRW|฿|THB|"
+    r"PLN|ARS|CLP|COP|ZAR|SEK|CHF|MAD|DH|TND|DT|DZD|EGP|LBP|AED|SAR|QAR|KWD|OMR|CNY|RMB|JPY|\$|"
+    r"円|원|บาท|"
+    r"欧元|美元|美金|英镑|新加坡元|新元|澳大利亚元|澳元|加拿大元|加元|人民币|日元|日圆|韩元|韩圆|泰铢|马来西亚林吉特|林吉特|"
+    r"瑞士法郎|瑞郎|法郎|"
+    r"巴西雷亚尔|雷亚尔|印度尼西亚盾|印尼盾|印尼卢比|土耳其里拉|里拉|越南盾|波兰兹罗提|兹罗提|菲律宾比索|"
+    r"墨西哥比索|阿根廷比索|智利比索|哥伦比亚比索|比索|秘鲁索尔|索尔|迪拉姆|阿联酋迪拉姆|摩洛哥迪拉姆|"
+    r"第纳尔|突尼斯第纳尔|科威特第纳尔|阿尔及利亚第纳尔|里亚尔|沙特里亚尔|卡塔尔里亚尔|阿曼里亚尔|"
+    r"埃及镑|黎巴嫩镑|俄罗斯卢布|卢布|瑞典克朗|克朗|哈萨克斯坦坚戈|坚戈|吉尔吉斯斯坦索姆|索姆|"
+    r"以色列新谢克尔|新谢克尔|谢克尔|印度卢比|巴基斯坦卢比|孟加拉塔卡|塔卡|南非兰特|兰特|尼日利亚奈拉|奈拉)\s*$"
+)
+_CURRENCY_DOT_SUFFIX_RE = re.compile(
+    r"(?i)^\s*(?:€|EUR|euros?|US\$|USD|dollars?|S\$|SGD|A\$|AUD|C\$|CAD|R\$|reais|real|BRL|Mex\$|MXN|"
+    r"S/\.|soles|PEN|Rp\.?|rupiah|IDR|RM|MYR|ringgit|£|GBP|Egyptian\s+pounds?|pounds?|livres?|"
+    r"₺|TRY|TL|t[üu]rk\s+liras\w*|liras?\b|₫|đồng|VND|₱|PHP|pesos?|ARS|CLP|COP|"
+    r"zł|PLN|złot\w*|₽|RUB|rubles?|рубл\w*|₸|KZT|KGS|₪|ILS|shekels?|₹|INR|PKR|rupees?|৳|BDT|taka|₦|NGN|naira|ZAR|rand|"
+    r"SEK|kronor|couronnes?|(?:Swiss\s+)?francs?|CHF|MAD|DH|dirhams?|TND|DT|DZD|KWD|dinars?|EGP|LBP|AED|SAR|QAR|OMR|riyals?|rials?|"
+    r"CNY|RMB|JPY|円|KRW|₩|원|THB|฿|บาท|درهم\w*|دينار\w*|جنيه\w*|ليرة|ريال|"
+    r"欧元|瑞士法郎|瑞郎|法郎|巴西雷亚尔|雷亚尔|印度尼西亚盾|印尼盾|印尼卢比|土耳其里拉|里拉|越南盾|波兰兹罗提|兹罗提|"
+    r"墨西哥比索|阿根廷比索|智利比索|哥伦比亚比索|菲律宾比索|比索|秘鲁索尔|索尔|"
+    r"美元|美金|英镑|新加坡元|新元|澳大利亚元|澳元|加拿大元|加元|人民币|日元|日圆|韩元|韩圆|泰铢|马来西亚林吉特|林吉特|"
+    r"迪拉姆|阿联酋迪拉姆|摩洛哥迪拉姆|第纳尔|突尼斯第纳尔|科威特第纳尔|阿尔及利亚第纳尔|埃及镑|黎巴嫩镑|"
+    r"里亚尔|沙特里亚尔|卡塔尔里亚尔|阿曼里亚尔|卢布|俄罗斯卢布|瑞典克朗|克朗|"
+    r"哈萨克斯坦坚戈|坚戈|吉尔吉斯斯坦索姆|索姆|以色列新谢克尔|新谢克尔|谢克尔|印度卢比|巴基斯坦卢比|孟加拉塔卡|塔卡|南非兰特|兰特|尼日利亚奈拉|奈拉)"
+)
+
+
+def _collapse_dot_thousands(text: str) -> str:
+    # 1. Two or more 3-digit dot groups (e.g. 1.000.000, 50.000.000.) are unambiguously thousands.
+    text = re.sub(
+        r"(?<![\d.])([1-9]\d{0,2}(?:\.\d{3}){2,})(?!\d|\.\d)",
+        lambda m: m.group(1).replace(".", ""),
+        text,
+    )
+
+    # 2. Single 3-digit dot group (e.g. 50.000 Euro, Rp 5.000., 10.000): treat as thousands when
+    #    adjacent to currency markers or when >= 10.000 with exact .000/.500 triad.
+    def _repl_single(m: re.Match[str]) -> str:
+        head, tail = m.group(1), m.group(2)
+        before = text[max(0, m.start() - 16) : m.start()]
+        after = text[m.end() : m.end() + 34]
+        after_no_cents = re.sub(r"^,\d{1,2}(?!\d)\s*", " ", after)
+        if (
+            _CURRENCY_DOT_PREFIX_RE.search(before)
+            or _CURRENCY_DOT_SUFFIX_RE.search(after)
+            or _CURRENCY_DOT_SUFFIX_RE.search(after_no_cents)
+        ):
+            return head + tail
+        if len(head) >= 2 and tail == "000":
+            return head + tail
+        return m.group(0)
+
+    return re.sub(r"(?<![\d.])([1-9]\d{0,2})\.(\d{3})(?!\d|\.\d)", _repl_single, text)
+
+
+def _convert_currency_comma_decimals(text: str) -> str:
+    """Convert European/Indonesian/Brazilian comma-decimal cents adjacent to currency markers
+    (e.g. '5000,00 EUR' -> '5000.00 EUR', 'Rp 5000,50' -> 'Rp 5000.50')."""
+
+    def _repl(m: re.Match[str]) -> str:
+        before = text[max(0, m.start() - 16) : m.start()]
+        after = text[m.end() : m.end() + 28]
+        if _CURRENCY_DOT_PREFIX_RE.search(before) or _CURRENCY_DOT_SUFFIX_RE.search(after):
+            return f"{m.group(1)}.{m.group(2)}"
+        return m.group(0)
+
+    return re.sub(r"(?<![\d.,])(\d+),(\d{1,2})(?!\d)", _repl, text)
+
 
 def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "")
@@ -18,12 +94,36 @@ def normalize(text: str) -> str:
             "0123456789012345678901234567890123456789.,",
         )
     )
+    # Collapse space / NBSP / narrow-NBSP thousands separators ("20 000 000 EUR", "50\u00a0000").
+    text = re.sub(
+        r"(?<![\d/.\-])([1-9]\d{0,2})((?:[ \u00a0\u202f]\d{3})+)(?![\d/.\-])",
+        lambda m: m.group(1) + re.sub(r"[ \u00a0\u202f]+", "", m.group(2)),
+        text,
+    )
+    text = _collapse_dot_thousands(text)
+    text = _convert_currency_comma_decimals(text)
+    # Convert comma decimals before percentage / metric units (incl. "yüzde 2,5" / "ร้อยละ 2,5").
+    unit_tail = rf"%|{_PERCENT_WORDS_AFTER}|°|[kK]\b|kg\b|g\b|mg\b|m\b|cm\b|mm\b|km\b|l\b|ml\b"
+    text = re.sub(
+        rf"(?<!\d)(\d+),(\d{{1,2}})(?=\s*(?:{unit_tail}))",
+        r"\1.\2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"((?:百分之|yüzde|ร้อยละ)\s*)(\d+),(\d{1,2})(?!\d)",
+        r"\1\2.\3",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(rf"٪\s*({NUMBER})", r"\1%", text)
     text = text.replace("٪", "%")
     text = re.sub(rf"百分之\s*({NUMBER})", r"\1%", text)
-    # “40 percent / 40 per cent / 40 pour cent”与“40%”是同一个数；写法不同不算译错
+    text = re.sub(rf"(?<![A-Za-zÀ-ž])yüzde\s*({NUMBER})", r"\1%", text, flags=re.IGNORECASE)
+    text = re.sub(rf"ร้อยละ\s*({NUMBER})", r"\1%", text)
+    # 多语种“40 percent / 40 pour cent / 40 Prozent / 40 por ciento”与“40%”是同一个数
     return re.sub(
-        rf"({NUMBER})\s*(?:percent|per\s*cent|pour\s*cent|pourcent|بالمئة|في المئة)(?![A-Za-z])",
+        rf"({NUMBER})\s*(?:{_PERCENT_WORDS_AFTER})(?![A-Za-zÀ-žА-Яа-яЁё])",
         r"\1%",
         text,
         flags=re.IGNORECASE,
@@ -50,16 +150,16 @@ CURRENCIES = {
     "USD": r"US\$|USD|美元|美金",
     "EUR": r"€|EUR|euros?|欧元",
     "GBP": r"£|GBP|英镑",
-    "EGP": r"EGP|埃及镑",
-    "TND": r"TND|突尼斯第纳尔",
-    "MAD": r"MAD|摩洛哥迪拉姆",
-    "LBP": r"LBP|黎巴嫩镑",
+    "EGP": r"EGP|جنيه(?:اً|ا)?\s+مصري(?:اً|ا)?|livres?\s+[ée]gyptiennes?|Egyptian\s+pounds?|埃及镑",
+    "TND": r"TND|دينار(?:اً|ا)?\s+تونسي(?:اً|ا)?|dinars?\s+tunisiens?|突尼斯第纳尔",
+    "MAD": r"MAD|درهم(?:اً|ا)?\s+مغربي(?:اً|ا)?|dirhams?\s+marocains?|摩洛哥迪拉姆",
+    "LBP": r"LBP|ليرة\s+لبنانية|livres?\s+libanaises?|黎巴嫩镑",
     "CNY": r"CNY|RMB|人民币",
-    "JPY": r"JPY|日元|日圆",
-    "KRW": r"₩|KRW|韩元|韩圆",
-    "THB": r"฿|THB|泰铢",
-    "MYR": r"MYR|马来西亚林吉特|林吉特",
-    "IDR": r"IDR|印度尼西亚盾|印尼盾|印尼卢比",
+    "JPY": r"JPY|(?<![一-鿿])円|日元|日圆",
+    "KRW": r"₩|KRW|(?<![가-힣])원(?![가-힣])|韩元|韩圆",
+    "THB": r"฿|THB|บาท|泰铢",
+    "MYR": r"RM|MYR|ringgit|马来西亚林吉特|林吉特",
+    "IDR": r"Rp\.?|IDR|rupiah|印度尼西亚盾|印尼盾|印尼卢比",
     "VND": r"₫|VND|越南盾",
     "PHP": r"₱|PHP|菲律宾比索",
     "AED": r"AED|阿联酋迪拉姆",
@@ -68,10 +168,10 @@ CURRENCIES = {
     "KWD": r"KWD|科威特第纳尔",
     "OMR": r"OMR|阿曼里亚尔",
     "DZD": r"DZD|阿尔及利亚第纳尔",
-    "RUB": r"₽|RUB|俄罗斯卢布|卢布",
+    "RUB": r"₽|RUB|рубл(?:ей|я|ь)|俄罗斯卢布|卢布",
     "KZT": r"₸|KZT|哈萨克斯坦坚戈|坚戈",
     "KGS": r"KGS|吉尔吉斯斯坦索姆|索姆",
-    "TRY": r"₺|TRY|土耳其里拉",
+    "TRY": r"₺|TRY|TL|t[üu]rk\s+liras\w*|liras?\s+turques?|土耳其里拉",
     "ILS": r"₪|ILS|以色列新谢克尔|新谢克尔|谢克尔",
     "INR": r"₹|INR|印度卢比",
     "PKR": r"PKR|巴基斯坦卢比",
@@ -86,19 +186,22 @@ CURRENCIES = {
     "PEN": r"S/\.|PEN|秘鲁索尔|索尔",
     "ZAR": r"ZAR|南非兰特|兰特",
     "NGN": r"₦|NGN|尼日利亚奈拉|奈拉",
-    "PLN": r"zł|PLN|波兰兹罗提|兹罗提",
-    "SEK": r"SEK|瑞典克朗",
+    "PLN": r"zł|PLN|złot(?:y|ych|ego)|波兰兹罗提|兹罗提",
+    "SEK": r"SEK|kronor|瑞典克朗",
+    "CHF": r"CHF|francs?\s+suisses?|Swiss\s+francs?|瑞士法郎|瑞郎",
     "DOLLAR_UNSPECIFIED": r"(?<![A-Za-z])\$|dollars?",
 }
+
+_ALPHA_BOUND = r"[A-Za-zÀ-ÖØ-öø-ÿĀ-žА-Яа-яЁё\u0600-\u06ff]"
 
 
 def amounts(text: str) -> set[tuple[str, str]]:
     text = normalize(text)
     found = set()
     for currency, marker in CURRENCIES.items():
-        # Codes and English currency names must be whole tokens: "Made" is not MAD.
-        # ASCII-only boundaries allow a Chinese unit directly next to Chinese prose.
-        marker = rf"(?<![A-Za-z])(?:{marker})(?![A-Za-z])"
+        # Codes and alphabetic currency names must not match inside words (e.g. "Made" != MAD,
+        # Polish "złącza" != zł), while allowing Chinese units directly next to Chinese prose.
+        marker = rf"(?<!{_ALPHA_BOUND})(?:{marker})(?!{_ALPHA_BOUND})"
         # Explicit codes/symbols before or immediately after the same numeric amount.
         pattern = re.compile(
             rf"(?:{marker})\s*({NUMBER})(?!\d)|"
@@ -120,23 +223,38 @@ MONTHS = {
     word: index
     for index, group in enumerate(
         (
-            "january janvier يناير جانفي",
-            "february février فيفري فبراير",
-            "march mars مارس",
-            "april avril أبريل افريل",
-            "may mai مايو ماي",
-            "june juin يونيو جوان",
-            "july juillet يوليو جويلية",
-            "august août أغسطس اوت",
-            "september septembre سبتمبر",
-            "october octobre أكتوبر اكتوبر",
-            "november novembre نوفمبر",
-            "december décembre ديسمبر",
+            "january janvier يناير جانفي gennaio enero janeiro januar januari stycznia ocak января",
+            "february février فيفري فبراير febbraio febrero fevereiro "
+            "februar februari lutego şubat февраля شباط",
+            "march mars مارس آذار اذار marzo março märz maart marca maret mart марта",
+            "april avril أبريل افريل نيسان aprile abril kwietnia nisan апреля",
+            "may mai مايو ماي أيار ايار maggio mayo maio mei maja mayıs mayis maj мая",
+            "june juin يونيو جوان حزيران giugno junio junho juni czerwca haziran июня",
+            "july juillet يوليو يوليوز جويلية تموز luglio julio julho juli lipca temmuz июля",
+            "august août أغسطس اوت غشت آب agosto augustus sierpnia agustus ağustos agustos "
+            "augusti августа",
+            "september septembre سبتمبر شتنبر أيلول ايلول settembre septiembre setembro "
+            "września eylül eylul сентября",
+            "october octobre أكتوبر اكتوبر ottobre octubre outubro "
+            "oktober października ekim октября",
+            "november novembre نوفمبر نونبر noviembre novembro listopada kasım kasim ноября",
+            "december décembre ديسمبر دجنبر dicembre diciembre dezembro dezember "
+            "grudzień grudnia desember aralık aralik декабря",
         ),
         1,
     )
     for word in group.split()
 }
+MONTHS.update(
+    {
+        "كانون الثاني": 1,
+        "تشرين الأول": 10,
+        "تشرين الاول": 10,
+        "تشرين الثاني": 11,
+        "كانون الأول": 12,
+        "كانون الاول": 12,
+    }
+)
 
 
 def _valid(year: int, month: int, day: int) -> bool:
@@ -147,20 +265,35 @@ def _valid(year: int, month: int, day: int) -> bool:
     return True
 
 
+_DMY_DATE_RE = (
+    r"(?<![\d.])(\d{1,2})(?:st|nd|rd|th|er|º|°|\.)?(?:\s+(?:day\s+of|de|del))?\s+"
+    r"(__MONTHS__)(?:\s+(?:de|del|tahun|سنة|لسنة|عام))?\s*[,،]?\s*(\d{4})(?!\d)"
+)
+
+
+def _fold_date_text(text: str) -> str:
+    # Collapse Turkish uppercase 'İ' casefold dot ('i\u0307' -> 'i') and dotless 'ı' -> 'i'
+    # so both 'EKİM'/'ekim' and 'MAYIS'/'mayıs' fold deterministically.
+    return normalize(text).casefold().replace("i\u0307", "i").replace("ı", "i")
+
+
+_CJK_KO_DATE_RE = r"(\d{4})\s*[年년]\s*(\d{1,2})\s*[月월]\s*(\d{1,2})\s*[日일]"
+_VN_DATE_RE = r"(?:ngày\s*)?(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})(?!\d)"
+
+
 def dates(text: str) -> set[tuple[int, int, int]]:
     """Complete, real calendar dates only. "1.0 October 2020" is a version number then a month,
     not the 0th of October, and "31 February 2020" is not a date at all."""
-    text = normalize(text).lower()
+    text = _fold_date_text(text)
     found = set()
-    for year, month, day in re.findall(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", text):
+    for year, month, day in re.findall(_CJK_KO_DATE_RE, text):
+        found.add((int(year), int(month), int(day)))
+    for day, month, year in re.findall(_VN_DATE_RE, text):
         found.add((int(year), int(month), int(day)))
     for year, month, day in re.findall(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)", text):
         found.add((int(year), int(month), int(day)))
     month_words = "|".join(sorted(MONTHS, key=len, reverse=True))
-    for day, month, year in re.findall(
-        rf"(?<![\d.])(\d{{1,2}})(?:st|nd|rd|th)?(?:\s+day\s+of)?\s+({month_words})\s*[,،]?\s*(\d{{4}})(?!\d)",
-        text,
-    ):
+    for day, month, year in re.findall(_DMY_DATE_RE.replace("__MONTHS__", month_words), text):
         found.add((int(year), MONTHS[month], int(day)))
     for month, day, year in re.findall(rf"({month_words})\s+(\d{{1,2}}),?\s+(\d{{4}})(?!\d)", text):
         found.add((int(year), MONTHS[month], int(day)))
@@ -173,15 +306,13 @@ def separate_explicit_dates(text: str):
     Does not change originals, translations or the translation-review protocol.
     Ambiguous/partial dates are not inferred. Invalid explicit dates stay visible.
     """
-    normalized = normalize(text).casefold()
+    normalized = _fold_date_text(text)
     month_words = "|".join(sorted(MONTHS, key=len, reverse=True))
     patterns = [
-        (r"(?<!\d)(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", "ymd"),
+        (rf"(?<!\d){_CJK_KO_DATE_RE}", "ymd"),
+        (rf"(?<!\d){_VN_DATE_RE}", "dmy_num"),
         (r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)", "ymd"),
-        (
-            rf"(?<!\d)(\d{{1,2}})(?:st|nd|rd|th)?(?:\s+day\s+of)?\s+({month_words})\s*[,،]?\s*(\d{{4}})(?!\d)",
-            "dmy",
-        ),
+        (_DMY_DATE_RE.replace("__MONTHS__", month_words), "dmy"),
         (rf"({month_words})\s+(\d{{1,2}}),?\s+(\d{{4}})(?!\d)", "mdy"),
     ]
     values, spans, invalid = set(), [], []
@@ -191,6 +322,8 @@ def separate_explicit_dates(text: str):
             year, month, day = (
                 (int(a), int(b), int(c))
                 if order == "ymd"
+                else (int(c), int(b), int(a))
+                if order == "dmy_num"
                 else (int(c), MONTHS[b], int(a))
                 if order == "dmy"
                 else (int(c), MONTHS[a], int(b))

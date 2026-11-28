@@ -52,29 +52,44 @@ _AR_DUAL_PAREN = re.compile(
     r"([\u0600-\u06ff][^（）\n]{2,120}?)\s*\([A-Za-z0-9 ,./'\"\-–—:;]*\b(?:Law|Decree|Act|Decision|Resolution|Regulation)\b[A-Za-z0-9 ,./'\"\-–—:;]*\)"
 )
 _ELLIPSIS_TAIL = re.compile(r"(\s*(?:……|…|\.{3,}))\s*$")
-_EG_FOOTER_NOISE = re.compile(r"\n\s*私密及机密\s+EG-CERT[^\n]*")
+_CONFIDENTIAL_FOOTER_NOISE = re.compile(
+    r"(?:\n|(?<=[。；;！!？?]))\s*(?:私密及机密|机密文件|STRICTLY\s+CONFIDENTIAL|PRIVATE\s+AND\s+CONFIDENTIAL)(?:\s+[A-Z0-9\-]{2,20})?[^\n]*",
+    re.IGNORECASE,
+)
 _DANGLING_BEFORE_ELLIPSIS = re.compile(
-    r"(?:[，,；;：:\s]+(?:以及|及|和|或|且|并|与|具体涉及|包括|涵盖|and|or|ou|et)|(?:^|[\s；;。，,])\d+\.)\s*$",
+    r"(?:[:：—–\-]+|"
+    r"[，,、；;：:\s”\"）)]*(?:并且|而且|或者|以及|具体涉及|包括|涵盖)|"
+    r"[，,、；;：:\s”\"）)]*(?<![埃涉普提及触危顾波遍企力合吞兼归并参给赐赋授予相交总求饱温柔调附唱应缓中平失让赠尚姑苟暂权施祥谐亲违契])[及和或且并与]|"
+    r"[，,、；;：:\s”\"）)]*(?<![A-Za-zÀ-ž])(?:and|or|ou|et)(?![A-Za-zÀ-ž])|"
+    r"(?<![\u0600-\u06ff])(?:أو|و)(?![\u0600-\u06ff])|"
+    r"(?:^|(?<=[\s（(；;。：:，,、\u4e00-\u9fff]))(?:\d+\.|[a-zA-Z]\.|[一二三四五六七八九十]+、))\s*$",
     re.IGNORECASE,
 )
 
 
 def _tidy_brackets(s: str) -> str:
     s = _PRIVATE.sub("•", s)
-    s = _EG_FOOTER_NOISE.sub("", s)
+    s = _CONFIDENTIAL_FOOTER_NOISE.sub("", s)
     if "Law))" in s or "Law)）" in s or _AR_DUAL_PAREN.search(s):
         s = _AR_DUAL_PAREN.sub(r"\1", s)
         s = re.sub(r"(\b(?:Law|Decree|Act|Decision)\b[^()（）]{0,60})\)\)", r"\1)", s)
     m = _ELLIPSIS_TAIL.search(s)
     if m:
-        head = s[: m.start()].rstrip()
+        head = s[: m.start()].rstrip(" 、，,；;：:—–-\n\r\t")
+        had_dash_or_colon = bool(re.search(r"(?:——+|—+|[:：])\s*$", s[: m.start()].rstrip()))
         while True:
-            trimmed = _DANGLING_BEFORE_ELLIPSIS.sub("", head).rstrip(" ，,；;：:\n\t")
+            trimmed = _DANGLING_BEFORE_ELLIPSIS.sub("", head).rstrip(" 、，,；;：:—–-\n\r\t")
             if trimmed == head or not trimmed:
                 break
             head = trimmed
+        if had_dash_or_colon:
+            last_p = max(head.rfind("。"), head.rfind("！"), head.rfind("？"))
+            if last_p >= len(head) // 3:
+                stub = head[last_p + 1 :].strip()
+                if stub and not re.search(r"[。；;！!？?]$", stub):
+                    head = head[: last_p + 1]
         tail = m.group(1).lstrip("\n\r")
-        for op, cl in (("《", "》"), ("（", "）"), ("(", ")")):
+        for op, cl in (("《", "》"), ("（", "）"), ("(", ")"), ("“", "”")):
             diff = head.count(op) - head.count(cl)
             if diff > 0:
                 head = head + (cl * diff)
@@ -383,7 +398,6 @@ async def gather(session: AsyncSession, country_code: str) -> dict[str, list[dic
         _OUTBOUND,
         _SCENE_ONLY,
         _SCENE_TITLE,
-        label_ok,
         not_a_basis,
         real_label,
     )
@@ -400,7 +414,7 @@ async def gather(session: AsyncSession, country_code: str) -> dict[str, list[dic
     for code, _ in EIGHT_DIMENSIONS_SPEC:
         found: list[dict] = []
         for c in await toolbox.search_effective_clauses(code, top_k=POOL):
-            if not c.text.strip() or str(c.document_id) in skip or not label_ok(str(c.label or ""), c.text):
+            if not c.text.strip() or str(c.document_id) in skip:
                 continue
             resolved = await _resolve_citation_to_current(
                 session,
@@ -416,7 +430,13 @@ async def gather(session: AsyncSession, country_code: str) -> dict[str, list[dic
             for k in ("quote_original", "quote_zh"):
                 resolved[k] = for_reading(str(resolved.get(k) or ""))
             title = zh_titles.get(str(resolved.get("document_id") or "")) or str(resolved.get("document_title") or "")
-            label = real_label(str(resolved.get("clause_number") or ""), str(resolved.get("quote_original") or ""), str(resolved.get("quote_zh") or ""), title)
+            label = real_label(
+                str(resolved.get("clause_number") or ""),
+                str(resolved.get("quote_original") or ""),
+                str(resolved.get("quote_zh") or ""),
+                title,
+                section_path=c.section_path or c.heading or "",
+            )
             if not label:
                 continue
             resolved["quote_zh"] = clause_gate.chinese_text(resolved.get("quote_zh"), resolved.get("quote_original"))
@@ -906,7 +926,7 @@ async def write_whitepaper(session: AsyncSession, country_code: str) -> tuple[li
         blocks = _merge_local_refs(blocks, lrefs, refs)
         if code == "D6" and turnover_clause:
             base48 = next((c for c in chosen if re.search(r"48J|财务处罚", str(c.get("clause_number", "")) + str(c.get("quote_zh") or "")[:80])), None)
-            blocks = turnover_point(blocks, [turnover_clause], refs, base48)
+            blocks = turnover_point(blocks, [turnover_clause], refs, base48, country_code=country_code)
         if code == "D7":
             blocks = blocks + d7_table
         chosen_of[code] = chosen
@@ -986,10 +1006,17 @@ async def write_whitepaper(session: AsyncSession, country_code: str) -> tuple[li
             ],
             laws,
         )
+    from app.knowledge.whitepaper_router import country_lib_stamp
+
     return head + body + tail, {
         "source_hash": source_hash(per_dim),
         "tokens": tokens,
-        "report": {"dropped": dropped, "documents": docs, "clauses": clauses},
+        "report": {
+            "dropped": dropped,
+            "documents": docs,
+            "clauses": clauses,
+            "lib_stamp": await country_lib_stamp(session, country_code),
+        },
     }
 
 
@@ -1116,6 +1143,8 @@ async def pinned_topics(session: AsyncSession, country_code: str) -> dict[str, l
         out[topic] = [{**h[4], "pinned": True} for h in hits[: 3 if topic == "transfer_basis" else 1]]
     s_cache[country_code] = out
     if keeper_active or rebuilding.get():
+        while len(_PINNED_TOPICS_CACHE) >= 24:
+            _PINNED_TOPICS_CACHE.pop(next(iter(_PINNED_TOPICS_CACHE)), None)
         _PINNED_TOPICS_CACHE[country_code] = out
     return {k: [dict(x) for x in v] for k, v in out.items()}
 
@@ -1381,14 +1410,54 @@ def superseded_dropped(chosen: list[dict]) -> list[dict]:
 _SUBSECTION = re.compile(r"(?:^|\n)[“\"]?\((\d+[A-Z]?)\)\s*")
 
 
-def _money(p: str) -> str:
-    p = re.sub(r"\$\s*(\d+(?:,\d{3})*)\s*百万", lambda m: f"{int(m.group(1).replace(',', '')) * 100} 万新加坡元", p)
-    p = re.sub(r"\$\s*(\d+)\s*million", lambda m: f"{int(m.group(1)) * 100} 万新加坡元", p)
-    p = re.sub(r"\$\s*(\d{1,3}(?:,\d{3})+)", lambda m: f"{int(m.group(1).replace(',', '')) // 10000} 万新加坡元", p)
+_DOLLAR_UNIT_ZH: dict[str, str] = {
+    "SG": "新加坡元",
+    "AU": "澳大利亚元",
+    "CA": "加拿大元",
+    "US": "美元",
+    "NZ": "新西兰元",
+    "HK": "港元",
+}
+
+
+def _money(p: str, country_code: str = "") -> str:
+    cc = (country_code or "").upper()
+    if "新加坡元" in p or "S$" in p or "SGD" in p:
+        unit = "新加坡元"
+    elif "AUD" in p or "A$" in p:
+        unit = "澳大利亚元"
+    elif "CAD" in p or "C$" in p:
+        unit = "加拿大元"
+    elif "USD" in p or "US$" in p:
+        unit = "美元"
+    else:
+        unit = _DOLLAR_UNIT_ZH.get(cc, "元（当地法定货币）")
+    p = re.sub(
+        r"(?:[A-Z]{1,3})?\$\s*(\d+(?:,\d{3})*)\s*百万",
+        lambda m: f"{int(m.group(1).replace(',', '')) * 100} 万{unit}",
+        p,
+    )
+    p = re.sub(
+        r"(?:[A-Z]{1,3})?\$\s*(\d+)\s*million",
+        lambda m: f"{int(m.group(1)) * 100} 万{unit}",
+        p,
+    )
+    p = re.sub(
+        r"(?:[A-Z]{1,3})?\$\s*(\d{1,3}(?:,\d{3})+)",
+        lambda m: f"{int(m.group(1).replace(',', '')) // 10000} 万{unit}",
+        p,
+    )
     return re.sub(r"——\s*(\d+ ?%)\s*of\s*(.+)$", r"——上限为\2的\1", p)
 
 
-def turnover_point(blocks: list[dict], chosen: list[dict], refs: dict, base: dict | None = None) -> list[dict]:
+def turnover_point(
+    blocks: list[dict],
+    chosen: list[dict],
+    refs: dict,
+    base: dict | None = None,
+    *,
+    country_code: str = "",
+) -> list[dict]:
     """Fines the law caps by a share of turnover: written by the program from the clause that sets
     them, one point per kind of person (organisation / individual or other person) with its own
     threshold, so the caps are never mixed. ``base``: the principal law's clause the amendment
@@ -1409,7 +1478,7 @@ def turnover_point(blocks: list[dict], chosen: list[dict], refs: dict, base: dic
             head, _, rest = seg.partition("：")
             subject = re.sub(r"^根据", "", head.split("，")[0]).strip("“” ")
             items = [re.sub(r"^\(?[a-z0-9]\)\s*", "", x.strip(" ；;。”“\"")) for x in rest.split("\n") if re.match(r"^\(?[a-z]\)", x.strip()) and ("——" in x or "$" in x)]
-            items = [_money(re.sub(r"在《[^》]*》\s*\d*的?第\d+条的生效日期的当日或之后实施违反行为的", "", re.sub(r"[”“；;。]*以及$", "", x).strip(" ”“；;。"))) for x in items if x]
+            items = [_money(re.sub(r"在《[^》]*》\s*\d*的?第\d+条的生效日期的当日或之后实施违反行为的", "", re.sub(r"[”“；;。]*以及$", "", x).strip(" ”“；;。")), country_code) for x in items if x]
             subject = re.sub(r"^第\(\d+\)款第\([a-z]\)项(第\([ivx]+\)目)?", "", subject)
             if subject and items:
                 shown = [i.replace("对于由", "由").replace("对于个人的，", "个人：").replace("情形——", "：").replace("的情形——", "：").replace("在任何其他情况下——", "其他情形：") for i in items]
@@ -1418,7 +1487,10 @@ def turnover_point(blocks: list[dict], chosen: list[dict], refs: dict, base: dic
                 if "(a)项" in head and (sm := re.search(r"\(a\)[^\n]*?违反(第[^\n；]*?部)的任何条文", base_zh)):
                     scope = f"（违反{sm.group(1)}的任何条文）"
                 elif "(ii)目" in head and (sm := re.search(r"\(ii\)\s*(第[^\n，]*?条)", base_zh)):
-                    scope = f"（只适用于违反{sm.group(1)}的人员；违反第9部的人员适用第(4)款）"
+                    if "第9部" in base_zh:
+                        scope = f"（只适用于违反{sm.group(1)}的人员；违反第9部的人员适用第(4)款）"
+                    else:
+                        scope = f"（适用于违反{sm.group(1)}的情形）"
                 points.append(f"第({m.group(1)})款，{subject}{scope}，上限：" + "；".join(shown))
         if not points:
             continue
@@ -1675,7 +1747,7 @@ def _extract_prev_sections_and_refs(
                     else:
                         raw_doc, clause_lbl = cell, ""
                 clean_doc = re.sub(
-                    r"（(?:[^（）]|（[^（）]*）|\([^()]*\))*[A-Za-z\u0600-\u06FF](?:[^（）]|（[^（）]*）|\([^()]*\))*）$",
+                    r"（(?![A-Z0-9/\-]{2,12}）$)(?:[^（）]|（[^（）]*）|\([^()]*\))*[A-Za-z\u0600-\u06FF](?:[^（）]|（[^（）]*）|\([^()]*\))*）$",
                     "",
                     raw_doc,
                 ).strip().strip("《》")
@@ -1772,7 +1844,7 @@ async def sync_dimensions(
             blks = _merge_local_refs(blks, lrefs, refs)
             if code == "D6" and turnover_clause:
                 base48 = next((c for c in chosen if re.search(r"48J|财务处罚", str(c.get("clause_number", "")) + str(c.get("quote_zh") or "")[:80])), None)
-                blks = turnover_point(blks, [turnover_clause], refs, base48)
+                blks = turnover_point(blks, [turnover_clause], refs, base48, country_code=country_code)
             if code == "D7":
                 blks = blks + d7_table
             chosen_of[code] = chosen
@@ -1810,8 +1882,10 @@ async def sync_dimensions(
         kept_d8 = _merge_local_refs(prev_sections["D8"], prev_refs, refs)
         body.extend(kept_d8)
 
+    prev_rep = prev.report if (prev is not None and isinstance(prev.report, dict)) else {}
+    preserve_locked_abstract = bool(prev_rep.get("review_status") == "approved" and "D0" in prev_sections)
     abs_clauses: list[dict] = []
-    if "D0" in prev_sections or docs >= 5:
+    if not preserve_locked_abstract and ("D0" in prev_sections or docs >= 5):
         for k in ("D1", "D2", "D3", "D5", "D6", "D7"):
             pool_k = chosen_of.get(k) or per_dim.get(k, [])
             picked_k = 0
@@ -1869,15 +1943,32 @@ async def sync_dimensions(
             ],
             laws,
         )
+    from app.knowledge.whitepaper_router import country_lib_stamp
+
+    prev_rep = prev.report if (prev is not None and isinstance(prev.report, dict)) else {}
+    merged_rep: dict[str, Any] = {
+        "dropped": dropped,
+        "documents": docs,
+        "clauses": clauses,
+        "synced_dimensions": sorted(targets),
+        "lib_stamp": await country_lib_stamp(session, country_code),
+    }
+    for meta_k in (
+        "review_status",
+        "reviewed_at",
+        "reviewed_by",
+        "review_note",
+        "manual_edited",
+        "edited_at",
+        "edited_by",
+        "edit_note",
+    ):
+        if prev_rep.get(meta_k) is not None:
+            merged_rep[meta_k] = prev_rep[meta_k]
     return head + body + tail, {
         "source_hash": source_hash(per_dim),
         "tokens": tokens,
-        "report": {
-            "dropped": dropped,
-            "documents": docs,
-            "clauses": clauses,
-            "synced_dimensions": sorted(targets),
-        },
+        "report": merged_rep,
     }
 
 

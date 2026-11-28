@@ -41,8 +41,8 @@ _BINDS_RECEIVER = re.compile(
 )
 # 出境规定（向境外提供、跨境传输）：只在数据从这个国家发出时才适用
 _OUTBOUND = re.compile(
-    r"向境外|出境|境外接收方|跨境(传输|提供|流动)|(转移|传输|提供|发送)[^。；]{0,12}(境外|国外|外国|其他国家)|(境外|国外|外国)[^。；]{0,8}(转移|传输)|向(该国|外国|他国|第三国|另一国家?)(转移|传输|提供)|(传输|转移)至[^。；]{0,30}国家|(传输|转移|共享|交换|处理)[^。；]{0,12}至[^。；]{0,30}(国家|地区)|位于[^。；]{0,20}境外|境外的另一|"
-    r"transfer[^.;]{0,30}(outside|abroad|foreign|third countr)|à l.étranger|vers un pays|hors (du territoire|de)",
+    r"向境外|出境|境外接收方|跨境(传输|提供|流动)|(转移|传输|提供|发送|披露)[^。；]{0,14}(境外|国外|外国|第三国|其他国家)|(境外|国外|外国|第三国)[^。；]{0,14}(转移|传输|提供|发送)|向[^。；]{0,14}(该国|境外|外国|国外|他国|第三国|另一国家?)[^。；]{0,10}(转移|传输|提供)|(传输|转移)至[^。；]{0,30}国家|(传输|转移|共享|交换|处理)[^。；]{0,12}至[^。；]{0,30}(国家|地区)|位于[^。；]{0,20}(境外|外国|国外)|境外的另一|"
+    r"transfer[^.;]{0,30}(outside|abroad|foreign|third countr)|à l.étranger|vers un pays|hors (du territoire|de)|국외|外国にある第三者|трансгранич",
     re.IGNORECASE,
 )
 # 不作依据：立法目的、施行日期、过渡、主管部门自己的工作安排
@@ -255,6 +255,12 @@ def not_a_basis(c: dict) -> bool:
     return bool(_TRANSITION.search(head) and re.search(r"期限|调整|合规|废止", head))
 
 
+_ALL_DIGITS_MAP = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹০১২৩৪৫৬৭৮৯๐๑๒๓๔๕๖๗๘๙",
+    "0123456789012345678901234567890123456789",
+)
+
+
 def label_ok(raw: str | None, text: str | None) -> bool:
     """Whether a clause's number is a real article number: a “第N条” the label reads as, or a
     section-style number (“26.1”, “3.15.1”) that the clause text itself starts with. A number the
@@ -266,32 +272,106 @@ def label_ok(raw: str | None, text: str | None) -> bool:
     if not raw or re.fullmatch(r"第?\s*\d+\s*页", raw):
         return False
     label = article_label(raw)
-    if re.fullmatch(r"第[0-9一二三四五六七八九十百零]+[A-Za-z]?条|单一条款", label):
+    if re.fullmatch(r"第[0-9一二三四五六七八九十百零]+[A-Za-z]?条(?:之\d+)?|单一条款", label):
         return True
-    head = re.sub(r"\s+", " ", (text or "").strip())[:40]
-    return bool(re.match(r"^(art(icle)?\.?\s*|section\s*|第\s*)?" + re.escape(raw) + r"(?![0-9])", head, re.IGNORECASE))
+    head = re.sub(r"\s+", " ", (text or "").translate(_ALL_DIGITS_MAP).strip())[:40]
+    raw_norm = raw.translate(_ALL_DIGITS_MAP)
+    return bool(re.match(r"^(art(icle)?\.?\s*|section\s*|第\s*)?" + re.escape(raw_norm) + r"(?![0-9])", head, re.IGNORECASE))
 
 
 _SECTION_HEAD = re.compile(r"^\s*(第\s*[0-9一二三四五六七八九十]+\s*(节|章|编|部分)|section\s+\d|chapitre|titre|القسم|الفصل|الباب)", re.IGNORECASE)
 _FIRST_ARTICLE = re.compile(r"第\s*([0-9]+)\s*条|\bArt(?:icle|\.)\s*([0-9]+)|المادة\s*\(?([0-9]+)", re.IGNORECASE)
+_COMMON_LAW_SECTION_HEAD = re.compile(r"^\s*Section\s+(\d{1,3}[A-Za-z]?)\b", re.IGNORECASE)
+_INLINE_ORIG_ARTICLE_RE = re.compile(
+    r"(?:^|\n)\s*(?:"
+    r"(?i:(?:Article|Art\.|Section|Sec\.|Regulation)\s+(\d{1,3}[A-Za-z]?)\b(?![.\d]))"
+    r"|(?:المادة|مادة)\s*\(?\s*(\d{1,3})\s*\)?(?=\s|$|[:：.\-–—])"
+    r"|มาตรา\s*(\d{1,3})(?!\d)"
+    r"|ม\s*า\s*ต\s*ร\s*า\s*(\d{1,3})(?!\d)"
+    r"|(?:ধারা\s*)?(\d{1,3})\s*[৷|]\s+\S"
+    r"|(\d{1,3}[A-Z]?)\s+(?!(?:Working|Calendar|Business|Days|Months|Years|Hours|Percent)\b)[A-Z“\"][A-Za-z\s“”\"',\-]{3,75}\n"
+    r")"
+)
+_INLINE_ZH_ARTICLE_RE = re.compile(
+    r"^\s*(?:第[一二三四五六七八九十百\d]+[章节编部分][^\n]{0,40}\n\s*)?第\s*(\d{1,3}[A-Za-z]?)\s*条(?=\s|[—–\-:：，。]|[\u4e00-\u9fff])"
+)
+_GUIDE_PRINCIPLE_RE = re.compile(r"^\s*Principle\s*\(([a-g])\)\s*[:：]", re.IGNORECASE)
 
 
-_GUIDE = re.compile(r"指南|指引|框架|标准|基准|规范要求|表格|申请表|清单|附件|守则|计划|咨询文件|guideline|framework|standard|form|code of practice", re.IGNORECASE)
+_GUIDE = re.compile(r"指南|指引|框架|标准|基准|规范要求|表格|申请表|清单|附件|守则|计划|咨询文件|guide|guideline|framework|standard|form|code of practice", re.IGNORECASE)
 
 
-def real_label(raw: str | None, text: str | None, zh: str | None = "", title: str | None = "") -> str | None:
+def _extract_inline_label(
+    text: str | None,
+    zh: str | None,
+    title: str | None,
+    section_path: str | None = "",
+) -> str | None:
+    """When ``clause.clause_number`` was omitted at parse time, extract an explicit statutory
+    article/section identifier only if the clause text or its parsed section_path declares one."""
+    norm_orig = (text or "").translate(_ALL_DIGITS_MAP)
+    norm_zh = (zh or "").translate(_ALL_DIGITS_MAP)
+    if "....." in norm_orig[:240]:
+        return None
+    if section_path:
+        sp_norm = section_path.translate(_ALL_DIGITS_MAP)
+        sp_hits = re.findall(
+            r"\b(?:Article|Art\.|Section|Sec\.|Regulation)\s+(\d{1,3}[A-Za-z]?)\b(?![.\d])"
+            r"|(?:المادة|مادة)\s*\(?\s*(\d{1,3})\s*\)?",
+            sp_norm,
+            flags=re.IGNORECASE,
+        )
+        if sp_hits:
+            last_pair = sp_hits[-1]
+            sp_num = next((g for g in last_pair if g), None)
+            if sp_num and not re.fullmatch(r"(?:19|20)\d{2}", sp_num):
+                return f"第{sp_num}项" if (title and _GUIDE.search(title)) else f"第{sp_num}条"
+    m_orig = _INLINE_ORIG_ARTICLE_RE.search(norm_orig[:260])
+    if m_orig:
+        num = next((g for g in m_orig.groups() if g), None)
+        if num and not re.fullmatch(r"(?:19|20)\d{2}", num):
+            return f"第{num}项" if (title and _GUIDE.search(title)) else f"第{num}条"
+    m_zh = _INLINE_ZH_ARTICLE_RE.match(norm_zh[:180])
+    if m_zh:
+        num = m_zh.group(1)
+        plain_digits = re.sub(r"\D+", "", num)
+        orig_nums = set(re.findall(r"\d+", norm_orig[:320]))
+        if plain_digits and plain_digits in orig_nums and not re.fullmatch(r"(?:19|20)\d{2}", num):
+            return f"第{num}项" if (title and _GUIDE.search(title)) else f"第{num}条"
+    if title and _GUIDE.search(title):
+        if m_pr := _GUIDE_PRINCIPLE_RE.match(norm_orig.strip()):
+            return f"原则({m_pr.group(1).lower()})"
+    return None
+
+
+def real_label(
+    raw: str | None,
+    text: str | None,
+    zh: str | None = "",
+    title: str | None = "",
+    section_path: str | None = "",
+) -> str | None:
     """The article a clause really is, read from its own text: a chunk that starts with a section
-    heading (“第2节 … 第31条——……”) is article 31, not “第2条”; None when no real article
-    number can be given (the clause is then not cited by number)."""
+    heading (“第2节 … 第31条——……”) is article 31, not “第2条”; Common-Law “Section 26” is “第26条”;
+    None when no real article number can be given (the clause is then not cited by number)."""
     from app.knowledge.reading import article_label
 
+    orig_head = re.sub(r"\s+", " ", (text or "").translate(_ALL_DIGITS_MAP).strip())[:160]
+    m_cl_sec = _COMMON_LAW_SECTION_HEAD.match(orig_head)
+    if m_cl_sec and not re.search(r"\bArt(?:icle|\.)\s*\d", orig_head, re.IGNORECASE):
+        sec_num = m_cl_sec.group(1)
+        return f"第{sec_num}项" if (title and _GUIDE.search(title)) else f"第{sec_num}条"
+
     for body in (zh or "", text or ""):
-        head = re.sub(r"\s+", " ", body.strip())[:160]
+        head = re.sub(r"\s+", " ", body.translate(_ALL_DIGITS_MAP).strip())[:160]
         if head and _SECTION_HEAD.match(head):
             m = _FIRST_ARTICLE.search(head)
-            return f"第{next(g for g in m.groups() if g)}条" if m else None
+            if m:
+                return f"第{next(g for g in m.groups() if g)}条"
+            if not label_ok(raw, text):
+                return None
     if not label_ok(raw, text):
-        return None
+        return _extract_inline_label(text, zh, title, section_path)
     label = article_label(raw) or raw
     # 指南、标准按段落编号（“19.6”“3.15.1”）：写成“第19.6段”；指南、框架、表格里的整数编号写“第N项”，不写“条”
     if re.fullmatch(r"\d+(\.\d+)+", label):
@@ -770,14 +850,15 @@ CN_ROUTE_CORE = {
     "exempt": ["《促进和规范数据跨境流动规定》第五条"],
     "unknown": ["《促进和规范数据跨境流动规定》第五条、第七条、第八条"],
 }
-_CITE = re.compile(r"《([^》]{2,60})》((?:第[0-9一二三四五六七八九十百]+条[、和及]?)+)")
+_ART_TOKEN_PAT = r"第[0-9一二三四五六七八九十百零]+(?:\.[0-9]+)*[A-Za-z]?(?:条(?:之[0-9一二三四五六七八九十]+)?|段|项)"
+_CITE = re.compile(rf"《([^》]{{2,60}})》((?:{_ART_TOKEN_PAT}[、和及，,\s]*)+)")
 
 
 def cites_in(text: str) -> list[tuple[str, str]]:
     """(law, “第X条”) pairs a sentence names (“《A》第五条、第七条” → two pairs)."""
     out = []
     for m in _CITE.finditer(text or ""):
-        for art in re.findall(r"第[0-9一二三四五六七八九十百]+条", m.group(2)):
+        for art in re.findall(_ART_TOKEN_PAT, m.group(2)):
             out.append((m.group(1).strip(), art))
     return out
 

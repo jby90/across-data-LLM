@@ -13,7 +13,14 @@ import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 
-_MAX_CONCURRENT_PDF_RENDERS = max(1, int(os.environ.get("CYSH_MAX_PDF_CONCURRENCY", "2")))
+_MAX_CONCURRENT_PDF_RENDERS = max(
+    1,
+    int(
+        os.environ.get("CYSH_MAX_CONCURRENT_PDF_RENDERS")
+        or os.environ.get("CYSH_MAX_PDF_CONCURRENCY")
+        or "2"
+    ),
+)
 _PDF_RENDER_SEM = threading.BoundedSemaphore(_MAX_CONCURRENT_PDF_RENDERS)
 _BG_HEAVY_LOCK = asyncio.Semaphore(1)
 
@@ -21,12 +28,15 @@ _BG_HEAVY_LOCK = asyncio.Semaphore(1)
 @contextmanager
 def pdf_render_slot() -> Generator[None, None, None]:
     """Limit concurrent in-memory PDF layout/font shaping threads and reclaim transient buffers."""
+    from app.core.security import trim_native_heap
+
     _PDF_RENDER_SEM.acquire()
     try:
         yield
     finally:
         _PDF_RENDER_SEM.release()
-        gc.collect(0)
+        gc.collect()
+        trim_native_heap()
 
 
 def background_job_gate() -> asyncio.Semaphore:

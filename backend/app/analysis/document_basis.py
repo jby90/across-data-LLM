@@ -57,7 +57,22 @@ _ASEAN = {
 CN = "CN"
 # 出入境国家不限定：用户说出的任何国家都要认得出来（法规库里有没有它的条文是另一回事，由库里的数据决定）。
 # 需求文档列出的国家和地区 + 常见目的地；新增国家时在这里补一行名称即可
+def _load_iso_world_zh() -> dict[str, str]:
+    import json
+    from pathlib import Path
+
+    p = Path(__file__).with_name("iso_countries.json")
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return {k.upper(): str(v["zh"]) for k, v in data.items() if k.upper() != "CN" and isinstance(v, dict) and v.get("zh")}
+    except (OSError, ValueError):
+        return {}
+
+
 WORLD = {
+    **_load_iso_world_zh(),
     "EU": "欧盟", "DE": "德国", "FR": "法国", "IT": "意大利", "ES": "西班牙", "NL": "荷兰", "BE": "比利时",
     "SE": "瑞典", "PL": "波兰", "AT": "奥地利", "IE": "爱尔兰", "PT": "葡萄牙", "CZ": "捷克", "HU": "匈牙利",
     "DK": "丹麦", "FI": "芬兰", "GR": "希腊", "RO": "罗马尼亚", "BG": "保加利亚", "SK": "斯洛伐克", "SI": "斯洛文尼亚",

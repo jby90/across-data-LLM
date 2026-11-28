@@ -542,7 +542,7 @@ async function deleteConversation(t: { id: string; title: string }) {
 const menu = reactive({ open: false, x: 0, y: 0, task: null as { id: string; title: string; viewer_own?: boolean } | null })
 function openMenu(e: MouseEvent, t: { id: string; title: string; viewer_own?: boolean }) {
   if (!canManageTask(t)) return  // 本企业共享对话只对企业用户开放改名、删除；查看者仅管理自己的私密对话
-  menu.open = true; menu.x = Math.min(e.clientX, window.innerWidth - 150); menu.y = Math.min(e.clientY, window.innerHeight - 100); menu.task = t
+  menu.open = true; menu.x = Math.max(8, Math.min(e.clientX, window.innerWidth - 156)); menu.y = Math.max(8, Math.min(e.clientY, window.innerHeight - 132)); menu.task = t
 }
 function closeMenu() { menu.open = false }
 async function renameConversation(t: { id: string; title: string }) {
@@ -963,13 +963,13 @@ function serverFilename(res: Response): string | null {
   return /filename="([^"]+)"/i.exec(header)?.[1] ?? null
 }
 
-const reportHostLang = ref<HostReportLang>('fr')
+const reportHostLang = ref<HostReportLang>('en')
 const reportHostMeta = computed(() => HOST_REPORT_LANGUAGES.find((l) => l.code === reportHostLang.value) || HOST_REPORT_LANGUAGES[0])
 
 watch(
   () => detail.value?.country_code,
   (cc) => {
-    if (cc) reportHostLang.value = inferHostLanguage(cc)
+    reportHostLang.value = cc ? inferHostLanguage(cc) : 'en'
   },
   { immediate: true },
 )
@@ -1387,12 +1387,14 @@ onUnmounted(() => {
                       >英文报告 · PDF</el-dropdown-item
                     ><el-dropdown-item data-testid="btn-export-en-zip" @click="download('zip', undefined, 'en')"
                       >英文整份与八章 Word 压缩包</el-dropdown-item
-                    ><el-dropdown-item divided data-testid="btn-export-host-docx" @click="download('docx', undefined, reportHostLang)"
-                      >{{ reportHostMeta.nameZh }}报告 · Word</el-dropdown-item
-                    ><el-dropdown-item data-testid="btn-export-host-pdf" @click="download('pdf', undefined, reportHostLang)"
-                      >{{ reportHostMeta.nameZh }}报告 · PDF</el-dropdown-item
-                    ><el-dropdown-item data-testid="btn-export-host-zip" @click="download('zip', undefined, reportHostLang)"
-                      >{{ reportHostMeta.nameZh }}整份与八章 Word 压缩包</el-dropdown-item
+                    ><template v-if="reportHostLang !== 'en'"
+                      ><el-dropdown-item divided data-testid="btn-export-host-docx" @click="download('docx', undefined, reportHostLang)"
+                        >{{ reportHostMeta.nameZh }}报告 · Word</el-dropdown-item
+                      ><el-dropdown-item data-testid="btn-export-host-pdf" @click="download('pdf', undefined, reportHostLang)"
+                        >{{ reportHostMeta.nameZh }}报告 · PDF</el-dropdown-item
+                      ><el-dropdown-item data-testid="btn-export-host-zip" @click="download('zip', undefined, reportHostLang)"
+                        >{{ reportHostMeta.nameZh }}整份与八章 Word 压缩包</el-dropdown-item
+                      ></template
                     ></el-dropdown-menu
                   ></template
                 ></el-dropdown
@@ -1538,7 +1540,7 @@ onUnmounted(() => {
           <span class="a-actions"><el-button size="small" link type="danger" @click="removeAttachment(a)">移除</el-button></span>
         </div>
       </div>
-      <p v-if="isViewer" class="viewer-note" data-testid="viewer-chat-note">
+      <p v-if="isViewer && !archived" class="viewer-note" data-testid="viewer-chat-note">
         {{ detail && !detail.viewer_own ? '当前查看的是本企业共享对话；在下方输入提问将自动新建仅你本人可见的咨询对话，不会改动企业项目。' : '普通查看者：你的咨询对话仅本人可见，不能新建或修改本企业的评估与准入项目。' }}
       </p>
       <footer v-if="!archived" class="composer">

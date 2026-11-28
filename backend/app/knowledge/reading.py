@@ -187,7 +187,10 @@ def _arabic_ordinal(text: str) -> int | None:
 def article_label(raw: str | None) -> str:
     """“43” → “第43条”, “premier” → “第1条”, “الحادية عشرة” / “(27)” → “第11条” / “第27条”; section
     numbers (“19.8”) as printed. Same rule as packages/shared/src/articleLabel.ts."""
-    digits_map = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+    digits_map = str.maketrans(
+        "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹০১২৩৪৫৬৭৮৯๐๑๒๓๔๕๖๗๘๙",
+        "0123456789012345678901234567890123456789",
+    )
     value = (raw or "").strip().translate(digits_map)
     if not value:
         return ""
@@ -196,6 +199,8 @@ def article_label(raw: str | None) -> str:
     if re.fullmatch(r"(وحيدة|unique|sole)\s*[:：]?", value, re.I):
         return "单一条款"
     plain = re.sub(r"^[(（]\s*|\s*[)）]$", "", value)
+    if m_ko := re.fullmatch(r"(\d{1,4})의(\d{1,3})", plain):
+        return f"第{m_ko.group(1)}条之{m_ko.group(2)}"
     if (
         re.fullmatch(r"\d{1,4}[A-Za-z]?", plain)
         and not re.fullmatch(r"(?:19|20)\d{2}", plain)

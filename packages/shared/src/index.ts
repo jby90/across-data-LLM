@@ -395,6 +395,7 @@ export function localTime(value: string | null | undefined, only?: 'date'): stri
 }
 
 export type HostReportLang =
+  | 'en'
   | 'fr'
   | 'de'
   | 'es'
@@ -411,10 +412,11 @@ export type HostReportLang =
   | 'ar'
   | 'ru'
 
-export type ForeignReportLang = 'en' | HostReportLang
+export type ForeignReportLang = HostReportLang
 export type ReportOutputLang = 'zh' | ForeignReportLang
 
 export const HOST_REPORT_LANGUAGES: Array<{ code: HostReportLang; nameZh: string; native: string }> = [
+  { code: 'en', nameZh: '英语', native: 'English' },
   { code: 'fr', nameZh: '法语', native: 'Français' },
   { code: 'de', nameZh: '德语', native: 'Deutsch' },
   { code: 'es', nameZh: '西班牙语', native: 'Español' },
@@ -433,29 +435,36 @@ export const HOST_REPORT_LANGUAGES: Array<{ code: HostReportLang; nameZh: string
 ]
 
 const HOST_LANG_BY_KEY: Record<string, HostReportLang> = {
-  FR: 'fr', 法国: 'fr', MA: 'fr', 摩洛哥: 'fr', BE: 'fr', 比利时: 'fr', LU: 'fr', 卢森堡: 'fr', CA: 'fr', 加拿大: 'fr',
-  DE: 'de', 德国: 'de', AT: 'de', 奥地利: 'de', CH: 'de', 瑞士: 'de',
-  ES: 'es', 西班牙: 'es', MX: 'es', 墨西哥: 'es', AR: 'es', 阿根廷: 'es', CL: 'es', 智利: 'es', CO: 'es', 哥伦比亚: 'es', PE: 'es', 秘鲁: 'es', UY: 'es', 乌拉圭: 'es',
-  PT: 'pt', 葡萄牙: 'pt', BR: 'pt', 巴西: 'pt',
+  EN_LANG: 'en', SG: 'en', 新加坡: 'en', GB: 'en', 英国: 'en', US: 'en', 美国: 'en', AU: 'en', 澳大利亚: 'en', NZ: 'en', 新西兰: 'en',
+  IE: 'en', 爱尔兰: 'en', CA: 'en', 加拿大: 'en', IN: 'en', 印度: 'en', PH: 'en', 菲律宾: 'en', ZA: 'en', 南非: 'en', NG: 'en', 尼日利亚: 'en',
+  KE: 'en', 肯尼亚: 'en', GH: 'en', 加纳: 'en', PK: 'en', 巴基斯坦: 'en', BD: 'en', 孟加拉国: 'en', LK: 'en', 斯里兰卡: 'en',
+  MY: 'en', 马来西亚: 'en', EU: 'en', 欧盟: 'en', SE: 'en', 瑞典: 'en', DK: 'en', 丹麦: 'en', FI: 'en', 芬兰: 'en', NO: 'en', 挪威: 'en',
+  IS: 'en', 冰岛: 'en', MT: 'en', 马耳他: 'en', CY: 'en', 塞浦路斯: 'en', IL: 'en', 以色列: 'en', HK: 'en', 中国香港: 'en',
+  FR: 'fr', 法国: 'fr', MA: 'fr', 摩洛哥: 'fr', BE: 'fr', 比利时: 'fr', LU: 'fr', 卢森堡: 'fr', MC: 'fr', 摩纳哥: 'fr', SN: 'fr', 塞内加尔: 'fr', CI: 'fr', 科特迪瓦: 'fr', CM: 'fr', 喀麦隆: 'fr',
+  DE: 'de', 德国: 'de', AT: 'de', 奥地利: 'de', CH: 'de', 瑞士: 'de', LI: 'de', 列支敦士登: 'de',
+  ES: 'es', 西班牙: 'es', MX: 'es', 墨西哥: 'es', AR: 'es', 阿根廷: 'es', CL: 'es', 智利: 'es', CO: 'es', 哥伦比亚: 'es', PE: 'es', 秘鲁: 'es', UY: 'es', 乌拉圭: 'es', CR: 'es', 哥斯达黎加: 'es', PA: 'es', 巴拿马: 'es', EC: 'es', 厄瓜多尔: 'es', VE: 'es', 委内瑞拉: 'es', BO: 'es', 玻利维亚: 'es', PY: 'es', 巴拉圭: 'es', DO: 'es', 多米尼加: 'es', CU: 'es', 古巴: 'es', GT: 'es', 危地马拉: 'es',
+  PT: 'pt', 葡萄牙: 'pt', BR: 'pt', 巴西: 'pt', AO: 'pt', 安哥拉: 'pt', MZ: 'pt', 莫桑比克: 'pt', MO: 'pt', 中国澳门: 'pt',
   IT: 'it', 意大利: 'it',
   NL: 'nl', 荷兰: 'nl',
-  ID: 'id', 印度尼西亚: 'id', 印尼: 'id', MY: 'id', 马来西亚: 'id',
-  TR: 'tr', 土耳其: 'tr',
+  ID: 'id', 印度尼西亚: 'id', 印尼: 'id',
+  TR: 'tr', 土耳其: 'tr', AZ: 'tr', 阿塞拜疆: 'tr',
   PL: 'pl', 波兰: 'pl',
   JP: 'ja', 日本: 'ja',
   KR: 'ko', 韩国: 'ko',
   TH: 'th', 泰国: 'th',
   VN: 'vi', 越南: 'vi',
-  AR_LANG: 'ar', TN: 'ar', 突尼斯: 'ar', EG: 'ar', 埃及: 'ar', LB: 'ar', 黎巴嫩: 'ar', AE: 'ar', 阿联酋: 'ar', SA: 'ar', 沙特阿拉伯: 'ar', 沙特: 'ar', QA: 'ar', 卡塔尔: 'ar', KW: 'ar', 科威特: 'ar', OM: 'ar', 阿曼: 'ar', BH: 'ar', 巴林: 'ar', JO: 'ar', 约旦: 'ar', DZ: 'ar', 阿尔及利亚: 'ar',
-  RU: 'ru', 俄罗斯: 'ru', KZ: 'ru', 哈萨克斯坦: 'ru', BY: 'ru', 白俄罗斯: 'ru',
+  AR_LANG: 'ar', TN: 'ar', 突尼斯: 'ar', EG: 'ar', 埃及: 'ar', LB: 'ar', 黎巴嫩: 'ar', AE: 'ar', 阿联酋: 'ar', SA: 'ar', 沙特阿拉伯: 'ar', 沙特: 'ar', QA: 'ar', 卡塔尔: 'ar', KW: 'ar', 科威特: 'ar', OM: 'ar', 阿曼: 'ar', BH: 'ar', 巴林: 'ar', JO: 'ar', 约旦: 'ar', DZ: 'ar', 阿尔及利亚: 'ar', IQ: 'ar', 伊拉克: 'ar', LY: 'ar', 利比亚: 'ar', SY: 'ar', 叙利亚: 'ar', YE: 'ar', 也门: 'ar',
+  RU: 'ru', 俄罗斯: 'ru', KZ: 'ru', 哈萨克斯坦: 'ru', KG: 'ru', 吉尔吉斯斯坦: 'ru', UZ: 'ru', 乌兹别克斯坦: 'ru', TJ: 'ru', 塔吉克斯坦: 'ru', TM: 'ru', 土库曼斯坦: 'ru', BY: 'ru', 白俄罗斯: 'ru',
 }
 
 export function inferHostLanguage(recipient?: string | null, source?: string | null): HostReportLang {
   for (const raw of [recipient, source]) {
     const key = String(raw || '').trim()
     if (!key) continue
-    const hit = HOST_LANG_BY_KEY[key.toUpperCase()] || HOST_LANG_BY_KEY[key]
+    const up = key.toUpperCase()
+    if (up === 'CN' || key === '中国') continue
+    const hit = HOST_LANG_BY_KEY[up] || HOST_LANG_BY_KEY[key]
     if (hit) return hit
   }
-  return 'fr'
+  return 'en'
 }

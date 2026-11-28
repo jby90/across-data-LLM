@@ -88,6 +88,42 @@ const busy = ref('')
 const edits = reactive<Record<string, string>>({})
 const startForm = reactive({ source: '', recipient: '', functions: [] as string[], scenes: [] as string[], text: '', vehicle: '', company: '' })
 const editingRoute = ref(false)
+const routeDraft = reactive({
+  source_country: '',
+  recipient_country: '',
+  functions: [] as string[],
+  business_scenes: [] as string[],
+  scenario_text: '',
+  vehicle_model: '',
+  company_name: '',
+})
+function syncRouteDraftFromProject() {
+  const r = project.value?.route
+  if (!r) return
+  routeDraft.source_country = r.source_country || ''
+  routeDraft.recipient_country = r.recipient_country || ''
+  routeDraft.functions = Array.isArray(r.functions) ? [...r.functions] : (r.function ? [r.function] : [])
+  routeDraft.business_scenes = Array.isArray(r.business_scenes) ? [...r.business_scenes] : (r.business_scene ? [r.business_scene] : [])
+  routeDraft.scenario_text = r.scenario_text || ''
+  routeDraft.vehicle_model = r.vehicle_model || ''
+  routeDraft.company_name = r.company_name || ''
+}
+function toggleEditRoute() {
+  if (!editingRoute.value) {
+    syncRouteDraftFromProject()
+    editingRoute.value = true
+  } else {
+    editingRoute.value = false
+  }
+}
+function commitAllowCreateBlur(list: string[], e: FocusEvent) {
+  const inp = e.target as HTMLInputElement | null
+  const val = (inp?.value || '').trim()
+  if (val && !list.includes(val)) {
+    list.push(val)
+    if (inp) inp.value = ''
+  }
+}
 
 const openId = computed(() => (route.query.project as string) || '')
 const isNew = computed(() => !openId.value)
@@ -115,6 +151,8 @@ async function open(id: string, refresh = false) {
     }
     for (const k of Object.keys(edits)) delete edits[k]
     for (const q of next.questions) edits[q.key] = q.value
+    editingRoute.value = false
+    syncRouteDraftFromProject()
     if (next.archived) showArchive.value = true
     const want = typeof route.query.q === 'string' ? route.query.q : (typeof route.query.question === 'string' ? route.query.question : '')
     if (want) { gotoQuestion(want); void router.replace({ query: { project: id } }) }
@@ -151,24 +189,24 @@ async function create() {
 }
 async function saveRoute() {
   if (!project.value) return
-  const r = project.value.route
-  if (r.source_country.trim() === r.recipient_country.trim()) {
+  if (routeDraft.source_country.trim() === routeDraft.recipient_country.trim()) {
     ElMessage.warning('数据发出国与接收国不能相同，请选择境外目的国或地区')
     return
   }
   busy.value = 'route'
   try {
-    const fns = Array.isArray(r.functions) ? r.functions : (r.function ? [r.function] : [])
-    const scs = Array.isArray(r.business_scenes) ? r.business_scenes : (r.business_scene ? [r.business_scene] : [])
+    const fns = Array.isArray(routeDraft.functions) ? [...routeDraft.functions] : []
+    const scs = Array.isArray(routeDraft.business_scenes) ? [...routeDraft.business_scenes] : []
     const next = await api.patch<Project>(`/api/analysis/doc-projects/${project.value.id}`, {
-      source_country: r.source_country, recipient_country: r.recipient_country,
+      source_country: routeDraft.source_country, recipient_country: routeDraft.recipient_country,
       functions: fns, function: fns[0] || '',
       business_scenes: scs, business_scene: scs[0] || '',
-      scenario_text: r.scenario_text, vehicle_model: r.vehicle_model, company_name: r.company_name,
+      scenario_text: routeDraft.scenario_text, vehicle_model: routeDraft.vehicle_model, company_name: routeDraft.company_name,
     })
     if (!Array.isArray(next.route.functions)) next.route.functions = next.route.function ? [next.route.function] : []
     if (!Array.isArray(next.route.business_scenes)) next.route.business_scenes = next.route.business_scene ? [next.route.business_scene] : []
     project.value = next
+    syncRouteDraftFromProject()
     editingRoute.value = false
     await loadList()
     ElMessage.success('已更新流向与多场景配置，受影响的文件与属地准入事项已同步重新核对')
@@ -280,13 +318,13 @@ async function fetchFile(url: string, fallback: string) {
   window.setTimeout(() => URL.revokeObjectURL(href), 30000)
 }
 type DocDlCmd = 'docx' | 'pdf' | 'xlsx' | 'en-docx' | 'en-pdf' | 'en-preview' | 'i18n-docx' | 'i18n-pdf' | 'i18n-preview'
-const hostLang = ref<HostReportLang>('fr')
+const hostLang = ref<HostReportLang>('en')
 const hostLangMeta = computed(() => HOST_REPORT_LANGUAGES.find((l) => l.code === hostLang.value) || HOST_REPORT_LANGUAGES[0])
 
 watch(
   () => [project.value?.id, project.value?.route?.recipient_country, project.value?.route?.source_country] as const,
   ([, rcp, src]) => {
-    if (rcp || src) hostLang.value = inferHostLanguage(rcp, src)
+    hostLang.value = rcp || src ? inferHostLanguage(rcp, src) : 'en'
   },
   { immediate: true },
 )
@@ -328,12 +366,18 @@ async function openPreviewForeign(d: DocView, lg: 'en' | HostReportLang) {
   if (!project.value) return
   previewCode.value = d.code
   previewDraft.value = d.state !== 'ready'
-  previewIsEdpbEn.value = true
+  previewIsEdpbEn.value = false
+  previewForeignLang.value = lg
   previewAidKind.value = ''
   previewEditMode.value = false
   previewEdits.value = []
+  previewVersions.value = []
   showEditHistory.value = false
-  const lgLabel = lg === 'en' ? '英文版' : `${hostLangMeta.value.nameZh}版`
+  showVersionHistory.value = false
+  viewingVersionNo.value = null
+  viewingVersionBlocks.value = []
+  const lgMeta = HOST_REPORT_LANGUAGES.find((x) => x.code === lg)
+  const lgLabel = lg === 'en' ? '英文版' : `${lgMeta?.nameZh || hostLangMeta.value.nameZh}版`
   previewTitle.value = `${d.name}（${lgLabel}预览）`
   previewBlocks.value = []
   previewVisible.value = true
@@ -354,6 +398,24 @@ async function openPreviewForeign(d: DocView, lg: 'en' | HostReportLang) {
     previewLoading.value = false
   }
 }
+async function downloadPreviewForeign(ext: 'docx' | 'pdf') {
+  if (!project.value || !previewCode.value || !previewForeignLang.value || !downloadable.value) return
+  const docItem = project.value.documents.find((x) => x.code === previewCode.value)
+  const isDraft = docItem ? docItem.state !== 'ready' : previewDraft.value
+  const lg = previewForeignLang.value
+  busy.value = `dl-prev-${lg}-${ext}`
+  try {
+    const ep =
+      lg === 'en'
+        ? `/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/export-en.${ext}?draft=${isDraft}`
+        : `/api/analysis/tasks/${project.value.id}/documents/${previewCode.value}/export-i18n.${ext}?lang=${lg}&draft=${isDraft}`
+    await fetchFile(ep, `${previewCode.value}_${lg.toUpperCase()}.${ext}`)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    busy.value = ''
+  }
+}
 async function downloadEdpbEn(d: DocView, kind: 'docx' | 'pdf') {
   if (!project.value || !downloadable.value) return
   busy.value = `dl-edpb-${kind}`
@@ -366,10 +428,15 @@ async function openPreviewEdpbEn(d: DocView) {
   previewCode.value = 'dpia'
   previewDraft.value = d.state !== 'ready'
   previewIsEdpbEn.value = true
+  previewForeignLang.value = ''
   previewAidKind.value = ''
   previewEditMode.value = false
   previewEdits.value = []
+  previewVersions.value = []
   showEditHistory.value = false
+  showVersionHistory.value = false
+  viewingVersionNo.value = null
+  viewingVersionBlocks.value = []
   previewTitle.value = '数据保护影响评估（欧盟标准英文范本）'
   previewBlocks.value = []
   previewVisible.value = true
@@ -531,6 +598,7 @@ const previewTitle = ref('')
 const previewCode = ref('')
 const previewDraft = ref(true)
 const previewIsEdpbEn = ref(false)
+const previewForeignLang = ref<'' | 'en' | HostReportLang>('')
 const previewAidKind = ref<'' | 'signoff' | 'third-country'>('')
 const showThirdCountry = ref(false)
 const previewEditMode = ref(false)
@@ -553,6 +621,7 @@ const previewHasOutline = computed(
 const previewSubtitle = computed(() => {
   if (previewEditMode.value) return '点击任意正文段落或表格单元格即可直接修订，保存后自动同步至下载文件'
   if (previewHasOutline.value) {
+    if (previewForeignLang.value) return '左侧目录支持一键跳至各章节；支持直接核对各项内容并导出对应语种正式文件'
     return previewAidKind.value
       ? '左侧目录支持一键跳至各章节；支持直接核对各项内容并导出正式文件'
       : '左侧目录支持一键跳至各章节；未填写项在初稿中显示为【待补充】'
@@ -569,10 +638,15 @@ async function openAidPreview(kind: 'signoff' | 'third-country') {
   if (!project.value) return
   previewCode.value = ''
   previewIsEdpbEn.value = false
+  previewForeignLang.value = ''
   previewAidKind.value = kind
   previewEditMode.value = false
   showEditHistory.value = false
+  showVersionHistory.value = false
   previewEdits.value = []
+  previewVersions.value = []
+  viewingVersionNo.value = null
+  viewingVersionBlocks.value = []
   previewTitle.value = kind === 'signoff' ? '正式申报递交前人工核签清单' : '库外法域属地法律待核查清单'
   previewBlocks.value = []
   previewVisible.value = true
@@ -609,6 +683,7 @@ async function openPreview(d: DocView) {
   previewCode.value = d.code
   previewDraft.value = d.state !== 'ready'
   previewIsEdpbEn.value = false
+  previewForeignLang.value = ''
   previewEditMode.value = false
   showEditHistory.value = false
   showVersionHistory.value = false
@@ -675,6 +750,8 @@ watch(previewEditMode, (on, wasOn) => {
 watch(previewVisible, (vis, wasVis) => {
   if (!vis && wasVis) {
     if (pendingVersionSeal.value) void sealPreviewVersion('停止编辑自动存版')
+    showVersionHistory.value = false
+    showEditHistory.value = false
     viewingVersionNo.value = null
     viewingVersionBlocks.value = []
   }
@@ -1348,7 +1425,7 @@ function cmpRouteLine(p: Project | null): string {
   const r = p.route
   const fnText = (r.functions?.length ? r.functions : [r.function]).map((k) => cmpLabelOf(k, options.value.functions)).filter(Boolean).join('、')
   const scText = (r.business_scenes?.length ? r.business_scenes : [r.business_scene]).map((k) => cmpLabelOf(k, options.value.scenes)).filter(Boolean).join('、')
-  const sceneText = [fnText, scText].filter(Boolean).join(' / ')
+  const sceneText = [fnText || r.scenario_text || '', scText].filter(Boolean).join(' / ')
   return [
     `${r.source_country || '未填'} → ${r.recipient_country || '未填'}`,
     r.vehicle_model,
@@ -1489,12 +1566,12 @@ function jumpFromCompare(id: string) {
             </div>
             <div class="row2">
               <el-form-item label="车辆数据主要用途（可多选，支持直接输入添加自定义场景）">
-                <el-select v-model="startForm.functions" multiple filterable allow-create default-first-option clearable placeholder="请选择一个或多个预设场景，或输入新场景回车添加" data-testid="doc-function">
+                <el-select v-model="startForm.functions" multiple filterable allow-create default-first-option clearable placeholder="请选择一个或多个预设场景，或输入新场景回车添加" data-testid="doc-function" @blur="(e: FocusEvent) => commitAllowCreateBlur(startForm.functions, e)">
                   <el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" />
                 </el-select>
               </el-form-item>
               <el-form-item label="业务阶段（可多选，支持直接输入添加）">
-                <el-select v-model="startForm.scenes" multiple filterable allow-create default-first-option clearable placeholder="请选择业务阶段，或输入自定义阶段回车添加" data-testid="doc-scene">
+                <el-select v-model="startForm.scenes" multiple filterable allow-create default-first-option clearable placeholder="请选择业务阶段，或输入自定义阶段回车添加" data-testid="doc-scene" @blur="(e: FocusEvent) => commitAllowCreateBlur(startForm.scenes, e)">
                   <el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" />
                 </el-select>
               </el-form-item>
@@ -1522,7 +1599,7 @@ function jumpFromCompare(id: string) {
             <div class="head-row">
               <p class="route" data-testid="doc-route">
                 <span v-if="routeNote" class="route-note">{{ routeNote }}</span>
-                <el-button v-if="editable" link type="primary" size="small" :disabled="locked" @click="editingRoute = !editingRoute">{{ editingRoute ? '收起' : '修改流向与业务' }}</el-button>
+                <el-button v-if="editable" link type="primary" size="small" :disabled="locked" @click="toggleEditRoute">{{ editingRoute ? '收起' : '修改流向与业务' }}</el-button>
               </p>
               <div class="head-actions">
               <el-button v-if="editable && !locked" data-testid="doc-open-copilot" @click="openCopilot">辅助填写</el-button>
@@ -1549,15 +1626,19 @@ function jumpFromCompare(id: string) {
                   <el-dropdown-item command="draft:xlsx:zh" data-testid="doc-zip-draft-xlsx">全部初稿 · 中文 Excel（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="draft:docx:en" data-testid="doc-zip-draft-en">全部初稿 · 英文 Word（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="draft:pdf:en">全部初稿 · 英文 PDF（ZIP）</el-dropdown-item>
-                  <el-dropdown-item :command="`draft:docx:${hostLang}`" data-testid="doc-zip-draft-i18n">全部初稿 · {{ hostLangMeta.nameZh }} Word（ZIP）</el-dropdown-item>
-                  <el-dropdown-item :command="`draft:pdf:${hostLang}`">全部初稿 · {{ hostLangMeta.nameZh }} PDF（ZIP）</el-dropdown-item>
+                  <template v-if="hostLang !== 'en'">
+                    <el-dropdown-item :command="`draft:docx:${hostLang}`" data-testid="doc-zip-draft-i18n">全部初稿 · {{ hostLangMeta.nameZh }} Word（ZIP）</el-dropdown-item>
+                    <el-dropdown-item :command="`draft:pdf:${hostLang}`">全部初稿 · {{ hostLangMeta.nameZh }} PDF（ZIP）</el-dropdown-item>
+                  </template>
                   <el-dropdown-item command="final:docx:zh" :disabled="!allReady" divided data-testid="doc-zip-final">全部成稿 · 中文 Word（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:pdf:zh" :disabled="!allReady">全部成稿 · 中文 PDF（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:xlsx:zh" :disabled="!allReady" data-testid="doc-zip-final-xlsx">全部成稿 · 中文 Excel（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:docx:en" :disabled="!allReady" data-testid="doc-zip-final-en">全部成稿 · 英文 Word（ZIP）</el-dropdown-item>
                   <el-dropdown-item command="final:pdf:en" :disabled="!allReady">全部成稿 · 英文 PDF（ZIP）</el-dropdown-item>
-                  <el-dropdown-item :command="`final:docx:${hostLang}`" :disabled="!allReady" data-testid="doc-zip-final-i18n">全部成稿 · {{ hostLangMeta.nameZh }} Word（ZIP）</el-dropdown-item>
-                  <el-dropdown-item :command="`final:pdf:${hostLang}`" :disabled="!allReady">全部成稿 · {{ hostLangMeta.nameZh }} PDF（ZIP）</el-dropdown-item>
+                  <template v-if="hostLang !== 'en'">
+                    <el-dropdown-item :command="`final:docx:${hostLang}`" :disabled="!allReady" data-testid="doc-zip-final-i18n">全部成稿 · {{ hostLangMeta.nameZh }} Word（ZIP）</el-dropdown-item>
+                    <el-dropdown-item :command="`final:pdf:${hostLang}`" :disabled="!allReady">全部成稿 · {{ hostLangMeta.nameZh }} PDF（ZIP）</el-dropdown-item>
+                  </template>
                 </el-dropdown-menu></template>
               </el-dropdown>
               <el-tooltip v-else content="当前只读账号未开通导出权限" placement="top">
@@ -1632,21 +1713,22 @@ function jumpFromCompare(id: string) {
 
           <section v-if="editingRoute" class="edit-route" data-testid="doc-edit-route">
             <div class="row2">
-              <el-form-item label="数据发出国"><el-select v-model="project.route.source_country" filterable allow-create default-first-option><el-option v-for="c in options.countries" :key="c" :label="c" :value="c" /></el-select></el-form-item>
-              <el-form-item label="数据接收国"><el-select v-model="project.route.recipient_country" filterable allow-create default-first-option><el-option v-for="c in options.countries" :key="c" :label="c" :value="c" /></el-select></el-form-item>
+              <el-form-item label="数据发出国"><el-select v-model="routeDraft.source_country" filterable allow-create default-first-option><el-option v-for="c in options.countries" :key="c" :label="c" :value="c" /></el-select></el-form-item>
+              <el-form-item label="数据接收国"><el-select v-model="routeDraft.recipient_country" filterable allow-create default-first-option><el-option v-for="c in options.countries" :key="c" :label="c" :value="c" /></el-select></el-form-item>
             </div>
             <div class="row2">
-              <el-form-item label="主要用途（可多选，支持自定义输入回车添加）"><el-select v-model="project.route.functions" multiple filterable allow-create default-first-option clearable placeholder="请选择或输入自定义业务场景"><el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" /></el-select></el-form-item>
-              <el-form-item label="业务阶段（可多选，支持自定义输入回车添加）"><el-select v-model="project.route.business_scenes" multiple filterable allow-create default-first-option clearable placeholder="请选择或输入业务阶段"><el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" /></el-select></el-form-item>
+              <el-form-item label="主要用途（可多选，支持自定义输入回车添加）"><el-select v-model="routeDraft.functions" multiple filterable allow-create default-first-option clearable placeholder="请选择或输入自定义业务场景" @blur="(e: FocusEvent) => commitAllowCreateBlur(routeDraft.functions, e)"><el-option v-for="f in options.functions" :key="f.key" :label="f.label" :value="f.key" /></el-select></el-form-item>
+              <el-form-item label="业务阶段（可多选，支持自定义输入回车添加）"><el-select v-model="routeDraft.business_scenes" multiple filterable allow-create default-first-option clearable placeholder="请选择或输入业务阶段" @blur="(e: FocusEvent) => commitAllowCreateBlur(routeDraft.business_scenes, e)"><el-option v-for="s in options.scenes" :key="s.key" :label="s.label" :value="s.key" /></el-select></el-form-item>
             </div>
+            <el-form-item label="其他用途说明（选填）"><el-input v-model="routeDraft.scenario_text" maxlength="200" placeholder="例如：车载摄像头数据回传总部，用于算法训练" data-testid="route-scenario-text" /></el-form-item>
             <div class="row2">
-              <el-form-item label="车型或车队"><el-input v-model="project.route.vehicle_model" />
+              <el-form-item label="车型或车队"><el-input v-model="routeDraft.vehicle_model" />
                 <button v-for="i in project.route_issues.filter((x) => x.key === 'vehicle_model')" :key="i.id" type="button" class="q-issue" :class="i.level" @click="openIssue(i)"><em>{{ LEVEL_TEXT[i.level] }}</em>{{ i.text }}</button></el-form-item>
-              <el-form-item label="企业名称"><el-input v-model="project.route.company_name" />
+              <el-form-item label="企业名称"><el-input v-model="routeDraft.company_name" />
                 <button v-if="project.route.company_name_carried?.project_id" type="button" class="q-carried" data-testid="route-company-carried" @click="router.push({ path: '/documents', query: { project: project.route.company_name_carried.project_id } })">{{ project.route.company_name_carried.text }}</button>
                 <button v-for="i in project.route_issues.filter((x) => x.key === 'company_name')" :key="i.id" type="button" class="q-issue" :class="i.level" data-testid="route-issue-company_name" @click="openIssue(i)"><em>{{ LEVEL_TEXT[i.level] }}</em>{{ i.text }}</button></el-form-item>
             </div>
-            <el-button type="primary" :loading="busy === 'route'" @click="saveRoute">保存修改</el-button>
+            <el-button type="primary" plain :loading="busy === 'route'" @click="saveRoute">保存修改</el-button>
           </section>
 
           <section class="summary" data-testid="doc-summary">
@@ -1862,14 +1944,14 @@ function jumpFromCompare(id: string) {
                     <el-dropdown-item command="docx" :data-testid="`dl-${d.code}-word`">{{ d.state === 'ready' ? '中文版 · Word' : '中文初稿 · Word' }}</el-dropdown-item>
                     <el-dropdown-item command="pdf" :data-testid="`dl-${d.code}-pdf`">{{ d.state === 'ready' ? '中文版 · PDF' : '中文初稿 · PDF' }}</el-dropdown-item>
                     <el-dropdown-item command="xlsx" :data-testid="`dl-${d.code}-xlsx`">{{ d.state === 'ready' ? '中文版 · Excel' : '中文初稿 · Excel' }}</el-dropdown-item>
-                    <template v-if="!d.has_edpb_en">
-                      <el-dropdown-item command="en-preview" divided :data-testid="`preview-${d.code}-en`">预览英文版</el-dropdown-item>
-                      <el-dropdown-item command="en-docx" :data-testid="`dl-${d.code}-en-word`">{{ d.state === 'ready' ? '英文版 · Word' : '英文初稿 · Word' }}</el-dropdown-item>
-                      <el-dropdown-item command="en-pdf" :data-testid="`dl-${d.code}-en-pdf`">{{ d.state === 'ready' ? '英文版 · PDF' : '英文初稿 · PDF' }}</el-dropdown-item>
+                    <el-dropdown-item command="en-preview" divided :data-testid="`preview-${d.code}-en`">{{ d.has_edpb_en ? '预览通用英文版' : '预览英文版' }}</el-dropdown-item>
+                    <el-dropdown-item command="en-docx" :data-testid="`dl-${d.code}-en-word`">{{ d.state === 'ready' ? '英文版 · Word' : '英文初稿 · Word' }}</el-dropdown-item>
+                    <el-dropdown-item command="en-pdf" :data-testid="`dl-${d.code}-en-pdf`">{{ d.state === 'ready' ? '英文版 · PDF' : '英文初稿 · PDF' }}</el-dropdown-item>
+                    <template v-if="hostLang !== 'en'">
+                      <el-dropdown-item command="i18n-preview" divided :data-testid="`preview-${d.code}-i18n`">预览{{ hostLangMeta.nameZh }}版（{{ hostLangMeta.native }}）</el-dropdown-item>
+                      <el-dropdown-item command="i18n-docx" :data-testid="`dl-${d.code}-i18n-word`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · Word` : `${hostLangMeta.nameZh}初稿 · Word` }}</el-dropdown-item>
+                      <el-dropdown-item command="i18n-pdf" :data-testid="`dl-${d.code}-i18n-pdf`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · PDF` : `${hostLangMeta.nameZh}初稿 · PDF` }}</el-dropdown-item>
                     </template>
-                    <el-dropdown-item command="i18n-preview" divided :data-testid="`preview-${d.code}-i18n`">预览{{ hostLangMeta.nameZh }}版（{{ hostLangMeta.native }}）</el-dropdown-item>
-                    <el-dropdown-item command="i18n-docx" :data-testid="`dl-${d.code}-i18n-word`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · Word` : `${hostLangMeta.nameZh}初稿 · Word` }}</el-dropdown-item>
-                    <el-dropdown-item command="i18n-pdf" :data-testid="`dl-${d.code}-i18n-pdf`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · PDF` : `${hostLangMeta.nameZh}初稿 · PDF` }}</el-dropdown-item>
                   </el-dropdown-menu></template>
                 </el-dropdown>
                 <el-tooltip v-else-if="!officialOnly(d)" content="当前只读账号未开通导出权限" placement="top">
@@ -1931,9 +2013,11 @@ function jumpFromCompare(id: string) {
                         <el-dropdown-item command="en-preview" divided :data-testid="`preview-${d.code}-en`">预览英文版</el-dropdown-item>
                         <el-dropdown-item command="en-docx" :data-testid="`dl-${d.code}-en-word`">{{ d.state === 'ready' ? '英文版 · Word' : '英文初稿 · Word' }}</el-dropdown-item>
                         <el-dropdown-item command="en-pdf" :data-testid="`dl-${d.code}-en-pdf`">{{ d.state === 'ready' ? '英文版 · PDF' : '英文初稿 · PDF' }}</el-dropdown-item>
-                        <el-dropdown-item command="i18n-preview" divided :data-testid="`preview-${d.code}-i18n`">预览{{ hostLangMeta.nameZh }}版（{{ hostLangMeta.native }}）</el-dropdown-item>
-                        <el-dropdown-item command="i18n-docx" :data-testid="`dl-${d.code}-i18n-word`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · Word` : `${hostLangMeta.nameZh}初稿 · Word` }}</el-dropdown-item>
-                        <el-dropdown-item command="i18n-pdf" :data-testid="`dl-${d.code}-i18n-pdf`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · PDF` : `${hostLangMeta.nameZh}初稿 · PDF` }}</el-dropdown-item>
+                        <template v-if="hostLang !== 'en'">
+                          <el-dropdown-item command="i18n-preview" divided :data-testid="`preview-${d.code}-i18n`">预览{{ hostLangMeta.nameZh }}版（{{ hostLangMeta.native }}）</el-dropdown-item>
+                          <el-dropdown-item command="i18n-docx" :data-testid="`dl-${d.code}-i18n-word`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · Word` : `${hostLangMeta.nameZh}初稿 · Word` }}</el-dropdown-item>
+                          <el-dropdown-item command="i18n-pdf" :data-testid="`dl-${d.code}-i18n-pdf`">{{ d.state === 'ready' ? `${hostLangMeta.nameZh}版 · PDF` : `${hostLangMeta.nameZh}初稿 · PDF` }}</el-dropdown-item>
+                        </template>
                       </el-dropdown-menu></template>
                     </el-dropdown>
                     <el-tooltip v-else-if="!officialOnly(d)" content="当前只读账号未开通导出权限" placement="top">
@@ -1974,7 +2058,7 @@ function jumpFromCompare(id: string) {
           <section v-if="pending.length && editable && !locked" class="pending" data-testid="doc-pending">
             <div class="fill-head">
               <h3>已识别 {{ pending.length }} 项，请核对</h3>
-              <el-button type="primary" size="small" :loading="busy === 'accept'" data-testid="doc-accept-all" @click="resolveSuggestions(null)">全部采用</el-button>
+              <el-button type="primary" plain size="small" :loading="busy === 'accept'" data-testid="doc-accept-all" @click="resolveSuggestions(null)">全部采用</el-button>
               <el-button size="small" @click="resolveSuggestions(null, true)">全部忽略</el-button>
             </div>
             <div v-for="it in pending" :key="it.key" class="sg" :data-testid="`sg-${it.key}`">
@@ -2045,7 +2129,7 @@ function jumpFromCompare(id: string) {
                   </div>
                 </template>
                 <div class="easy-actions">
-                  <el-button v-if="!current.choices.length || needsText(current)" type="primary" :disabled="locked" data-testid="step-next" @click="stepSave(current)">保存并下一项</el-button>
+                  <el-button v-if="!current.choices.length || needsText(current)" type="primary" plain :disabled="locked" data-testid="step-next" @click="stepSave(current)">保存并下一项</el-button>
                   <el-button :disabled="locked" data-testid="step-unsure" @click="stepUnsure(current)">暂不确定</el-button>
                   <el-button link :disabled="locked" data-testid="step-skip" @click="stepSkip(current)">跳过</el-button>
                 </div>
@@ -2064,7 +2148,7 @@ function jumpFromCompare(id: string) {
             <div class="fill-head">
               <h3>{{ editable ? '全部填报信息' : '项目评估信息' }}</h3>
               <span v-if="editable" class="muted">暂未确认的填报项可标记为暂不确定，初稿中将标注为【待补充】，不影响先行导出初稿。</span>
-              <el-button v-if="editable" type="primary" size="small" :disabled="!changed.length || locked" :loading="busy === 'save'" data-testid="doc-save" @click="saveAnswers()">保存（{{ changed.length }} 处修改）</el-button>
+              <el-button v-if="editable" type="primary" plain size="small" :disabled="!changed.length || locked" :loading="busy === 'save'" data-testid="doc-save" @click="saveAnswers()">保存（{{ changed.length }} 处修改）</el-button>
             </div>
             <el-collapse v-model="tierCollapse">
               <el-collapse-item v-for="t in TIERS" :key="t.key" :name="t.key" :data-testid="`tier-${t.key}`">
@@ -2121,11 +2205,19 @@ function jumpFromCompare(id: string) {
         <div class="preview-meta">
           <el-tag size="small" :type="previewKind === 'edited' ? 'warning' : previewKind === 'official_docx' ? 'success' : 'info'">{{ previewKind === 'edited' ? '在线修订版' : previewKind === 'official_docx' ? '法定申报表填报预览' : '标准合规报告预览' }}</el-tag>
           <span class="muted">{{ previewSubtitle }}</span>
-          <span v-if="!previewIsEdpbEn && !previewAidKind" class="preview-meta-actions">
+          <span v-if="!previewIsEdpbEn && !previewForeignLang && !previewAidKind" class="preview-meta-actions">
             <el-button v-if="editable && !locked" size="small" :type="previewEditMode ? 'primary' : 'default'" plain data-testid="doc-preview-edit-toggle" @click="previewEditMode = !previewEditMode">{{ previewEditMode ? '退出修改' : '在线修改' }}</el-button>
             <el-button v-if="previewVersions.length" size="small" plain data-testid="doc-preview-versions-toggle" @click="showVersionHistory = !showVersionHistory">{{ showVersionHistory ? '收起历史版本' : `历史版本（${previewVersions.length} 版）` }}</el-button>
             <el-button v-if="previewEdits.length" size="small" plain data-testid="doc-preview-history-toggle" @click="showEditHistory = !showEditHistory">{{ showEditHistory ? '收起修改记录' : `修改记录（${previewEdits.length} 处）` }}</el-button>
             <el-button v-if="editable && !locked && previewKind === 'edited'" size="small" type="warning" plain :loading="previewSaving" data-testid="doc-preview-reset" @click="resetPreviewEdits">恢复自动生成版</el-button>
+          </span>
+          <span v-else-if="previewForeignLang && project" class="preview-meta-actions">
+            <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
+              <span><el-button size="small" :disabled="!downloadable" :loading="busy === `dl-prev-${previewForeignLang}-docx`" data-testid="doc-preview-foreign-docx" @click="downloadPreviewForeign('docx')">下载 Word</el-button></span>
+            </el-tooltip>
+            <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
+              <span><el-button size="small" :disabled="!downloadable" :loading="busy === `dl-prev-${previewForeignLang}-pdf`" data-testid="doc-preview-foreign-pdf" @click="downloadPreviewForeign('pdf')">下载 PDF</el-button></span>
+            </el-tooltip>
           </span>
           <span v-else-if="previewAidKind && project" class="preview-meta-actions">
             <el-tooltip :disabled="downloadable" content="当前只读账号未开通导出权限" placement="top">
@@ -2148,7 +2240,7 @@ function jumpFromCompare(id: string) {
           <span>正在查阅历史存档：第 {{ viewingVersionNo }} 版（只读预览，不会影响当前生效版本）</span>
           <el-button size="small" plain data-testid="doc-preview-version-exit" @click="viewingVersionNo = null; viewingVersionBlocks = []">返回当前生效版</el-button>
         </div>
-        <div v-if="showVersionHistory && previewVersions.length" class="preview-history" data-testid="doc-preview-versions">
+        <div v-if="showVersionHistory && previewVersions.length && !previewIsEdpbEn && !previewForeignLang && !previewAidKind" class="preview-history" data-testid="doc-preview-versions">
           <div v-for="ver in previewVersions" :key="ver.version_no" class="preview-history-item preview-version-row" :data-testid="`doc-version-item-${ver.version_no}`">
             <div class="preview-version-main">
               <b>第 {{ ver.version_no }} 版</b>
@@ -2161,13 +2253,13 @@ function jumpFromCompare(id: string) {
             </div>
           </div>
         </div>
-        <div v-if="showEditHistory && previewEdits.length" class="preview-history" data-testid="doc-preview-history">
+        <div v-if="showEditHistory && previewEdits.length && !previewIsEdpbEn && !previewForeignLang && !previewAidKind" class="preview-history" data-testid="doc-preview-history">
           <div v-for="(ed, ei) in previewEdits" :key="ei" class="preview-history-item">
             <div class="preview-history-head"><b>{{ ed.place }}</b><span class="muted">{{ ed.user_name }} · {{ localTime(ed.at) }}</span></div>
             <div class="preview-history-diff"><span class="old">{{ ed.before }}</span><span class="arr">→</span><span class="new">{{ ed.after }}</span></div>
           </div>
         </div>
-        <BlocksView v-if="displayedPreviewBlocks.length" :blocks="displayedPreviewBlocks" hide-title :outline="previewHasOutline" :editable="viewingVersionNo === null && previewEditMode && editable && !locked && !previewIsEdpbEn" :saving="previewSaving" @edit="savePreviewEdit" />
+        <BlocksView v-if="displayedPreviewBlocks.length" :blocks="displayedPreviewBlocks" hide-title :outline="previewHasOutline" :editable="viewingVersionNo === null && previewEditMode && editable && !locked && !previewIsEdpbEn && !previewForeignLang" :saving="previewSaving" @edit="savePreviewEdit" />
       </div>
     </el-drawer>
     <el-dialog v-model="compareVisible" title="合规项目方案对比" width="min(980px, 94vw)" append-to-body destroy-on-close data-testid="doc-compare-dialog">

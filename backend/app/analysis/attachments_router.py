@@ -206,7 +206,7 @@ async def review_pending(task_id: uuid.UUID, user: UserDep, session: SessionDep)
 async def delete_attachment(
     task_id: uuid.UUID, attachment_id: uuid.UUID, user: UserDep, session: SessionDep
 ) -> dict:
-    task = await _task(session, task_id, user)
+    task = _writable(await _task(session, task_id, user, for_update=True))
     row = await _attachment(session, task, attachment_id)
     await session.delete(row)
     await session.commit()

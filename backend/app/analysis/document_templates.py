@@ -436,12 +436,12 @@ def _quote(citation: dict, limit: int = 300) -> str:
         return text
     cut_end = find_clean_sentence_cut(text, limit)
     if cut_end > 0:
-        return _close_delims_before_ellipsis(_strip_dangling_tail(text[:cut_end])) + " ……"
+        return _close_delims_before_ellipsis(_strip_dangling_tail(text[:cut_end], keep_semicolon=True)) + " ……"
     end = limit
     if end < len(text) and text[end - 1].isascii() and text[end].isascii():
         while end > limit - 24 and text[end - 1].isalnum():
             end -= 1
-    return _close_delims_before_ellipsis(_strip_dangling_tail(text[:end])) + "……"
+    return _close_delims_before_ellipsis(_strip_dangling_tail(text[:end], keep_semicolon=True)) + "……"
 
 
 def _clause_key(c: dict) -> str:
@@ -527,9 +527,14 @@ _DEFAULT_TEMPLATES_ENSURED = False
 
 
 async def latest_template(session: AsyncSession, code: str) -> DocumentTemplate | None:
+    from sqlalchemy import inspect as sa_inspect
+
     memo = session.info.setdefault("latest_templates", {})
     if code in memo:
-        return memo[code]
+        cached = memo[code]
+        if cached is None or not sa_inspect(cached).expired:
+            return cached
+        memo.pop(code, None)
     row = await session.scalar(
         select(DocumentTemplate)
         .where(DocumentTemplate.code == code, DocumentTemplate.status == "published")
@@ -603,10 +608,10 @@ async def ensure_default_templates(session: AsyncSession) -> None:
 def _infer_widths(head: list[str], rows: list[list[str]]) -> list[int]:
     """Semantic percentage widths for tables without explicit ``widths`` so narrow index/code
     columns never steal half the page from prose descriptions."""
-    n = len(head)
+    n = len(head) or (max((len(r) for r in rows), default=1) if rows else 1)
     if n <= 1:
         return [100]
-    h0 = (head[0] or "").strip()
+    h0 = (head[0] if head else "").strip()
     if n == 2:
         if h0 in ("编号", "序号", "步骤"):
             return [10, 90]
@@ -654,7 +659,7 @@ def _infer_widths(head: list[str], rows: list[list[str]]) -> list[int]:
 
 
 def _blocks_have_arabic(blocks: list[dict], context: str) -> bool:
-    arabic_re = re.compile(r"[\u0600-\u06ff]")
+    arabic_re = re.compile(r"[\u0590-\u05ff\u0600-\u06ff]")
     if arabic_re.search(context or ""):
         return True
     for blk in blocks:
@@ -678,16 +683,23 @@ def build_docx(
     *,
     foreign: bool = False,
     table_style: str = "formal_black",
+    rtl: bool | None = None,
 ) -> bytes:
     """Word output through the same writer the reports use: ``table_style='edpb'`` strictly matches
     the official EU EDPB 2026 DPIA template's table borders/headings, while ``'formal_black'`` uses
     uniform solid black borders and black headers for all template-less documents."""
-    from app.analysis.report_exporter import _docx_package, _w_p, _w_table, should_indent_prose
+    from app.analysis.report_exporter import (
+        _docx_package,
+        _w_grid_table,
+        _w_p,
+        _w_table,
+        should_indent_prose,
+    )
 
     head_color = "0A105D" if table_style == "edpb" else "000000"
     parts: list[str] = []
     blocks = rendered.blocks
-    rtl = bool(foreign and _blocks_have_arabic(blocks, context))
+    eff_rtl = bool(foreign and _blocks_have_arabic(blocks, context)) if rtl is None else bool(rtl)
     for i, block in enumerate(blocks):
         kind = block["type"]
         if kind == "title":
@@ -699,14 +711,14 @@ def build_docx(
                     color=head_color,
                     style="Title",
                     after=240,
-                    rtl=rtl,
-                    align="center" if rtl else None,
+                    rtl=eff_rtl,
+                    align="center" if eff_rtl else None,
                 )
             )
         elif kind == "heading":
-            parts.append(_w_p(block["text"], bold=True, size=26, color=head_color, style="Heading1", keep_next=True, rtl=rtl))
+            parts.append(_w_p(block["text"], bold=True, size=26, color=head_color, style="Heading1", keep_next=True, rtl=eff_rtl))
         elif kind == "subheading":
-            parts.append(_w_p(block["text"], bold=True, size=22, color=head_color, style="Heading2", keep_next=True, rtl=rtl))
+            parts.append(_w_p(block["text"], bold=True, size=22, color=head_color, style="Heading2", keep_next=True, rtl=eff_rtl))
         elif kind == "paragraph":
             # 表格前的说明句（如“风险矩阵（……）：”）与表格同页，不单独留在页底
             before_table = i + 1 < len(blocks) and blocks[i + 1]["type"] == "table"
@@ -719,25 +731,46 @@ def build_docx(
                         keep_next=(before_table and is_last),
                         rich=True,
                         prose_indent=(not foreign and should_indent_prose(ln)),
-                        rtl=rtl,
-                        align="both" if rtl else None,
+                        rtl=eff_rtl,
+                        align="both" if eff_rtl else None,
                     )
                 )
         elif kind == "list":
-            parts.extend(_w_p("• " + item, indent=0 if rtl else 360, after=60, rich=True, rtl=rtl) for item in block["items"])
+            parts.extend(_w_p("• " + item, indent=0 if eff_rtl else 360, after=60, rich=True, rtl=eff_rtl) for item in block["items"])
         elif kind == "pagebreak":  # 一份下载件里的两部分（如申请书和办理指引）各自从新页开始
             parts.append("<w:p><w:r><w:br w:type='page'/></w:r></w:p>")
         elif kind == "table":
-            widths = block.get("widths") or _infer_widths(block["head"], block["rows"])
-            parts.append(_w_table(block["head"], block["rows"], widths, table_style=table_style, rtl=rtl))
-            if i == len(blocks) - 1:
+            b_head = block.get("head") or []
+            b_rows = block.get("rows") or []
+            widths = block.get("widths") or _infer_widths(b_head, b_rows)
+            if block.get("no_head") or not b_head:
                 parts.append(
-                    "<w:p><w:pPr><w:spacing w:before='0' w:after='0' w:line='20' w:lineRule='exact'/></w:pPr>"
-                    "<w:r><w:rPr><w:sz w:val='2'/><w:szCs w:val='2'/></w:rPr></w:r></w:p>"
+                    _w_grid_table(
+                        b_rows,
+                        widths,
+                        block.get("spans"),
+                        table_style=table_style,
+                        rtl=eff_rtl,
+                    )
                 )
             else:
-                parts.append(_w_p("", after=80, rtl=rtl))
-    return _docx_package(parts, context, clean=True, foreign=foreign, heading_color=head_color, rtl=rtl)
+                parts.append(
+                    _w_table(
+                        b_head,
+                        b_rows,
+                        widths,
+                        spans=block.get("spans"),
+                        table_style=table_style,
+                        rtl=eff_rtl,
+                    )
+                )
+            if i == len(blocks) - 1:
+                parts.append(
+                    "<w:p><w:pPr><w:spacing w:before='0' w:after='0' w:line='20' w:lineRule='exact'/></w:pPr></w:p>"
+                )
+            else:
+                parts.append(_w_p("", after=80, rtl=eff_rtl))
+    return _docx_package(parts, context, clean=True, foreign=foreign, heading_color=head_color, rtl=eff_rtl)
 
 
 def build_pdf(
@@ -746,6 +779,7 @@ def build_pdf(
     *,
     foreign: bool = False,
     table_style: str = "formal_black",
+    rtl: bool | None = None,
 ) -> bytes:
     """The PDF of a document is its Word file printed to PDF (app.analysis.docx_pdf), so the two
     are the same document. Only where no office suite is installed (the test suite) is the PDF
@@ -754,13 +788,12 @@ def build_pdf(
 
     if engine() != "builtin":
         try:
-            return docx_to_pdf(build_docx(rendered, context, foreign=foreign, table_style=table_style))
+            return docx_to_pdf(
+                build_docx(rendered, context, foreign=foreign, table_style=table_style, rtl=rtl)
+            )
         except PdfEngineUnavailable:
             pass
-    from app.core.resource_gate import pdf_render_slot
-
-    with pdf_render_slot():
-        return _render_pdf(rendered, context, table_style=table_style, foreign=foreign)
+    return _render_pdf(rendered, context, table_style=table_style, foreign=foreign, rtl=rtl)
 
 
 def _render_pdf(
@@ -769,6 +802,7 @@ def _render_pdf(
     *,
     table_style: str = "formal_black",
     foreign: bool = False,
+    rtl: bool | None = None,
 ) -> bytes:
     """PDF through the offline renderer (embedded fonts, Arabic shaping): used only without an
     office suite."""
@@ -776,7 +810,7 @@ def _render_pdf(
 
     from app.analysis.pdf_renderer import render_pdf
 
-    rtl = bool(foreign and _blocks_have_arabic(rendered.blocks, context))
+    eff_rtl = bool(foreign and _blocks_have_arabic(rendered.blocks, context)) if rtl is None else bool(rtl)
     blocks: list[dict] = []
     number = 0
     for block in rendered.blocks:
@@ -796,16 +830,33 @@ def _render_pdf(
                 number += 1
                 blocks.append({"t": "p", "text": "• " + item})
         elif kind == "table":
-            width = block.get("widths") or _infer_widths(block["head"], block["rows"])
-            if block.get("no_head"):
-                spans = block.get("spans")
+            b_head = block.get("head") or []
+            b_rows = block.get("rows") or []
+            width = block.get("widths") or _infer_widths(b_head, b_rows)
+            if block.get("no_head") or not b_head:
+                raw_spans = block.get("spans")
+                ncols = max((len(r) for r in b_rows), default=1)
+                if raw_spans and isinstance(raw_spans, list) and raw_spans and isinstance(raw_spans[0], dict):
+                    spans: list[list[list[int]]] = [[[1, 1] for _ in range(ncols)] for _ in range(len(b_rows))]
+                    for sp_item in raw_spans:
+                        sr = int(sp_item.get("r", 0))
+                        sc = int(sp_item.get("c", 0))
+                        srs = max(1, int(sp_item.get("rs", 1)))
+                        scs = max(1, int(sp_item.get("cs", 1)))
+                        if 0 <= sr < len(spans) and 0 <= sc < ncols:
+                            for dr in range(srs):
+                                for dc in range(scs):
+                                    if sr + dr < len(spans) and sc + dc < ncols:
+                                        spans[sr + dr][sc + dc] = [srs, scs] if (dr == 0 and dc == 0) else [0, 0]
+                else:
+                    spans = raw_spans  # type: ignore[assignment]
                 grid_rows: list[list[dict]] = []
-                for r_idx, row in enumerate(block["rows"]):
+                for r_idx, row in enumerate(b_rows):
                     g_row: list[dict] = []
                     for c_idx, cell_text in enumerate(row):
                         rs, cs = (
                             spans[r_idx][c_idx]
-                            if spans and r_idx < len(spans) and c_idx < len(spans[r_idx])
+                            if spans and r_idx < len(spans) and isinstance(spans[r_idx], list) and c_idx < len(spans[r_idx])
                             else [1, 1]
                         )
                         if rs == 0 or cs == 0:
@@ -816,7 +867,13 @@ def _render_pdf(
                 blocks.append({"t": "grid", "rows": grid_rows, "widths": width})
             else:
                 blocks.append(
-                    {"t": "table", "head": block["head"], "rows": block["rows"], "widths": width}
+                    {
+                        "t": "table",
+                        "head": b_head,
+                        "rows": b_rows,
+                        "widths": width,
+                        "spans": block.get("spans"),
+                    }
                 )
     task = SimpleNamespace(country_code="", vehicle_model="")
     rv = SimpleNamespace(consulting=None)
@@ -829,5 +886,5 @@ def _render_pdf(
         notices=[],
         blocks=blocks,
         table_style=table_style,
-        rtl=rtl,
+        rtl=eff_rtl,
     )

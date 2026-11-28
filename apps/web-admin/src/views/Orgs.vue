@@ -5,11 +5,24 @@
 import { ROLE_HINT, ROLE_LABEL, type OrgOut, type Role, type UserOut, userName } from '@cyshuhe/shared'
 import { useAuth } from '../auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from '../api'
 
+interface TrialUserItem {
+  id: string
+  email: string
+  display_name: string
+  org_id: string | null
+  org_name: string
+  is_active: boolean
+}
+
+const route = useRoute()
 const orgs = ref<OrgOut[]>([])
 const users = ref<UserOut[]>([])
+const trialUsers = ref<TrialUserItem[]>([])
+const trialSectionRef = ref<HTMLElement | null>(null)
 const newOrg = ref('')
 const showInactiveOrgs = ref(false)
 const editing = ref<OrgOut | null>(null)
@@ -37,7 +50,7 @@ const roleSummary = computed(() => {
 const opsAdminCount = computed(() => admins.value.filter((u) => u.is_active && u.role === 'ops_admin').length)
 const superAdminCount = computed(() => admins.value.filter((u) => u.is_active && u.role === 'platform_admin').length)
 const inactiveAdminCount = computed(() => admins.value.filter((u) => !u.is_active).length)
-const hasAnyDialogOpen = computed(() => dialog.open || pwdDialog.open || !!editing.value)
+const hasAnyDialogOpen = computed(() => dialog.open || pwdDialog.open || promoteDialog.open || !!editing.value)
 const me = useAuth()
 const SOURCE: Record<string, string> = { admin: '超级管理员开通', portal: '门户注册' }
 const ORG_ROLE_DISPLAY: Record<'member' | 'viewer', string> = {
@@ -58,12 +71,71 @@ function filteredUsersOf(orgId: string): UserOut[] {
 async function load() {
   const orgQuery = showInactiveOrgs.value ? '?include_inactive=true' : ''
   const userQuery = showInactiveOrgs.value ? '?include_inactive_orgs=true' : ''
-  ;[orgs.value, users.value] = await Promise.all([
+  ;[orgs.value, users.value, trialUsers.value] = await Promise.all([
     api.get<OrgOut[]>(`/admin/orgs${orgQuery}`),
     api.get<UserOut[]>(`/admin/users${userQuery}`),
+    api.get<TrialUserItem[]>('/admin/trial-users').catch(() => []),
   ])
   if (!expanded.value.length && orgs.value.length <= 3) {
     expanded.value = orgs.value.filter((o) => o.is_active).map((o) => o.id)
+  }
+  if (route.query.trial === '1') {
+    await nextTick()
+    trialSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
+watch(
+  () => route.query.trial,
+  async (val) => {
+    if (val === '1') {
+      await nextTick()
+      trialSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  },
+)
+
+const promoteDialog = reactive({
+  open: false,
+  user: null as TrialUserItem | null,
+  orgId: '',
+  role: 'member' as Role,
+  canExport: false,
+  saving: false,
+})
+function openPromote(u: TrialUserItem) {
+  const activeOrgs = orgs.value.filter((o) => o.is_active)
+  const matched = activeOrgs.find((o) => o.name === u.org_name) || activeOrgs[0]
+  promoteDialog.user = u
+  promoteDialog.orgId = matched?.id || ''
+  promoteDialog.role = 'member'
+  promoteDialog.canExport = false
+  promoteDialog.open = true
+}
+async function submitPromote() {
+  if (!promoteDialog.user) return
+  if (!promoteDialog.orgId) {
+    ElMessage.warning('请先选择要转入的正式企业')
+    return
+  }
+  promoteDialog.saving = true
+  try {
+    await api.post(`/admin/users/${promoteDialog.user.id}/promote`, {
+      org_id: promoteDialog.orgId,
+      role: promoteDialog.role,
+      can_export: promoteDialog.role === 'viewer' && promoteDialog.canExport,
+    })
+    const targetOrgId = promoteDialog.orgId
+    promoteDialog.open = false
+    ElMessage.success('已转入正式签约企业并解除体验沙箱隔离')
+    await load()
+    if (targetOrgId && !expanded.value.includes(targetOrgId)) {
+      expanded.value = [...expanded.value, targetOrgId]
+    }
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    promoteDialog.saving = false
   }
 }
 
@@ -162,7 +234,13 @@ async function updateUser(u: UserOut, body: { role?: Role; can_export?: boolean;
   try {
     await api.patch(`/admin/users/${u.id}`, body)
     await load()
-    if (body.role !== undefined) ElMessage.success(`已改为${ROLE_LABEL[body.role]}`)
+    if (body.role !== undefined) {
+      ElMessage.success(
+        body.role === 'viewer'
+          ? `已改为${ROLE_LABEL[body.role]}（文件下载默认关闭，可按需开启右侧开关）`
+          : `已改为${ROLE_LABEL[body.role]}`,
+      )
+    }
     else if (body.is_active !== undefined) ElMessage.success(body.is_active ? '账号已启用' : '账号已停用')
     else ElMessage.success(body.can_export ? '已允许下载' : '已关闭下载')
   } catch (e) {
@@ -217,7 +295,18 @@ async function submitAccount() {
   }
 }
 
-onMounted(load)
+const isMobile = ref(typeof window !== 'undefined' ? window.innerWidth <= 768 : false)
+function syncViewport() {
+  if (typeof window !== 'undefined') isMobile.value = window.innerWidth <= 768
+}
+onMounted(() => {
+  syncViewport()
+  window.addEventListener('resize', syncViewport)
+  void load()
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', syncViewport)
+})
 </script>
 
 <template>
@@ -268,16 +357,18 @@ onMounted(load)
               </div>
             </div>
             <el-table v-if="filteredUsersOf(row.id).length" :data="filteredUsersOf(row.id)" size="small" data-testid="org-users">
-              <el-table-column label="姓名" width="132"><template #default="{ row: u }">{{ userName(u) }}</template></el-table-column>
-              <el-table-column prop="email" label="登录邮箱" min-width="190" show-overflow-tooltip />
-              <el-table-column label="角色" width="196"><template #default="{ row: u }">
-                <el-select :model-value="u.role" size="small" style="width: 176px" :data-testid="`user-role-${u.email}`" @change="(r: Role) => updateUser(u, { role: r })">
+              <el-table-column label="姓名" width="120"><template #default="{ row: u }">{{ userName(u) }}</template></el-table-column>
+              <el-table-column prop="email" label="登录邮箱" min-width="206" />
+              <el-table-column label="角色" width="244"><template #default="{ row: u }">
+                <el-select :model-value="u.role" size="small" style="width: 216px" :data-testid="`user-role-${u.email}`" @change="(r: Role) => updateUser(u, { role: r })">
                   <el-option v-for="r in (['member', 'viewer'] as const)" :key="r" :label="ORG_ROLE_DISPLAY[r]" :value="r" />
                 </el-select></template></el-table-column>
               <el-table-column label="权限边界" min-width="210"><template #default="{ row: u }"><span class="muted">{{ ORG_ROLE_SCOPE_TEXT[(u.role === 'viewer' ? 'viewer' : 'member')] }}</span></template></el-table-column>
               <el-table-column label="下载文件" width="96"><template #default="{ row: u }">
                 <el-switch v-if="u.role === 'viewer'" :model-value="!!u.can_export" :data-testid="`user-export-${u.email}`" @change="(v: string | number | boolean) => updateUser(u, { can_export: !!v })" />
-                <el-switch v-else :model-value="true" disabled aria-label="企业用户都可以下载" /></template></el-table-column>
+                <el-tooltip v-else content="企业编辑者默认拥有下载与导出权限" placement="top">
+                  <span style="display: inline-flex"><el-switch :model-value="true" disabled aria-label="企业用户都可以下载" /></span>
+                </el-tooltip></template></el-table-column>
               <el-table-column v-if="new Set(users.map((x) => x.signup_source || 'admin')).size > 1" label="来源" width="128"><template #default="{ row: u }">{{ SOURCE[u.signup_source || 'admin'] }}</template></el-table-column>
               <el-table-column label="启用状态" width="124" class-name="cy-col-nowrap">
                 <template #default="{ row: u }">
@@ -285,7 +376,7 @@ onMounted(load)
                   <span class="state-inline">{{ u.is_active ? '正常' : '已停用' }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="124" fixed="right" class-name="cy-col-nowrap">
+              <el-table-column label="操作" width="124" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap">
                 <template #default="{ row: u }">
                   <el-button link type="primary" size="small" class="org-op-link" :data-testid="`user-reset-pwd-${u.email}`" @click="openResetPwd(u)">重置密码</el-button>
                 </template>
@@ -308,7 +399,7 @@ onMounted(load)
         </template>
       </el-table-column>
       <el-table-column label="账号分布" width="250"><template #default="{ row }">企业用户 {{ memberCountOf(row.id) }} · 普通查看者 {{ viewerCountOf(row.id) }}<template v-if="inactiveOrgCountOf(row.id) > 0">（停用 {{ inactiveOrgCountOf(row.id) }} 个）</template></template></el-table-column>
-      <el-table-column label="操作" width="168" fixed="right" class-name="cy-col-nowrap">
+      <el-table-column label="操作" width="168" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap">
         <template #default="{ row }">
           <el-button link type="primary" size="small" class="org-op-link" :data-testid="`org-rename-${row.id}`" @click.stop="renameOrg(row)">修改名称</el-button>
           <el-button v-if="row.is_active" link type="danger" size="small" class="org-op-link" :data-testid="`org-toggle-${row.id}`" @click.stop="toggleOrgActive(row, false)">停用</el-button>
@@ -324,7 +415,7 @@ onMounted(load)
       </div>
       <el-table :data="admins" border size="small" data-testid="admin-users">
         <el-table-column label="姓名" width="140"><template #default="{ row }">{{ userName(row) }}</template></el-table-column>
-        <el-table-column prop="email" label="登录邮箱" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="email" label="登录邮箱" min-width="210" />
         <el-table-column label="角色" width="180"><template #default="{ row }">
           <span v-if="row.id === me.user?.id">{{ ROLE_LABEL[row.role as Role] }}（当前登录）</span>
           <el-select v-else :model-value="row.role" size="small" style="width: 128px" @change="(r: Role) => updateUser(row, { role: r })">
@@ -337,7 +428,7 @@ onMounted(load)
             <span class="state-inline">{{ row.is_active ? '正常' : '已停用' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="124" fixed="right" class-name="cy-col-nowrap">
+        <el-table-column label="操作" width="124" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap">
           <template #default="{ row }">
             <el-button link type="primary" size="small" class="org-op-link" @click="openResetPwd(row)">重置密码</el-button>
           </template>
@@ -345,6 +436,57 @@ onMounted(load)
       </el-table>
       <p v-if="opsAdminCount === 0" class="role-empty-note">当前还没有开通运维管理员账号；可点右上角新建管理员并选择运维管理员开通。</p>
     </section>
+
+    <section v-if="trialUsers.length || route.query.trial === '1'" ref="trialSectionRef" class="admins" data-testid="trial-users-section">
+      <div class="detail-head">
+        <h2>门户独立体验空间账号<small class="section-count">（共 {{ trialUsers.length }} 个 · 物理沙箱隔离）</small></h2>
+      </div>
+      <el-table v-if="trialUsers.length" :data="trialUsers" border size="small" data-testid="trial-users-table">
+        <el-table-column label="姓名" width="140"><template #default="{ row }">{{ userName(row) }}</template></el-table-column>
+        <el-table-column prop="email" label="登录邮箱" min-width="210" />
+        <el-table-column prop="org_name" label="注册填报单位" min-width="200" />
+        <el-table-column label="隔离状态" width="180">
+          <template #default="{ row }">
+            <span class="muted">{{ row.is_active ? '独立体验沙箱 · 只读隔离' : '已停用' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="160" :fixed="isMobile ? false : 'right'" class-name="cy-col-nowrap">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" class="org-op-link" :data-testid="`promote-trial-${row.email}`" @click="openPromote(row)">转入签约企业</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <p v-else class="empty">当前暂无门户自助注册体验账号</p>
+    </section>
+
+    <el-dialog v-model="promoteDialog.open" :title="promoteDialog.user ? `转入签约企业 · ${promoteDialog.user.email}` : '转入签约企业'" width="min(480px, 94vw)">
+      <el-form label-position="top">
+        <el-form-item label="归属正式签约企业">
+          <el-select v-model="promoteDialog.orgId" style="width: 100%" placeholder="选择正式企业" data-testid="promote-org-select">
+            <el-option v-for="o in orgs.filter((x) => x.is_active)" :key="o.id" :label="o.name" :value="o.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="开通企业内角色">
+          <el-radio-group v-model="promoteDialog.role" class="role-pick" data-testid="promote-role-pick">
+            <el-radio value="member">
+              <strong>企业用户（编辑者）</strong>
+              <small>可新建、编辑、生成与下载归属企业的合规评估及海外属地准入材料</small>
+            </el-radio>
+            <el-radio value="viewer">
+              <strong>普通查看者（只读用户）</strong>
+              <small>仅限查阅归属企业的共享项目与法规简报，禁止新建或修改</small>
+            </el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="promoteDialog.role === 'viewer'">
+          <el-checkbox v-model="promoteDialog.canExport" data-testid="promote-can-export">允许下载正式评估文件与准入申报材料</el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="promoteDialog.open = false">取消</el-button>
+        <el-button type="primary" :loading="promoteDialog.saving" data-testid="promote-submit" @click="submitPromote">确认转正</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="dialog.open" :title="dialog.org ? `${dialog.org.name} · 新建企业账号` : '新建管理员'" width="min(480px, 94vw)">
       <el-form label-position="top">

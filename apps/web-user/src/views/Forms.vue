@@ -752,7 +752,7 @@ h2 small { font-weight: 400; color: var(--el-text-color-secondary); font-size: 1
 .annex-hint { color: #1d4ed8; font-size: 13px; line-height: 1.55; }
 .fold { border: none; margin: 4px 0; } .fold :deep(.el-collapse-item__header) { font-size: 14px; }
 .field { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--el-border-color-extra-light); }
-.field.missing { background: linear-gradient(90deg, #fff8e8, transparent 40%); }
+.field.missing { background: #fffbeb; }
 .field.located { background: #eff6ff; box-shadow: inset 3px 0 0 #2563eb; padding-left: 12px; transition: background 0.3s; }
 .forms-page small { font-size: 13px; }
 .label { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }

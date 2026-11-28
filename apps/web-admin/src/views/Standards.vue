@@ -124,11 +124,11 @@ onMounted(load)
 
     <el-table :data="pageItems" v-loading="loading" border max-height="calc(100vh - 260px)" scrollbar-always-on>
       <el-table-column v-if="!country" label="归属" width="108" class-name="cy-col-nowrap"><template #default="{ row }">{{ nameOf(row.country_code) }}</template></el-table-column>
-      <el-table-column prop="number" label="标准号" width="176" show-overflow-tooltip class-name="cy-col-nowrap" />
+      <el-table-column prop="number" label="标准号" min-width="196" />
       <el-table-column prop="title" label="名称" min-width="184" class-name="cy-clamp-2"><template #default="{ row }"><span :title="row.title">{{ row.title }}</span><el-link v-if="row.detail_url" :href="row.detail_url" target="_blank" type="primary" class="src-link">官方↗</el-link></template></el-table-column>
-      <el-table-column prop="kind" label="性质" width="72" class-name="cy-col-nowrap" />
-      <el-table-column prop="status" label="状态" width="80" class-name="cy-col-nowrap" />
-      <el-table-column label="实施日期" width="104" class-name="cy-col-nowrap"><template #default="{ row }">{{ row.effective_on || '—' }}</template></el-table-column>
+      <el-table-column prop="kind" label="性质" width="96" class-name="cy-col-nowrap" />
+      <el-table-column prop="status" label="状态" width="104" class-name="cy-col-nowrap" />
+      <el-table-column label="实施日期" width="124" class-name="cy-col-nowrap"><template #default="{ row }">{{ row.effective_on || '—' }}</template></el-table-column>
       <el-table-column label="数据类别" min-width="176">
         <template #default="{ row }">
           <el-tag v-for="t in row.topics" :key="t" size="small" class="tag">{{ t }}</el-tag>

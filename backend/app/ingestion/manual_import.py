@@ -84,6 +84,12 @@ async def import_manual_file(
     content = source.file.read_bytes()
     digest = ArchiveStore.sha256(content)
     async with sf() as s:
+        from sqlalchemy import text as sa_text
+
+        await s.execute(
+            sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": f"doc_ver:{country}:{source.source_url}"},
+        )
         site = (
             await s.execute(
                 select(SourceSite).where(
@@ -164,6 +170,7 @@ async def import_manual_file(
         if legal_status not in {s.value for s in LegalStatus}:
             raise ValueError(f"现行状态不合法：{legal_status}")
         stored_digest, rel = archive.put(content)
+        await s.scalar(select(Document.id).where(Document.id == doc.id).with_for_update())
         last_no = (
             await s.execute(
                 select(DocumentVersion.version_no)

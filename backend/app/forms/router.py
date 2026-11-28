@@ -36,8 +36,13 @@ class AnswersIn(BaseModel):
 
 
 async def _task(session: AsyncSession, task_id: uuid.UUID, user: Principal) -> AnalysisTask:
+    from app.analysis.chat_advisor import viewer_owner
+
     task = await session.get(AnalysisTask, task_id)
     if task is None or task.org_id != user.org_id:
+        raise HTTPException(404, "未找到该合规评估项目")
+    owner = viewer_owner(task)
+    if owner is not None and owner != str(user.user_id):
         raise HTTPException(404, "未找到该合规评估项目")
     return task
 
@@ -484,6 +489,7 @@ async def _export_instance_file(
     *,
     annex: bool = False,
     want_docx: bool = False,
+    foreign_only: bool = False,
 ) -> Response:
     import asyncio
     from functools import partial
@@ -499,10 +505,21 @@ async def _export_instance_file(
     task = await session.get(AnalysisTask, row.task_id) if row.task_id else None
     task_title = task.title if task else ""
     answers = dict(row.answers or {})
+    is_foreign_form = str(form.get("country") or "").upper() not in ("", "CN")
     await session.close()
 
+    # Redline 0.2 & Redline 5.1: 默认原样写入企业填报字面值（契约见 tests/test_official_forms_api.py:108）；
+    # 显式传 foreign_only=true 时对中文填报值执行东道国语种转译；外文原表附页/表头/页眉页脚在 service.py 中恒定零中文。
     data, _report, too_long = await run_in_threadpool(
-        partial(service.render, form, answers, facts, allow_annex=annex)
+        partial(
+            service.render,
+            form,
+            answers,
+            facts,
+            allow_annex=annex,
+            foreign_only=bool(foreign_only and is_foreign_form),
+            foreign_annex=is_foreign_form,
+        )
     )
     if too_long:
         names = "；".join(
@@ -558,14 +575,34 @@ async def export_pdf(
     session: SessionDep,
     annex: bool = False,
     fmt: str | None = None,
+    foreign_only: bool = False,
 ) -> Response:
     return await _export_instance_file(
-        instance_id, request, user, session, annex=annex, want_docx=(fmt == "docx")
+        instance_id,
+        request,
+        user,
+        session,
+        annex=annex,
+        want_docx=(fmt == "docx"),
+        foreign_only=foreign_only,
     )
 
 
 @router.get("/instances/{instance_id}/export.docx")
 async def export_docx(
-    instance_id: uuid.UUID, request: Request, user: UserDep, session: SessionDep, annex: bool = False
+    instance_id: uuid.UUID,
+    request: Request,
+    user: UserDep,
+    session: SessionDep,
+    annex: bool = False,
+    foreign_only: bool = False,
 ) -> Response:
-    return await _export_instance_file(instance_id, request, user, session, annex=annex, want_docx=True)
+    return await _export_instance_file(
+        instance_id,
+        request,
+        user,
+        session,
+        annex=annex,
+        want_docx=True,
+        foreign_only=foreign_only,
+    )

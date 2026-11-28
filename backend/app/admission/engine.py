@@ -164,18 +164,25 @@ def law_name(title: str) -> str:
 
 
 def _cut(text: str, limit: int) -> str:
-    from app.analysis.clause_gate import _close_delims_before_ellipsis, find_clean_sentence_cut
+    from app.analysis.clause_gate import (
+        _close_delims_before_ellipsis,
+        _strip_dangling_tail,
+        find_clean_sentence_cut,
+    )
 
     if len(text) <= limit:
         return text
     cut_end = find_clean_sentence_cut(text, limit)
     if cut_end > 0:
-        return _close_delims_before_ellipsis(text[:cut_end].rstrip(" /\n\t")) + "……"
+        clean = _strip_dangling_tail(text[:cut_end]).rstrip(" 、；;，,：:—–-/\n\t")
+        if clean:
+            return _close_delims_before_ellipsis(clean) + "……"
     end = limit
     if end < len(text) and text[end - 1].isascii() and text[end].isascii():
         while end > limit - 24 and text[end - 1].isalnum():
             end -= 1
-    return _close_delims_before_ellipsis(text[:end].rstrip()) + "……"
+    clean_fb = _strip_dangling_tail(text[:end]).rstrip(" 、；;，,：:—–-/\n\t")
+    return _close_delims_before_ellipsis(clean_fb or text[:end].rstrip()) + "……"
 
 
 async def render_project(

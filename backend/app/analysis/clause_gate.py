@@ -20,7 +20,11 @@ import re
 
 _ARABIC = re.compile(r"[؀-ۿݐ-ݿ]")
 _OTHER_FOREIGN_SCRIPT = re.compile(
-    r"[\u0400-\u04ff\u0590-\u05ff\u0980-\u09ff\u0e00-\u0e7f\u3040-\u309f\uac00-\ud7af]"
+    r"[\u0400-\u04ff\u0590-\u05ff\u0980-\u09e5\u09f0-\u09ff\u0e00-\u0e4f\u0e5a-\u0e7f\u3040-\u309f\uac00-\ud7af]"
+)
+_ALL_SCRIPT_DIGITS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹০১২৩৪৫৬৭৮৯๐๑๒๓๔๕๖๗๘๙",
+    "0123456789012345678901234567890123456789",
 )
 _LATIN_WORD = re.compile(r"(?<![A-Za-z])[a-z]{4,}(?![A-Za-z])")
 _UNCLEAR = re.compile(r"OCR(?![-–][ABab]\b)|识别不清|原文不清|字迹不清|（不清）|\(illegible\)|�")
@@ -135,7 +139,14 @@ def why_unusable(zh: str | None, title: str | None = "", original: str | None = 
         return "夹着大段未译的外文"
     if len(_LATIN_WORD.findall(bare)) >= 3 or len(re.findall(r"(?<![A-Za-z])(of|the|and|to)(?![A-Za-z])", bare)) >= 3:
         return "夹着未译的外文词"
-    if _PHONE.search(t) or (_EMAIL.search(t) and len(t) < 600):
+    if _PHONE.search(t) or (
+        _EMAIL.search(t)
+        and len(t) < 600
+        and not re.search(
+            r"第\s*[0-9一二三四五六七八九十百]+[A-Za-z]*\s*[条款节项]|应当|必须|不得|可以|日内|小时内|工作日|历日|通知|通报|报告|申报|报送|提交|递交|发送至|发至",
+            t,
+        )
+    ):
         return "含个人电话或邮箱"
     head = t[:60]
     if _PREAMBLE.search(head) or _SIGNATURE.search(t[-40:]):
@@ -146,8 +157,8 @@ def why_unusable(zh: str | None, title: str | None = "", original: str | None = 
     if re.search(r"(?:^|[\n；;。])\s*(?:T|ZE\s*\d+|ss)\s+[一-鿿]", t):
         return "列举编号错乱"
     if o:
-        nums = set(re.findall(r"\d+", o.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))))
-        cited = [n for n in re.findall(r"第\s*(\d+)\s*条", t[12:])]  # 开头本条的条号不算
+        nums = set(re.findall(r"\d+", o.translate(_ALL_SCRIPT_DIGITS)))
+        cited = [n for n in re.findall(r"第\s*(\d+)\s*条", t.translate(_ALL_SCRIPT_DIGITS)[12:])]  # 开头本条的条号不算
         if nums and len(cited) >= 2 and sum(1 for n in cited if n not in nums) >= 2:
             return "交叉引用的条号和原文对不上"
     return ""
@@ -176,14 +187,29 @@ def script_ok(original: str | None, language: str | None) -> bool:
 
 
 _UNIT_AFTER_NUM = (
-    r"(?:年|个月|月|日|天|周|小时|时|分钟|分|秒|工作日|自然日|人|万|千|百|亿|元|镑|迪拉姆|第纳尔|新元|里拉|美元|欧元|"
-    r"项|条|款|目|章|节|段|编|步|处|份|部|类|种|个|次|家|名|位|辆|台|套|张|页|米|千米|公里|倍|成|级|档|号|版|分之)"
+    r"(?:(?i:days?|months?|years?|hours?|minutes?|seconds?|weeks?|working|business|calendar|per\s*cent|percent|"
+    r"jours?|mois|ans?|ann[ée]es?|heures?|secondes?|semaines?|ouvrables?|"
+    r"tagen?|monaten?|jahren?|stunden?|sekunden?|wochen?|werktagen?|prozent|"
+    r"d[íi]as?|meses|a[ñn]os?|horas?|segundos?|semanas?|h[áa]biles|[úu]teis|"
+    r"giorn[io]|mesi|ann[io]|ore|settiman[ea]|lavorativ[io]|"
+    r"dagen|maanden|jaren|uren|weken|werkdagen|"
+    r"dni(?:ach)?|miesi[ęe]cy|lat(?:ach)?|godzin\w*|tygodni\w*|roboczych|"
+    r"g[üu]n\w*|ay\w*|y[ıi]l\w*|saat\w*|hafta\w*|i[şs]\s*g[üu]n\w*|"
+    r"hari|bulan|tahun|jam|minggu|ng[àa]y|th[áa]ng|n[ăa]m|gi[ờo]|tu[ầa]n|"
+    r"to|or|and|[àa]|ou|bis|oder|"
+    r"дн(?:ей|я|ень|ями|ях)|суток|сутк\w*|месяц\w*|лет|год\w*|час\w*|минут\w*|секунд\w*|недел\w*|рабоч\w*|календарн\w*|процент\w*|рубл\w*|тысяч\w*|миллион\w*|до|или)\b|"
+    r"(?:يوم(?:اً|ا)?|أيام|شهر(?:اً|ا)?|أشهر|شهور|سن(?:ة|وات)|عام(?:اً|ا)?|أعوام|ساع(?:ة|ات)|دقيق(?:ة|ات)|دقائق|ثاني(?:ة|ات)|ثوان|"
+    r"أسبو(?:ع|عين)|أسابيع|عمل|تقويم\w*|بالمئة|بالمائة|في\s*المئة|في\s*المائة|درهم\w*|دينار\w*|جنيه\w*|ريال\w*|ليرة|ألف|آلاف|مليون|ملايين|إلى|أو)(?![\u0600-\u06ff])|"
+    r"年|个月|月|日|天|周|星期|礼拜|小时|时|分钟|分|秒|工作日|自然日|历日|营业日|人|万|千|百|亿|"
+    r"元|镑|迪拉姆|第纳尔|新元|里拉|美元|欧元|卢布|日元|日圆|韩元|泰铢|盾|比索|雷亚尔|法郎|瑞郎|克朗|兹罗提|谢克尔|卢比|塔卡|兰特|奈拉|坚戈|索姆|林吉特|"
+    r"円|원|บาท|일|개월|월|년|시간|분|초|주|영업일|퍼센트|パーセント|営業日|時間|週間|か月|ヶ月|ヵ月|วัน|เดือน|ปี|ชั่วโมง|นาที|วินาที|สัปดาห์|เปอร์เซ็นต์|"
+    r"项|条|款|目|章|节|段|编|步|处|份|部|类|种|个|次|家|名|位|辆|台|套|张|页|米|千米|公里|倍|成|级|档|号|版|分之|至|到|或|及|与|以上|以下|以内|%|％)"
 )
 _MARGIN_LINENO_LINE = re.compile(
-    rf"(?m)(?:^|\n)[ \t]*(?:5|10|15|20|25|30|35|40)[ \t]+(?:\n|[ \t]*(?!{_UNIT_AFTER_NUM})(?=[\u4e00-\u9fff（(第“\"A-Za-z]))"
+    rf"(?m)(?:^|\n)[ \t]*(?:5|10|15|20|25|30|35|40|45|50)[ \t]+(?:\n|[ \t]*(?!{_UNIT_AFTER_NUM})(?=[\u4e00-\u9fffA-Za-zÀ-žА-Яа-яЁё\u0600-\u06ff\u3040-\u30ff\uac00-\ud7af\u0e00-\u0e7f（(第“\"«「『]))"
 )
 _MARGIN_LINENO_INLINE = re.compile(
-    rf"(?<=[，。；：！？）)])[ \t]+(?:5|10|15|20|25|30|35|40)[ \t]+(?!{_UNIT_AFTER_NUM})(?=[\u4e00-\u9fff（(])"
+    rf"(?<=[，。；！？）)])[ \t]+(?:5|10|15|20|25|30|35|40|45|50)[ \t]+(?!{_UNIT_AFTER_NUM})(?=[\u4e00-\u9fff（(])"
 )
 
 
@@ -191,7 +217,9 @@ def clean_margin_numbers(text: str) -> str:
     """Strip Gazette / statute PDF margin line numbers (5, 10, 15, 20, 25...) leaked by OCR."""
     if not text:
         return ""
-    out = _MARGIN_LINENO_LINE.sub(lambda m: "\n" if m.group(0).startswith("\n") else "", text)
+    out = text
+    if len(set(re.findall(r"(?m)(?:^|\n)[ \t]*(5|10|15|20|25|30|35|40|45|50)[ \t]+", out))) >= 2:
+        out = _MARGIN_LINENO_LINE.sub(lambda m: "\n" if m.group(0).startswith("\n") else "", out)
     out = _MARGIN_LINENO_INLINE.sub("", out)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 
@@ -215,10 +243,16 @@ def _close_delims_before_ellipsis(prefix: str) -> str:
 
 
 _ABBREV_BEFORE_DOT_RE = re.compile(
-    r"(?:^|[\s(\[])(?:Art|Arts|Sec|Secs|No|Nos|Ch|Fig|Figs|al|etc|vs|cf|para|paras|sub|pt|vol|rev|ed|e\.g|i\.e|\d+|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})$"
+    r"(?:^|[\s(\[])(?:Art|Arts|Sec|Secs|No|Nos|Ch|Fig|Figs|al|etc|vs|cf|para|paras|sub|pt|vol|rev|ed|e\.g|i\.e|[A-Za-z]|[ivxlcdmIVXLCDM]{1,5})$|"
+    r"(?:^|[\s(\[（；;。：:，,\u4e00-\u9fff])\d+$"
 )
 _DANGLING_LINE_TAIL_RE = re.compile(
-    r"(?:[:：—–\-]|(?:以及|及|和|或|且|并|与|and|or|ou|et|أو|و)|(?:^|[\s（(])(?:\d+\.|[a-zA-Z]\.|[一二三四五六七八九十]+、))\s*$",
+    r"(?:[:：—–\-]+|"
+    r"(?:并且|而且|或者|以及)|"
+    r"(?<![埃涉普提及触危顾波遍企力合吞兼归并参给赐赋授予相交总求饱温柔调附唱应缓中平失让赠尚姑苟暂权施祥谐亲违契])[及和或且并与]|"
+    r"(?<![A-Za-zÀ-ž])(?:and|or|ou|et)(?![A-Za-zÀ-ž])|"
+    r"(?<![\u0600-\u06ff])(?:أو|و)(?![\u0600-\u06ff])|"
+    r"(?:^|(?<=[\s（(；;。：:，,、\u4e00-\u9fff]))(?:\d+\.|[a-zA-Z]\.|[一二三四五六七八九十]+、))\s*$",
     re.IGNORECASE,
 )
 
@@ -231,8 +265,12 @@ def find_clean_sentence_cut(text: str, limit: int) -> int:
     best = -1
     for ch in ("。", "；", ";", "！", "？"):
         pos = prefix.rfind(ch)
-        if pos >= 0 and pos + 1 > best:
-            best = pos + 1
+        while pos >= limit // 3:
+            before_ch = prefix[: pos + 1]
+            if not _DANGLING_LINE_TAIL_RE.search(before_ch[:-1].rstrip()) and pos + 1 > best:
+                best = pos + 1
+                break
+            pos = prefix.rfind(ch, 0, pos)
     for m in re.finditer(r'[A-Za-z0-9)\]"”\u2019]\.(?=\s|$)', prefix):
         dot_end = m.end()
         before_dot = prefix[: dot_end - 1]
@@ -242,7 +280,7 @@ def find_clean_sentence_cut(text: str, limit: int) -> int:
         pos = prefix.rfind(sep)
         while pos >= limit // 3:
             before_sep = prefix[:pos].rstrip()
-            if before_sep and not _DANGLING_LINE_TAIL_RE.search(before_sep):
+            if before_sep and not before_sep.endswith(("、", "，", ",")) and not _DANGLING_LINE_TAIL_RE.search(before_sep):
                 if pos > best:
                     best = pos
                 break
@@ -250,13 +288,21 @@ def find_clean_sentence_cut(text: str, limit: int) -> int:
     return best if best >= limit // 3 else -1
 
 
-def _strip_dangling_tail(fragment: str) -> str:
+def _strip_dangling_tail(fragment: str, *, keep_semicolon: bool = False) -> str:
     s = fragment.rstrip(" /\n\t")
+    had_dash_or_colon = bool(re.search(r"(?:——+|—+|[:：])\s*$", s))
+    trail = " 、，,：:—–-/\n\t" if keep_semicolon else " 、，,；;：:—–-/\n\t"
     while True:
-        nxt = _DANGLING_LINE_TAIL_RE.sub("", s).rstrip(" ，,：:/\n\t")
+        nxt = _DANGLING_LINE_TAIL_RE.sub("", s).rstrip(trail)
         if nxt == s or not nxt:
             break
         s = nxt
+    if had_dash_or_colon:
+        last_period = max(s.rfind("。"), s.rfind("！"), s.rfind("？"))
+        if last_period >= len(s) // 3:
+            stub = s[last_period + 1 :].strip()
+            if stub and not re.search(r"[。；;！!？?]$", stub):
+                s = s[: last_period + 1]
     return s
 
 
@@ -265,7 +311,15 @@ def cut(text: str, limit: int = 220) -> str:
     text = clean_margin_numbers(text or "")
     if len(text) <= limit:
         return text
+    if len(text) <= limit + 36 and re.search(r"[。；;！!？?][”\"）)\]]*$", text.strip()):
+        return text
     cut_end = find_clean_sentence_cut(text, limit)
+    if cut_end <= 0:
+        near_end = find_clean_sentence_cut(text, limit + 45)
+        if near_end > limit:
+            if near_end >= len(text.rstrip()):
+                return text.rstrip()
+            return _close_delims_before_ellipsis(_strip_dangling_tail(text[:near_end])) + "……"
     if cut_end > 0:
         return _close_delims_before_ellipsis(_strip_dangling_tail(text[:cut_end])) + "……"
     end = limit
@@ -276,8 +330,19 @@ def cut(text: str, limit: int = 220) -> str:
 
 
 _HISTORICAL = re.compile(r"颁布原文|历史指南|历史版本|旧版|已废止|已失效|原始版本")
-_YEAR_HEAD = re.compile(r"^\s*(?:新加坡|摩洛哥|埃及|突尼斯|黎巴嫩)?\s*(\d{4})\s*年\s*")
 _YEAR_TAIL = re.compile(r"[（(]\s*\d{4}\s*年[^）)]*[）)]|\s*\d{4}\s*$")
+_YEAR_HEAD_RE_MEMO: re.Pattern[str] | None = None
+
+
+def _year_head_re() -> re.Pattern[str]:
+    global _YEAR_HEAD_RE_MEMO
+    if _YEAR_HEAD_RE_MEMO is None:
+        from app.analysis.document_basis import WORLD
+
+        names = sorted({n.strip() for n in WORLD.values() if n and n.strip()}, key=len, reverse=True)
+        alt = "|".join(re.escape(n) for n in names)
+        _YEAR_HEAD_RE_MEMO = re.compile(rf"^\s*(?:(?:{alt})\s*)?((?:18|19|20)\d{{2}})\s*年\s*")
+    return _YEAR_HEAD_RE_MEMO
 
 
 def superseded_titles(titles: list[str]) -> set[str]:
@@ -286,13 +351,16 @@ def superseded_titles(titles: list[str]) -> set[str]:
     years (“2014年个人数据保护条例”“2021年个人数据保护条例”) — the earlier one."""
     out = {t for t in titles if t and _HISTORICAL.search(t)}
     groups: dict[str, list[tuple[int, str]]] = {}
+    yh_re = _year_head_re()
     for t in titles:
-        m = _YEAR_HEAD.match(t or "")
+        m = yh_re.match(t or "")
         if not m or t in out:
             continue
-        base = _YEAR_TAIL.sub("", t[m.end():]).strip()
+        raw_s = (t or "").lstrip()
+        lead_prefix = raw_s[: raw_s.find(m.group(1))].strip()
+        base = _YEAR_TAIL.sub("", t[m.end() :]).strip()
         if len(base) >= 6 and not re.search(r"修订|公告|令$|勘误|生效|废除|撤销|任命", base):
-            groups.setdefault(base, []).append((int(m.group(1)), t))
+            groups.setdefault(f"{lead_prefix}|{base}", []).append((int(m.group(1)), t))
     for items in groups.values():
         newest = max(y for y, _ in items)
         out |= {t for y, t in items if y < newest}

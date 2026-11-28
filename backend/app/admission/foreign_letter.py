@@ -44,6 +44,10 @@ _LANG_BY_CODE: dict[str, tuple[str, str, str]] = {
     "id": ("id", "印尼文", "Indonesian"),
     "ms": ("ms", "马来文", "Malay"),
     "tr": ("tr", "土耳其文", "Turkish"),
+    "pl": ("pl", "波兰文", "Polish"),
+    "sv": ("sv", "瑞典文", "Swedish"),
+    "bn": ("bn", "孟加拉文", "Bengali"),
+    "he": ("he", "希伯来文", "Hebrew"),
 }
 
 _LANG_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -63,6 +67,10 @@ _LANG_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"印尼语|印尼文|印度尼西亚语|\bindonesian\b", re.I), "id"),
     (re.compile(r"马来语|马来文|\bmalay\b", re.I), "ms"),
     (re.compile(r"土耳其语|土耳其文|\bturkish\b", re.I), "tr"),
+    (re.compile(r"波兰语|波兰文|\bpolish\b", re.I), "pl"),
+    (re.compile(r"瑞典语|瑞典文|\bswedish\b", re.I), "sv"),
+    (re.compile(r"孟加拉语|孟加拉文|\bbengali\b", re.I), "bn"),
+    (re.compile(r"希伯来语|希伯来文|\bhebrew\b", re.I), "he"),
 ]
 
 _PLACEHOLDER_BY_LANG: dict[str, str] = {
@@ -72,6 +80,20 @@ _PLACEHOLDER_BY_LANG: dict[str, str] = {
     "de": "[Offizieller Firmenname des Antragstellers]",
     "es": "[Denominación oficial del solicitante]",
     "pt": "[Denominação oficial do requerente]",
+    "it": "[Denominazione ufficiale del richiedente]",
+    "nl": "[Officiële handelsnaam van de aanvrager]",
+    "id": "[Nama resmi pemohon]",
+    "ms": "[Nama rasmi pemohon]",
+    "tr": "[Başvuru sahibinin resmi unvanı]",
+    "pl": "[Oficjalna nazwa wnioskodawcy]",
+    "sv": "[Sökandens officiella företagsnamn]",
+    "ru": "[Официальное наименование заявителя]",
+    "ja": "[申請者の正式名称]",
+    "ko": "[신청인의 공식 명칭]",
+    "th": "[ชื่อทางการของผู้ยื่นคำขอ]",
+    "vi": "[Tên chính thức của đơn vị nộp đơn]",
+    "bn": "[আবেদনকারীর দাপ্তরিক নাম]",
+    "he": "[השם הרשמי של המבקש]",
 }
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -305,10 +327,21 @@ def verify_foreign_blocks(
         joined_blk = " ".join(blk_strings)
         norm_blk = joined_blk.translate(_EASTERN_ARABIC_DIGITS)
 
+        if re.search(r"CYSH_SECRET", joined_blk, re.I):
+            issues.append(f"第 {idx + 1} 块残留内部占位标记")
+
         if lang_code == "ja":
+            from app.analysis.multilingual_report import has_untranslated_chinese_leak
+
             m_leak = _JA_CHINESE_LEAK_RE.search(joined_blk)
             if m_leak:
                 issues.append(f"第 {idx + 1} 块残留中文工作稿字样“{m_leak.group(0)}”")
+            m_ja_brk = re.search(r"[【】《》]", joined_blk)
+            if m_ja_brk:
+                issues.append(f"第 {idx + 1} 块残留中文括号“{m_ja_brk.group(0)}”")
+            ja_leaks = has_untranslated_chinese_leak(joined_blk, "ja")
+            if ja_leaks:
+                issues.append(f"第 {idx + 1} 块残留未转译简体字或中文语段“{ja_leaks[0]}”")
         else:
             m_cjk = _CJK_RE.search(joined_blk)
             if m_cjk:
@@ -330,7 +363,7 @@ def verify_foreign_blocks(
             ar_cnt = sum(1 for ch in letters if "\u0600" <= ch <= "\u06ff")
             if ar_cnt / len(letters) < 0.25:
                 issues.append("译稿阿拉伯文字符占比过低，疑似未按阿拉伯文输出")
-        elif lang_code in ("en", "fr", "de", "es", "pt", "it", "nl", "id", "ms", "tr", "vi"):
+        elif lang_code in ("en", "fr", "de", "es", "pt", "it", "nl", "id", "ms", "tr", "vi", "pl", "sv"):
             lat_cnt = sum(1 for ch in letters if ("A" <= ch <= "Z") or ("a" <= ch <= "z") or ("\u00c0" <= ch <= "\u024f"))
             if lat_cnt / len(letters) < 0.50:
                 issues.append("译稿拉丁字母占比过低，疑似未按目标语言输出")
@@ -338,6 +371,26 @@ def verify_foreign_blocks(
             cyr_cnt = sum(1 for ch in letters if "\u0400" <= ch <= "\u04ff")
             if cyr_cnt / len(letters) < 0.25:
                 issues.append("译稿西里尔字母占比过低，疑似未按俄文输出")
+        elif lang_code == "ja":
+            kana_cnt = sum(1 for ch in full_text if "\u3040" <= ch <= "\u30ff")
+            if kana_cnt == 0 or kana_cnt / max(1, len(letters)) < 0.08:
+                issues.append("译稿日文假名占比过低，疑似未按日文输出")
+        elif lang_code == "ko":
+            ko_cnt = sum(1 for ch in letters if "\uac00" <= ch <= "\ud7af")
+            if ko_cnt / len(letters) < 0.20:
+                issues.append("译稿韩文谚文占比过低，疑似未按韩文输出")
+        elif lang_code == "th":
+            th_cnt = sum(1 for ch in full_text if "\u0e00" <= ch <= "\u0e7f")
+            if th_cnt / max(1, len(letters)) < 0.20:
+                issues.append("译稿泰文字符占比过低，疑似未按泰文输出")
+        elif lang_code == "bn":
+            bn_cnt = sum(1 for ch in full_text if "\u0980" <= ch <= "\u09ff")
+            if bn_cnt / max(1, len(letters)) < 0.20:
+                issues.append("译稿孟加拉文字符占比过低，疑似未按孟加拉文输出")
+        elif lang_code == "he":
+            he_cnt = sum(1 for ch in letters if "\u0590" <= ch <= "\u05ff")
+            if he_cnt / len(letters) < 0.20:
+                issues.append("译稿希伯来文字符占比过低，疑似未按希伯来文输出")
 
     return issues
 
@@ -353,8 +406,38 @@ def _build_messages(
         "en": "[To be completed: ...]",
         "fr": "[À compléter : ...]",
         "ar": "[يُستكمل: ...]",
-    }.get(lang_code, f"[To be completed in {lang_en}]")
+        "de": "[Zu ergänzen: ...]",
+        "es": "[Pendiente de completar: ...]",
+        "pt": "[A preencher: ...]",
+        "it": "[Da completare: ...]",
+        "nl": "[In te vullen: ...]",
+        "id": "[Untuk dilengkapi: ...]",
+        "ms": "[Untuk dilengkapkan: ...]",
+        "tr": "[Tamamlanacak: ...]",
+        "pl": "[Do uzupełnienia: ...]",
+        "sv": "[Att komplettera: ...]",
+        "ja": "[記入事項：...]",
+        "ko": "[기재 예정: ...]",
+        "th": "[ระบุเพิ่มเติม: ...]",
+        "vi": "[Cần bổ sung: ...]",
+        "ru": "[Подлежит заполнению: ...]",
+        "bn": "[পূরণীয়: ...]",
+        "he": "[להשלמה: ...]",
+    }.get(lang_code, "[ ... ]")
 
+    ja_or_non_cjk_rule = (
+        "2. Write 100% in formal administrative Japanese using standard Japanese Joyo Kanji + Hiragana/Katakana. "
+        "NEVER retain Mainland Simplified Chinese characters (such as 车, 规, 据, 护, 评, 这, 们), Chinese prose, "
+        "or Chinese brackets (`【】《》`); use standard Japanese brackets `[]` or `「」`.\n"
+        if lang_code == "ja"
+        else (
+            f"2. Zero Chinese characters (`\\u4e00-\\u9fff`) and zero Chinese brackets (`【】《》`) may remain "
+            f"anywhere in the output (including titles, headings, law names, attached document names, declaration, "
+            f"and signature block). Translate or transliterate EVERY Chinese company name (e.g. '...有限公司'), "
+            f"person name, address, and parenthetical Chinese note into formal {lang_en} — NEVER retain Chinese "
+            f"characters in parentheses after a Latin/Arabic name, and use ASCII parentheses `()`.\n"
+        )
+    )
     sys_prompt = (
         f"You are a senior legal and regulatory filing translator preparing an official administrative "
         f"application letter in formal {lang_en} for direct submission to a government authority"
@@ -364,11 +447,7 @@ def _build_messages(
         f"1. Output strictly a JSON object `{{\"blocks\": [...]}}` with the EXACT same number of blocks, "
         f"same order, same `type` values (`title`, `heading`, `paragraph`, `table`, `list`), and identical "
         f"table `head` column count and `rows` dimensions as the input.\n"
-        f"2. Zero Chinese characters (`\\u4e00-\\u9fff`) and zero Chinese brackets (`【】《》`) may remain "
-        f"anywhere in the output (including titles, headings, law names, attached document names, declaration, "
-        f"and signature block). Translate or transliterate EVERY Chinese company name (e.g. '...有限公司'), "
-        f"person name, address, and parenthetical Chinese note into formal {lang_en} — NEVER retain Chinese "
-        f"characters in parentheses after a Latin/Arabic name, and use ASCII parentheses `()`.\n"
+        f"{ja_or_non_cjk_rule}"
         f"3. Convert unfilled Chinese placeholders such as `【待补充：…】` or `【待企业填写】` into clean "
         f"square-bracketed {lang_en} placeholders like `{placeholder_example}`, and convert blank date "
         f"`年 月 日` into `____ / ____ / ________`.\n"

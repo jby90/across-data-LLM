@@ -1451,6 +1451,10 @@ async def delete_own_analysis_task(
     连同消息、上传的文件、对照结果和评估记录一起，无法恢复。两步都会进审计日志。
     同一企业的用户都能管理本企业的对话；评估运行中的不能删。"""
     task = await _own_task(session, task_id, user, write=True)
+    await session.execute(
+        select(AnalysisTask.id).where(AnalysisTask.id == task.id).with_for_update()
+    )
+    await session.refresh(task)
     if task.status == "running":
         raise HTTPException(status.HTTP_409_CONFLICT, "这个对话正在评估中，等评估完成后再删除")
     code = format_conversation_code(task.id, task.created_at)
@@ -1481,10 +1485,19 @@ async def rename_own_analysis_task(
     task_id: uuid.UUID,
     user: UserDep,
     session: SessionDep,
-    body: RenameIn | None = Body(default=None),
+    raw_body: dict[str, Any] | None = Body(default=None),
 ) -> dict:
-    """给对话改名。用户起的名字固定下来，不会再被自动标题覆盖；权限核验优先于空标题校验。"""
+    """给对话改名。用户起的名字固定下来，不会再被自动标题覆盖；权限核验优先于字段校验。"""
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
     task = await _own_task(session, task_id, user, write=True)
+    if task.archived_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "对话已归档冻结，请先从归档恢复后再修改名称")
+    try:
+        body = RenameIn.model_validate(raw_body) if raw_body is not None else None
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
     title = " ".join((body.title if body and body.title is not None else "").split())
     if not title:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "名字不能是空的")
@@ -1525,7 +1538,7 @@ async def clone_own_analysis_task(
     if user.role == Role.VIEWER:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "查看账号只能查看，不能新建或修改")
     task = await _own_task(session, task_id, user, write=False)
-    if task.kind != "chat":
+    if task.kind not in ("chat", "advice"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "请使用合规文件项目的复制入口")
     if task.status == "running":
         raise HTTPException(status.HTTP_409_CONFLICT, "当前对话正在运行评估，请等待完成后再复制")
@@ -1540,7 +1553,7 @@ async def clone_own_analysis_task(
     new_task = AnalysisTask(
         org_id=task.org_id,
         created_by=user.user_id,
-        kind="chat",
+        kind=task.kind,
         title=cloned_title,
         title_custom=True,
         country_code=task.country_code,
@@ -1571,9 +1584,13 @@ async def clone_own_analysis_task(
             select(AnalysisMessage).where(AnalysisMessage.task_id == task.id).order_by(AnalysisMessage.seq_no)
         )
     ).all()
+    msg_id_map: dict[uuid.UUID, uuid.UUID] = {}
     for m in msgs:
+        new_msg_id = uuid.uuid4()
+        msg_id_map[m.id] = new_msg_id
         session.add(
             AnalysisMessage(
+                id=new_msg_id,
                 org_id=task.org_id,
                 task_id=new_task.id,
                 seq_no=m.seq_no,
@@ -1606,6 +1623,63 @@ async def clone_own_analysis_task(
                 created_by=user.user_id,
             )
         )
+
+    from app.analysis.attachments import AttachmentReview, TaskAttachment
+
+    att_rows = (
+        await session.scalars(
+            select(TaskAttachment)
+            .where(TaskAttachment.task_id == task.id)
+            .order_by(TaskAttachment.created_at.asc(), TaskAttachment.id)
+        )
+    ).all()
+    att_id_map: dict[uuid.UUID, uuid.UUID] = {}
+    for att in att_rows:
+        new_att_id = uuid.uuid4()
+        att_id_map[att.id] = new_att_id
+        session.add(
+            TaskAttachment(
+                id=new_att_id,
+                org_id=task.org_id,
+                task_id=new_task.id,
+                message_id=msg_id_map.get(att.message_id) if att.message_id else None,
+                filename=att.filename,
+                mime=att.mime,
+                size_bytes=att.size_bytes,
+                sha256=att.sha256,
+                pages=att.pages,
+                text=att.text,
+                readable=att.readable,
+                note=att.note,
+                created_by=user.user_id,
+                review_state=att.review_state if att.review_state != "running" else None,
+                review_error=att.review_error,
+            )
+        )
+    if att_id_map:
+        await session.flush()
+        att_str_map = {str(old_id): str(new_id) for old_id, new_id in att_id_map.items()}
+        rev_rows = (
+            await session.scalars(
+                select(AttachmentReview).where(AttachmentReview.attachment_id.in_(list(att_id_map)))
+            )
+        ).all()
+        for rev in rev_rows:
+            cloned_summary = _copy.deepcopy(rev.summary or {})
+            if isinstance(cloned_summary, dict) and isinstance(cloned_summary.get("attachment_ids"), list):
+                cloned_summary["attachment_ids"] = sorted(
+                    att_str_map.get(str(aid), str(aid)) for aid in cloned_summary["attachment_ids"]
+                )
+            session.add(
+                AttachmentReview(
+                    org_id=task.org_id,
+                    attachment_id=att_id_map[rev.attachment_id],
+                    country_code=rev.country_code,
+                    blocks=_copy.deepcopy(rev.blocks or []),
+                    summary=cloned_summary,
+                    tokens=rev.tokens,
+                )
+            )
 
     await session.commit()
     set_detail(
@@ -1645,8 +1719,10 @@ async def update_user_task_facts(
     task = await session.scalar(
         select(AnalysisTask).where(AnalysisTask.id == task_id).with_for_update()
     )
-    if task is None or task.org_id != user.org_id:
+    if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到该合规评估项目")
+    if task.archived_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="这个对话在归档里，恢复后才能继续")
 
     if task.status == "running":
         raise HTTPException(
@@ -1696,6 +1772,8 @@ async def run_user_analysis_task(
     )
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到该合规评估项目")
+    if task.archived_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="这个对话在归档里，恢复后才能继续")
     if task.sufficiency_score < 100:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1723,6 +1801,8 @@ async def edit_user_report_version(
     )
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到该合规评估项目")
+    if task.archived_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="这个对话在归档里，恢复后才能继续")
 
     rvs = list(
         (
@@ -1934,29 +2014,55 @@ async def export_user_report(
         import zipfile
 
         from app.analysis.document_templates import Rendered, build_docx, build_pdf
-        from app.analysis.multilingual_report import build_multilingual_consulting_report_blocks
+        from app.analysis.multilingual_report import (
+            build_multilingual_consulting_report_blocks_async,
+            release_lang_lexicon_cache,
+        )
+        from app.iam.models import Role
 
+        is_rtl = lang == "ar"
+        is_ro_viewer = user.role == Role.VIEWER
         if ext == "zip":
+            exp_dims = exportable_dimensions(rv)
+            full_blks, full_stem, full_hdr = await build_multilingual_consulting_report_blocks_async(
+                session, task, export_view, None, lang=lang, read_only_viewer=is_ro_viewer
+            )
+            dim_rendered: list[tuple[int, list[dict], str, str]] = []
+            for d_code in sorted(exp_dims):
+                d_idx = int(d_code[1:]) if d_code[1:].isdigit() else 1
+                d_blks, d_stem, d_hdr = await build_multilingual_consulting_report_blocks_async(
+                    session, task, export_view, d_code, lang=lang, read_only_viewer=is_ro_viewer
+                )
+                dim_rendered.append((d_idx, d_blks, d_stem, d_hdr))
+            await session.close()
+
             def _build_i18n_zip() -> bytes:
                 buf = io.BytesIO()
                 with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    full_blks, full_stem, full_hdr = build_multilingual_consulting_report_blocks(task, export_view, None, lang=lang)
-                    zf.writestr(f"00_{full_stem}.docx", build_docx(Rendered(blocks=full_blks), full_hdr, foreign=True, table_style="formal_black"))
-                    for d_idx in range(1, 9):
-                        d_code = f"D{d_idx}"
-                        d_blks, d_stem, d_hdr = build_multilingual_consulting_report_blocks(task, export_view, d_code, lang=lang)
-                        zf.writestr(f"{d_idx:02d}_{d_stem}.docx", build_docx(Rendered(blocks=d_blks), d_hdr, foreign=True, table_style="formal_black"))
+                    zf.writestr(
+                        f"00_{full_stem}.docx",
+                        build_docx(Rendered(blocks=full_blks), full_hdr, foreign=True, table_style="formal_black", rtl=is_rtl),
+                    )
+                    for d_idx, d_blks, d_stem, d_hdr in dim_rendered:
+                        zf.writestr(
+                            f"{d_idx:02d}_{d_stem}.docx",
+                            build_docx(Rendered(blocks=d_blks), d_hdr, foreign=True, table_style="formal_black", rtl=is_rtl),
+                        )
                 return buf.getvalue()
 
             data = await run_in_threadpool(_build_i18n_zip)
-            _, i18n_stem, _ = build_multilingual_consulting_report_blocks(task, export_view, None, lang=lang)
-            out_fname = f"{i18n_stem}.zip"
+            release_lang_lexicon_cache()
+            out_fname = f"{full_stem}.zip"
         else:
-            i18n_blks, i18n_stem, i18n_hdr = build_multilingual_consulting_report_blocks(task, export_view, dimension, lang=lang)
+            i18n_blks, i18n_stem, i18n_hdr = await build_multilingual_consulting_report_blocks_async(
+                session, task, export_view, dimension, lang=lang, read_only_viewer=is_ro_viewer
+            )
+            await session.close()
             builder_fn = build_docx if ext == "docx" else build_pdf
             data = await run_in_threadpool(
-                builder_fn, Rendered(blocks=i18n_blks), i18n_hdr, foreign=True, table_style="formal_black"
+                builder_fn, Rendered(blocks=i18n_blks), i18n_hdr, foreign=True, table_style="formal_black", rtl=is_rtl
             )
+            release_lang_lexicon_cache()
             out_fname = f"{i18n_stem}.{ext}"
     elif ext == "zip":
         data = await run_in_threadpool(build_report_zip, task, export_view)
@@ -2282,8 +2388,13 @@ async def get_clause_citation_card(
 @user_router.get("/chats/guided-options")
 async def guided_options(user: UserDep, session: SessionDep) -> dict[str, list[dict[str, str]]]:
     """引导式入口的可选项：国家与业务场景取自评估流程本身，前端不另写一份。"""
+    from app.analysis.workflow_engine import COUNTRY_NAMES_ZH
+
+    merged = dict(COUNTRY_NAMES_ZH)
+    for item in await active_overseas_countries(session):
+        merged.setdefault(item["code"], item["name"])
     return {
-        "countries": await active_overseas_countries(session),
+        "countries": [{"code": k, "name": v} for k, v in merged.items()],
         "functions": [{"key": k, "label": v} for k, v in SCENARIO_LABELS.items()],
         "scenes": [{"key": k, "label": v} for k, v in BUSINESS_SCENES.items()],
     }
@@ -2291,19 +2402,33 @@ async def guided_options(user: UserDep, session: SessionDep) -> dict[str, list[d
 
 @user_router.post("/chats", response_model=PublicTaskDetail, status_code=201)
 async def create_chat(
-    user: UserDep, session: SessionDep, body: GuidedStartIn | None = None, advice: bool = False
+    user: UserDep,
+    session: SessionDep,
+    raw_body: dict[str, Any] | None = Body(default=None),
+    advice: bool = False,
 ) -> AnalysisTaskDetailOut:
     """新建一次对话式评估:助手先问候,并开始逐项提问。
 
     带引导信息（国家、车型、场景）时这些槽位已填好，后面的追问与自由对话完全共用同一流程。"""
-    if body is not None and not (
-        body.country_code or body.vehicle_model or body.scenario_type or body.business_scene
-    ):
-        body = None  # 空请求体 = 直接对话
-    if user.role == Role.VIEWER and body is not None:
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
+    from app.analysis.workflow_engine import COUNTRY_NAMES_ZH
+
+    has_guided_input = bool(
+        isinstance(raw_body, dict)
+        and any(raw_body.get(k) for k in ("country_code", "vehicle_model", "scenario_type", "business_scene"))
+    )
+    if user.role == Role.VIEWER and has_guided_input:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "查看账号只能新建咨询问答对话，不能发起合规评估任务")
+    body: GuidedStartIn | None = None
+    if raw_body is not None and has_guided_input:
+        try:
+            body = GuidedStartIn.model_validate(raw_body)
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
     if body is not None:
-        allowed_codes = {c["code"] for c in await active_overseas_countries(session)}
+        allowed_codes = set(COUNTRY_NAMES_ZH) | {c["code"] for c in await active_overseas_countries(session)}
         cc = (body.country_code or "").upper()
         if cc not in allowed_codes:
             raise HTTPException(422, "目标国家不在支持范围内")
@@ -2341,23 +2466,29 @@ async def create_chat(
 @user_router.post("/tasks/{task_id}/messages", response_model=PublicTaskDetail)
 async def post_chat_message(
     task_id: uuid.UUID,
-    body: ChatMessageIn,
     user: UserDep,
     session: SessionDep,
+    raw_body: dict[str, Any] | None = Body(default=None),
     copilot: bool = False,
 ) -> AnalysisTaskDetailOut:
     """用户在聊天框发送一条消息:助手记录信息、继续追问,齐备后自动启动分析。"""
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
     session.info["_copilot_mode"] = bool(copilot)
     task = await session.scalar(
         select(AnalysisTask).where(AnalysisTask.id == task_id).with_for_update()
     )
     if task is None or task.org_id != user.org_id or not _visible_to_user(task, user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="对话不存在")
-    if user.role == Role.VIEWER:
-        if viewer_owner(task) != str(user.user_id):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "查看账号只能查看本企业的共享对话，不能在其中发言；请新建咨询对话提问")
-        if body.attachment_ids:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "查看账号只能进行文字咨询问答，不能上传文件")
+    if user.role == Role.VIEWER and viewer_owner(task) != str(user.user_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "查看账号只能查看本企业的共享对话，不能在其中发言；请新建咨询对话提问")
+    try:
+        body = ChatMessageIn.model_validate(raw_body if raw_body is not None else {})
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+    if user.role == Role.VIEWER and body.attachment_ids:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "查看账号只能进行文字咨询问答，不能上传文件")
     if task.archived_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "这个对话在归档里，恢复后才能继续")
     try:

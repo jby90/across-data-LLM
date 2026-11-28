@@ -175,7 +175,7 @@ const USER_CAMERAS: Record<UserMapCam, { label: string; s: number; cx: number; c
 }
 
 const COUNTRIES: Record<string, string> = COUNTRY_NAMES
-const FOLD_LIMIT = 5
+const FOLD_LIMIT = 2
 
 const isFullscreen = ref(false)
 const boardEl = ref<HTMLElement | null>(null)
@@ -200,7 +200,13 @@ const hasAdmission = computed(() => admItems.value.length > 0)
 
 const editable = computed(() => canEdit(auth.user))
 const exportable = computed(() => canExport(auth.user))
-const isPortalTrial = computed(() => auth.user?.signup_source === 'portal')
+const isPortalTrial = computed(() => auth.user?.signup_source === 'portal' && auth.user?.role === 'viewer')
+const worldSvgRef = ref<SVGSVGElement | null>(null)
+const worldSvgWidth = ref(960)
+let worldResizeObs: ResizeObserver | null = null
+const worldLabelFontSize = computed(() =>
+  Math.max(13, Math.ceil((13.3 * 960) / Math.max(240, worldSvgWidth.value))),
+)
 
 function setUserCamera(cam: UserMapCam) {
   activeCam.value = cam
@@ -343,9 +349,19 @@ const rows = computed<Row[]>(() => {
 })
 
 const visibleRows = computed(() => (recentExpanded.value ? rows.value : rows.value.slice(0, FOLD_LIMIT)))
+const visibleDeadlines = computed(() => {
+  const dls = overview.value?.deadlines ?? []
+  return todosExpanded.value ? dls : dls.slice(0, FOLD_LIMIT)
+})
 const visibleTodos = computed(() => {
   const list = overview.value?.todos ?? []
-  return todosExpanded.value ? list : list.slice(0, FOLD_LIMIT)
+  if (todosExpanded.value) return list
+  const rem = Math.max(0, FOLD_LIMIT - visibleDeadlines.value.length)
+  return list.slice(0, rem)
+})
+const hiddenTodoCount = computed(() => {
+  const total = (overview.value?.deadlines?.length ?? 0) + (overview.value?.todos?.length ?? 0)
+  return Math.max(0, total - FOLD_LIMIT)
 })
 
 interface ArcGroup {
@@ -411,11 +427,11 @@ const arcGroups = computed<ArcGroup[]>(() => {
 const activeCountryCodes = computed(() => {
   const codes = new Set<string>()
   for (const r of overview.value?.map_routes || []) {
-    if (r.source_code && WORLD_COUNTRY_PATHS[r.source_code]) codes.add(r.source_code)
-    if (r.recipient_code && WORLD_COUNTRY_PATHS[r.recipient_code]) codes.add(r.recipient_code)
+    if (r.source_code && (WORLD_COUNTRY_PATHS[r.source_code] || getCountryHub(r.source_code))) codes.add(r.source_code)
+    if (r.recipient_code && (WORLD_COUNTRY_PATHS[r.recipient_code] || getCountryHub(r.recipient_code))) codes.add(r.recipient_code)
   }
   for (const a of admItems.value) {
-    if (a.country_code && WORLD_COUNTRY_PATHS[a.country_code]) codes.add(a.country_code)
+    if (a.country_code && (WORLD_COUNTRY_PATHS[a.country_code] || getCountryHub(a.country_code))) codes.add(a.country_code)
   }
   return codes
 })
@@ -423,7 +439,7 @@ const activeCountryCodes = computed(() => {
 const globalLibraryCodes = computed(() => {
   const s = new Set<string>()
   for (const c of kbSummary.value?.countries || []) {
-    if (WORLD_COUNTRY_PATHS[c.country_code] && !activeCountryCodes.value.has(c.country_code)) {
+    if ((WORLD_COUNTRY_PATHS[c.country_code] || getCountryHub(c.country_code)) && !activeCountryCodes.value.has(c.country_code)) {
       s.add(c.country_code)
     }
   }
@@ -432,12 +448,12 @@ const globalLibraryCodes = computed(() => {
 
 const backgroundMapEntries = computed(() =>
   Object.entries(WORLD_COUNTRY_PATHS).filter(
-    ([cc]) => !activeCountryCodes.value.has(cc) && !(showGlobalOverlay.value && globalLibraryCodes.value.has(cc)),
+    ([cc]) => !activeCountryCodes.value.has(cc) && !((showGlobalOverlay.value || isPortalTrial.value) && globalLibraryCodes.value.has(cc)),
   ),
 )
 
 const globalOverlayEntries = computed(() => {
-  if (!showGlobalOverlay.value) return []
+  if (!isPortalTrial.value && !showGlobalOverlay.value) return []
   return (kbSummary.value?.countries || [])
     .filter((c) => WORLD_COUNTRY_PATHS[c.country_code] && !activeCountryCodes.value.has(c.country_code))
     .map((c) => ({
@@ -449,20 +465,24 @@ const globalOverlayEntries = computed(() => {
 })
 
 const activeMapEntries = computed(() =>
-  [...activeCountryCodes.value].map((cc) => ({
-    code: cc,
-    d: WORLD_COUNTRY_PATHS[cc] || '',
-    name: COUNTRIES[cc] || cc,
-    isCn: cc === 'CN',
-  })),
+  [...activeCountryCodes.value]
+    .filter((cc) => Boolean(WORLD_COUNTRY_PATHS[cc]))
+    .map((cc) => ({
+      code: cc,
+      d: WORLD_COUNTRY_PATHS[cc] || '',
+      name: COUNTRIES[cc] || cc,
+      isCn: cc === 'CN',
+    })),
 )
 
 const screenHubNodes = computed(() => {
   const s = camScale.value
   const tx = camTx.value
   const ty = camTy.value
-  const placed: Array<{ x: number; y: number }> = []
-  return [...activeCountryCodes.value]
+  const fScale = worldLabelFontSize.value / 13
+  const minX = 74 * fScale
+  const minY = 16 * fScale
+  const raw = [...activeCountryCodes.value]
     .map((cc) => {
       const hub = getCountryHub(cc)
       if (!hub) return null
@@ -473,11 +493,7 @@ const screenHubNodes = computed(() => {
       const lx = Math.max(24, Math.min(936, sx + (baseLbl.x - hub[0])))
       const ly = Math.max(18, Math.min(424, sy + (baseLbl.y - hub[1])))
       const highlighted = isCountryHighlighted(cc)
-      let showLabel = true
-      if (!highlighted && placed.some((p) => Math.abs(p.x - lx) < 72 && Math.abs(p.y - ly) < 16)) {
-        showLabel = false
-      }
-      if (showLabel) placed.push({ x: lx, y: ly })
+      const pinned = cc === 'CN' || (selectedRouteKey.value !== 'ALL' && highlighted)
       return {
         code: cc,
         name: COUNTRIES[cc] || cc,
@@ -488,10 +504,35 @@ const screenHubNodes = computed(() => {
         ly,
         anchor: baseLbl.anchor,
         highlighted,
-        showLabel,
+        pinned,
       }
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
+
+  const placed: Array<{ x: number; y: number }> = []
+  const ordered = [...raw].sort((a, b) => Number(b.pinned) - Number(a.pinned) || Number(b.isCn) - Number(a.isCn))
+  const showByCode = new Map<string, boolean>()
+  for (const n of ordered) {
+    const collides = placed.some((p) => Math.abs(p.x - n.lx) < minX && Math.abs(p.y - n.ly) < minY)
+    if (collides) {
+      showByCode.set(n.code, false)
+    } else {
+      showByCode.set(n.code, true)
+      placed.push({ x: n.lx, y: n.ly })
+    }
+  }
+  return raw.map((n) => ({
+    code: n.code,
+    name: n.name,
+    isCn: n.isCn,
+    sx: n.sx,
+    sy: n.sy,
+    lx: n.lx,
+    ly: n.ly,
+    anchor: n.anchor,
+    highlighted: n.highlighted,
+    showLabel: showByCode.get(n.code) ?? true,
+  }))
 })
 
 const selectedArc = computed(() => arcGroups.value.find((g) => g.key === selectedRouteKey.value) || null)
@@ -555,7 +596,18 @@ const postureGrade = computed(() => {
       badge: `风险重点管控 · ${summaryMetrics.value.curHigh} 项高风险待闭环`,
     }
   }
-  if (summaryMetrics.value.docsPct >= 85) {
+  const rs = overview.value?.risk_summary
+  const rsCount = rs
+    ? rs.init_high + rs.init_medium + rs.init_low + rs.current_high + rs.current_medium + rs.current_low + rs.mitigated
+    : 0
+  const hasRiskAssessed = rsCount > 0 || summaryMetrics.value.clearedHigh > 0
+  if (!hasRiskAssessed) {
+    return {
+      tone: 'info',
+      badge: '风险待识别定级 · 法定文书齐套推进中',
+    }
+  }
+  if (summaryMetrics.value.docsPct >= 85 && summaryMetrics.value.admPct >= 85) {
     return {
       tone: 'safe',
       badge: '高风险动态清零 · 合规受控放行态',
@@ -640,12 +692,30 @@ const TODO_TAG_VIEWER: Record<string, string> = {
   missing_info: '待经办补齐',
 }
 
+watch(
+  worldSvgRef,
+  (el) => {
+    worldResizeObs?.disconnect()
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const w0 = el.getBoundingClientRect().width
+    if (w0 > 0) worldSvgWidth.value = w0
+    worldResizeObs = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width || el.getBoundingClientRect().width
+      if (w > 0) worldSvgWidth.value = w
+    })
+    worldResizeObs.observe(el)
+  },
+  { flush: 'post' },
+)
+
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   void loadHomeData()
 })
 
 onUnmounted(() => {
+  worldResizeObs?.disconnect()
+  worldResizeObs = null
   if (camAnimId !== null) cancelAnimationFrame(camAnimId)
   document.body.style.overflow = ''
   window.removeEventListener('keydown', onKeydown)
@@ -653,7 +723,7 @@ onUnmounted(() => {
 
 const visibleCards = [
   { path: '/knowledge', icon: 'book', title: '法规知识库', sub: '现行法规双语对照与八维简报' },
-  { path: '/documents', icon: 'shield', title: '合规评估', sub: '法定路径研判与中英双语文书' },
+  { path: '/documents', icon: 'shield', title: '合规评估', sub: '法定路径研判与 17 语种文书' },
   { path: '/admission', icon: 'flow', title: '海外属地准入', sub: '目标国准入事项与官方原表套打' },
 ]
 
@@ -790,7 +860,7 @@ const portalTrialCards = [
         <!-- 空企业状态：保留新建引导与只读说明，同时直观展示平台全球底座能力 -->
         <div v-else-if="!rows.length" class="empty-org-card" data-testid="home-recent-empty">
           <template v-if="editable">
-            <span class="capability-kicker">自助合规评估 · 中英双语报告 · 东道国法定原表一键齐套</span>
+            <span class="capability-kicker">自助合规评估 · 17 语种属地报告 · 东道国法定原表一键齐套</span>
             <h2>开始本单位首个汽车数据跨境合规评估</h2>
             <p>选定数据发出国、数据接收国与车载业务场景后，平台将自动研判法定出境路径、筛选必备合规文件清单并同步呈现跨境流向状态。</p>
             <div v-if="kbSummary" class="capability-strip empty-cap-strip">
@@ -841,14 +911,14 @@ const portalTrialCards = [
           <!-- 商业护航能力价值带（按编辑/只读与导出开关精准区分提示） -->
           <div v-if="kbSummary" class="assurance-ribbon">
             <span class="assure-main">
-              <strong>全球法规底座实时护航：</strong>已联动 {{ kbSummary.covered_jurisdictions }} 国 {{ kbSummary.laws_in_force }} 部现行法规（{{ kbSummary.clauses_total.toLocaleString() }} 条精译条文）、{{ kbSummary.standards_active }} 项汽车标准与 {{ kbSummary.official_forms_total }} 套东道国官方原表
+              <strong>全球法规底座实时护航：</strong>已联动 {{ kbSummary.covered_jurisdictions }} 国 {{ kbSummary.laws_in_force }} 部现行法规（{{ kbSummary.clauses_total.toLocaleString() }} 条可用条文）、{{ kbSummary.standards_active }} 项汽车标准与 {{ kbSummary.official_forms_total }} 套法定申报原表
             </span>
             <span class="assure-pills">
               <RouterLink to="/knowledge" class="assure-link">查阅国别简报 →</RouterLink>
               <span class="assure-chip" :class="{ warn: !editable && !exportable }">
                 {{
                   editable
-                    ? '支持新建评估与中英双语整包导出'
+                    ? '支持新建评估与 17 语种整包导出'
                     : exportable
                       ? '只读审阅权限 · 已授权导出成稿'
                       : '受控只读权限 · 仅限在线审阅（禁止导出）'
@@ -876,7 +946,7 @@ const portalTrialCards = [
               <div class="kpi-head-row">
                 <span class="kpi-label">{{ editable ? '必备文件编撰进度' : '本单位文书齐套审阅' }}</span>
                 <span class="kpi-chip" :class="editable || exportable ? 'safe' : 'gold'">
-                  {{ editable ? '中英双语可导' : (exportable ? '允许导出成稿' : '仅限在线审阅') }}
+                  {{ editable ? '17 语种可导' : (exportable ? '允许导出成稿' : '仅限在线审阅') }}
                 </span>
               </div>
               <div class="kpi-val-row">
@@ -1032,19 +1102,19 @@ const portalTrialCards = [
                       亚太走廊
                     </button>
                     <button
-                      v-if="kbSummary"
+                      v-if="kbSummary && kbSummary.covered_jurisdictions > 0"
                       type="button"
                       class="map-pill overlay-pill"
                       :class="{ active: showGlobalOverlay }"
                       @click="showGlobalOverlay = !showGlobalOverlay"
                     >
-                      {{ showGlobalOverlay ? '已叠 46 国底座' : '叠加 46 国法规网' }}
+                      {{ showGlobalOverlay ? `已叠 ${kbSummary.covered_jurisdictions} 国底座` : `叠加 ${kbSummary.covered_jurisdictions} 国法规网` }}
                     </button>
                   </div>
                 </div>
 
                 <div class="map-stage">
-                  <svg :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="本单位跨境数据流向图">
+                  <svg ref="worldSvgRef" :viewBox="MAP_VIEWBOX" class="world-svg" role="img" aria-label="本单位跨境数据流向图">
                     <g class="u-grid-lines" stroke-width="0.9">
                       <line x1="0" y1="110" x2="960" y2="110" />
                       <line x1="0" y1="220" x2="960" y2="220" />
@@ -1130,7 +1200,7 @@ const portalTrialCards = [
                           :text-anchor="node.anchor"
                           class="hub-label"
                           :class="{ gold: node.isCn }"
-                          font-size="13"
+                          :font-size="worldLabelFontSize"
                           font-weight="600"
                         >
                           {{ node.isCn ? `★${node.name}` : node.name }}
@@ -1161,7 +1231,7 @@ const portalTrialCards = [
                     </div>
                     <div class="mf-actions">
                       <button type="button" class="mf-link" @click="selectedRouteKey = 'ALL'">返回全部流向</button>
-                      <RouterLink to="/admission" class="mf-cta">{{ editable ? '前往办理 →' : '查看准入 →' }}</RouterLink>
+                      <RouterLink :to="{ path: '/admission', query: { country: selectedAdmCountry } }" class="mf-cta">{{ editable ? '前往办理 →' : '查看准入 →' }}</RouterLink>
                     </div>
                   </template>
                   <template v-else>
@@ -1183,14 +1253,14 @@ const portalTrialCards = [
             <div class="posture-col posture-right">
               <div class="p-panel p-panel-flex" data-testid="home-recent">
                 <div class="p-panel-head">
-                  <h2>{{ editable ? '最近项目与办理进度' : '本单位共享项目审阅列表' }}</h2>
+                  <h2>{{ editable ? '最近项目与办理进度' : '本单位共享项目审阅' }}</h2>
                   <span class="p-head-links">
                     <RouterLink to="/documents" data-testid="home-recent-all">评估列表</RouterLink>
                     <RouterLink v-if="hasAdmission" to="/admission" data-testid="home-recent-all-admission">准入列表</RouterLink>
                     <RouterLink to="/analysis" data-testid="home-go-consulting">咨询助手</RouterLink>
                   </span>
                 </div>
-                <div class="p-scroll-list">
+                <div class="p-scroll-list" :class="{ 'is-expanded': recentExpanded }">
                   <div
                     v-for="r in visibleRows"
                     :key="r.key"
@@ -1233,9 +1303,9 @@ const portalTrialCards = [
                   <h2>{{ editable ? '待处理事项与期限提醒' : '审阅关注点与效期动态（只读）' }}</h2>
                   <span>{{ (overview?.deadlines?.length || 0) + (overview?.todos?.length || 0) }} 项</span>
                 </div>
-                <div v-if="overview?.deadlines?.length || overview?.todos?.length" class="p-scroll-list">
+                <div v-if="overview?.deadlines?.length || overview?.todos?.length" class="p-scroll-list" :class="{ 'is-expanded': todosExpanded }">
                   <RouterLink
-                    v-for="dl in overview?.deadlines || []"
+                    v-for="dl in visibleDeadlines"
                     :key="dl.id"
                     :to="dl.to"
                     class="p-todo-row"
@@ -1267,13 +1337,13 @@ const portalTrialCards = [
                 </div>
                 <p v-else class="p-empty p-empty-ok">当前无待处置高风险、超期申报窗口或未读法规变更提醒。</p>
                 <button
-                  v-if="(overview?.todos?.length || 0) > FOLD_LIMIT"
+                  v-if="hiddenTodoCount > 0"
                   type="button"
                   class="p-fold-btn"
                   data-testid="home-todos-fold-toggle"
                   @click="todosExpanded = !todosExpanded"
                 >
-                  {{ todosExpanded ? '收起待办' : `展开其余 ${(overview?.todos?.length || 0) - FOLD_LIMIT} 项` }}
+                  {{ todosExpanded ? '收起待办' : `展开其余 ${hiddenTodoCount} 项` }}
                 </button>
               </div>
             </div>
@@ -1432,11 +1502,11 @@ const portalTrialCards = [
   color: var(--ub-tx-2);
   max-width: 980px;
 }
-.portal-kpi5 {
+.kpi-strip.portal-kpi5 {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 @media (max-width: 1180px) {
-  .portal-kpi5 {
+  .kpi-strip.portal-kpi5 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1574,6 +1644,15 @@ const portalTrialCards = [
 .fs-btn:hover {
   border-color: #2563eb;
   color: #1d4ed8;
+}
+.user-board.is-fullscreen .fs-btn {
+  border-color: #334155;
+  background: rgba(15, 23, 42, 0.78);
+  color: #f8fafc;
+}
+.user-board.is-fullscreen .fs-btn:hover {
+  border-color: #38bdf8;
+  color: #38bdf8;
 }
 
 .recent-loading {
@@ -1979,11 +2058,12 @@ const portalTrialCards = [
   background: var(--ub-panel);
   border: 1px solid var(--ub-border);
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-height: 400px;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 350px;
 }
 .map-topbar {
   display: flex;
@@ -2032,7 +2112,7 @@ const portalTrialCards = [
 }
 
 .map-stage {
-  flex: 1;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2040,12 +2120,12 @@ const portalTrialCards = [
   border: 1px solid var(--ub-border);
   border-radius: 8px;
   overflow: hidden;
-  min-height: 270px;
+  min-height: 236px;
 }
 .world-svg {
   width: 100%;
   height: auto;
-  max-height: 368px;
+  max-height: 332px;
   display: block;
 }
 .u-grid-lines {
@@ -2240,9 +2320,11 @@ const portalTrialCards = [
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 248px;
-  overflow-y: auto;
   padding-right: 2px;
+}
+.p-scroll-list.is-expanded {
+  max-height: 360px;
+  overflow-y: auto;
 }
 .p-proj-row {
   background: var(--ub-inner);

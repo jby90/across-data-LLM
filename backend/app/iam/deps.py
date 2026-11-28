@@ -35,6 +35,7 @@ def _unauthorized() -> HTTPException:
 SUPER_ADMIN_ONLY = (
     "/api/admin/orgs",
     "/api/admin/users",
+    "/api/admin/trial-users",
     "/api/admin/audit-logs",
     "/api/admin/agent-studio",
     "/api/admin/admission/projects",

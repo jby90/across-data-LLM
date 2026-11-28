@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { localTime } from '@cyshuhe/shared'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import GraphEditPanel from '../components/GraphEditPanel.vue'
@@ -314,10 +314,18 @@ async function openRevisionsDrawer() {
     .trim()
     .toUpperCase()
   showRevisionsDrawer.value = true
+  managePopoverOpen.value = false
   await loadRevisions()
 }
 
+const managePopoverOpen = ref(false)
+const isCompact = ref(typeof window !== 'undefined' ? window.innerWidth <= 1024 : false)
+function syncCompact() {
+  if (typeof window !== 'undefined') isCompact.value = window.innerWidth <= 1024
+}
+
 async function openBatchImport() {
+  managePopoverOpen.value = false
   showBatchDialog.value = true
   batchResult.value = null
   const prevBatchCountry = batchCountry.value
@@ -486,6 +494,13 @@ const readRouteCountry = () =>
     .trim()
     .toUpperCase()
 const countryCode = ref(readRouteCountry() || localStorage.getItem(KG_KEY) || '')
+watch(
+  () => [route.query.country, route.query.country_code],
+  () => {
+    const rc = readRouteCountry()
+    if (rc && rc !== countryCode.value) countryCode.value = rc
+  },
+)
 watch(countryCode, (v) => {
   if (v) localStorage.setItem(KG_KEY, v)
   else localStorage.removeItem(KG_KEY)
@@ -850,6 +865,8 @@ watch(
 )
 
 onMounted(async () => {
+  syncCompact()
+  window.addEventListener('resize', syncCompact)
   const q = readRouteCountry()
   if (q) countryCode.value = q
   await Promise.all([
@@ -869,6 +886,10 @@ onMounted(async () => {
       }),
     countryCode.value ? loadGraph() : Promise.resolve(),
   ])
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncCompact)
 })
 </script>
 <template>
@@ -894,13 +915,13 @@ onMounted(async () => {
           >全部国家总览</el-button
         ><el-button data-testid="kg-revisions-btn" @click="openRevisionsDrawer"
           >修订历史</el-button
-        ><el-popover trigger="click" placement="bottom-end" :width="300"
+        ><el-popover v-model:visible="managePopoverOpen" trigger="click" placement="bottom-end" :width="300"
           ><template #reference><el-button data-testid="kg-manage-btn">图谱管理</el-button></template>
           <div class="secondary-actions">
             <p class="page-description">
               重新识别梳理将依据本国已入库法规条文更新图谱；也可按中文模板批量校验导入经人工核实的要素与关系。
             </p>
-            <el-button :loading="loading" @click="runExtract">重新识别梳理本国图谱</el-button>
+            <el-button :loading="loading" @click="managePopoverOpen = false; runExtract()">重新识别梳理本国图谱</el-button>
             <el-button type="primary" plain data-testid="kg-batch-import-btn" @click="openBatchImport">批量校验导入</el-button>
             <el-button @click="openRevisionsDrawer">查看图谱修订历史</el-button>
           </div></el-popover
@@ -1090,7 +1111,7 @@ onMounted(async () => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="132" fixed="right" class-name="cy-col-nowrap">
+            <el-table-column label="操作" width="132" :fixed="isCompact ? false : 'right'" class-name="cy-col-nowrap">
               <template #default="{ row }">
                 <div class="kg-edge-ops">
                   <el-button

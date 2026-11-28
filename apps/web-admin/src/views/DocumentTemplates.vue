@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 import { localTime, serverFilename } from '@cyshuhe/shared'
 
@@ -655,7 +655,18 @@ async function downloadOriginal(o: Official) {
   window.setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 
-onMounted(() => { load(); loadOfficial(); loadVerdictRules() })
+const isCompact = ref(typeof window !== 'undefined' ? window.innerWidth <= 1024 : false)
+function syncCompact() {
+  if (typeof window !== 'undefined') isCompact.value = window.innerWidth <= 1024
+}
+onMounted(() => {
+  syncCompact()
+  window.addEventListener('resize', syncCompact)
+  load(); loadOfficial(); loadVerdictRules()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncCompact)
+})
 </script>
 
 <template>
@@ -701,7 +712,7 @@ onMounted(() => { load(); loadOfficial(); loadVerdictRules() })
           <span v-else class="muted">系统标准模板</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="196" align="right" fixed="right" class-name="cy-col-nowrap">
+      <el-table-column label="操作" width="196" align="right" :fixed="isCompact ? false : 'right'" class-name="cy-col-nowrap">
         <template #default="{ row }">
           <el-button
             link
@@ -730,7 +741,7 @@ onMounted(() => { load(); loadOfficial(); loadVerdictRules() })
           </el-table-column>
           <el-table-column prop="version" label="版本" min-width="180" />
           <el-table-column prop="used_for" label="适用场景" min-width="210" />
-          <el-table-column label="操作" width="168" align="right" fixed="right" class-name="cy-col-nowrap">
+          <el-table-column label="操作" width="168" align="right" :fixed="isCompact ? false : 'right'" class-name="cy-col-nowrap">
             <template #default="{ row }">
               <el-button v-if="row.file" link type="primary" size="small" @click="downloadOriginal(row)">下载原件</el-button>
               <a :href="row.source_url" target="_blank" rel="noopener noreferrer" class="src">官方来源</a>

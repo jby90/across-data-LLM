@@ -247,28 +247,34 @@ class DigestTestIn(BaseModel):
         return s
 
 
-def _cfg_out(cfg) -> dict:
+def _cfg_out(cfg, *, is_super: bool = True) -> dict:
+    rcpts = list(cfg.recipients or [])
+    smtp_bound = bool((cfg.smtp_host or "").strip())
+    show_rcpts = is_super or not smtp_bound
     return {
         "enabled": bool(cfg.enabled),
         "weekday": cfg.weekday,
         "hour_utc": cfg.hour_utc,
         "lookback_days": cfg.lookback_days,
         "min_level": cfg.min_level,
-        "recipients": list(cfg.recipients or []),
-        "smtp_host": cfg.smtp_host or "",
-        "smtp_port": cfg.smtp_port or 587,
-        "smtp_user": cfg.smtp_user or "",
-        "smtp_from": cfg.smtp_from or "",
+        "recipients": rcpts if show_rcpts else [],
+        "recipient_count": len(rcpts),
+        "smtp_host": (cfg.smtp_host or "") if is_super else "",
+        "smtp_port": (cfg.smtp_port or 587) if is_super else 587,
+        "smtp_user": (cfg.smtp_user or "") if is_super else "",
+        "smtp_from": (cfg.smtp_from or "") if is_super else "",
         "next_run_at": cfg.next_run_at.isoformat() if cfg.next_run_at else None,
         "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
     }
 
 
 @router.get("/digest-config")
-async def get_digest_config(_: AdminDep, session: SessionDep) -> dict:
+async def get_digest_config(admin: AdminDep, session: SessionDep) -> dict:
+    from app.iam.models import Role
+
     cfg = await wd.get_or_create_config(session)
     await session.commit()
-    return _cfg_out(cfg)
+    return _cfg_out(cfg, is_super=(admin.role == Role.PLATFORM_ADMIN))
 
 
 @router.put("/digest-config")
@@ -277,7 +283,17 @@ async def update_digest_config(
 ) -> dict:
     from app.iam.models import Role
 
+    is_super = admin.role == Role.PLATFORM_ADMIN
+    if not is_super and (
+        body.smtp_host.strip()
+        or body.smtp_user.strip()
+        or body.smtp_from.strip()
+    ):
+        raise HTTPException(403, "发信邮件服务器配置仅限超级管理员维护")
     cfg = await wd.get_or_create_config(session)
+    smtp_bound = bool((cfg.smtp_host or "").strip())
+    if not is_super and smtp_bound and body.recipients:
+        raise HTTPException(403, "已绑定外部发信服务器时，订阅邮箱列表仅限超级管理员维护")
     clean_rcpts = list(
         dict.fromkeys(r.strip() for r in body.recipients if isinstance(r, str) and "@" in r.strip())
     )
@@ -286,12 +302,14 @@ async def update_digest_config(
     cfg.hour_utc = body.hour_utc
     cfg.lookback_days = body.lookback_days
     cfg.min_level = body.min_level
-    cfg.recipients = clean_rcpts
-    if admin.role == Role.PLATFORM_ADMIN:
+    if is_super:
+        cfg.recipients = clean_rcpts
         cfg.smtp_host = body.smtp_host.strip()
         cfg.smtp_port = body.smtp_port
         cfg.smtp_user = body.smtp_user.strip()
         cfg.smtp_from = body.smtp_from.strip()
+    elif not smtp_bound:
+        cfg.recipients = clean_rcpts
     cfg.next_run_at = (
         wd.compute_next_digest_run(datetime.now(UTC), body.weekday, body.hour_utc)
         if body.enabled
@@ -299,8 +317,9 @@ async def update_digest_config(
     )
     await session.commit()
     await session.refresh(cfg)
-    set_detail(request, summary=f"配置舆情合规周报定时推送（启用：{body.enabled}，收件人：{len(clean_rcpts)} 个）")
-    return _cfg_out(cfg)
+    rcpt_len = len(cfg.recipients or [])
+    set_detail(request, summary=f"配置舆情合规周报定时推送（启用：{body.enabled}，收件人：{rcpt_len} 个）")
+    return _cfg_out(cfg, is_super=is_super)
 
 
 @router.get("/digest-preview")
@@ -322,9 +341,15 @@ async def preview_digest(
 
 @router.post("/digest-send")
 async def send_digest(
-    body: DigestSendIn, request: Request, _: AdminDep, session: SessionDep
+    body: DigestSendIn, request: Request, admin: AdminDep, session: SessionDep
 ) -> dict:
-    run = await wd.execute_digest_send(session, override_recipients=body.recipients)
+    from app.iam.models import Role
+
+    is_super = admin.role == Role.PLATFORM_ADMIN
+    if not is_super and body.recipients:
+        raise HTTPException(403, "外部邮箱群发仅限超级管理员操作，运维管理员仅可生成站内周报")
+    eff_rcpts = body.recipients if is_super else []
+    run = await wd.execute_digest_send(session, override_recipients=eff_rcpts)
     await session.commit()
     await session.refresh(run)
     set_detail(request, summary=f"生成并推送《{run.subject}》（共 {run.item_count} 条资讯）")
@@ -347,16 +372,17 @@ async def test_digest_email(
 ) -> dict:
     from app.iam.models import Role
 
-    is_super = admin.role == Role.PLATFORM_ADMIN
+    if admin.role != Role.PLATFORM_ADMIN:
+        raise HTTPException(403, "外部测试邮件仅限超级管理员发送")
     try:
         res = await wd.send_test_digest_email(
             session,
             recipients=body.recipients,
-            smtp_host=body.smtp_host if is_super else None,
-            smtp_port=body.smtp_port if is_super else None,
-            smtp_user=body.smtp_user if is_super else None,
-            smtp_from=body.smtp_from if is_super else None,
-            smtp_password=body.smtp_password if is_super else None,
+            smtp_host=body.smtp_host,
+            smtp_port=body.smtp_port,
+            smtp_user=body.smtp_user,
+            smtp_from=body.smtp_from,
+            smtp_password=body.smtp_password,
         )
         await session.commit()
     except ValueError as exc:
@@ -407,8 +433,11 @@ async def collect_opinion_now(request: Request, _: AdminDep) -> dict:
 
 @router.get("/digest-runs")
 async def list_digest_runs(
-    _: AdminDep, session: SessionDep, limit: int = Query(20, ge=1, le=50)
+    admin: AdminDep, session: SessionDep, limit: int = Query(20, ge=1, le=50)
 ) -> list[dict]:
+    from app.iam.models import Role
+
+    is_super = admin.role == Role.PLATFORM_ADMIN
     rows = (
         await session.scalars(
             select(OpinionDigestRun).order_by(OpinionDigestRun.created_at.desc()).limit(limit)
@@ -422,7 +451,8 @@ async def list_digest_runs(
             "period_end": r.period_end.isoformat(),
             "item_count": r.item_count,
             "delivery_mode": r.delivery_mode,
-            "recipients": list(r.recipients or []),
+            "recipients": list(r.recipients or []) if is_super else [],
+            "recipient_count": len(r.recipients or []),
             "status": r.status,
             "note": _clean_run_note(r.note),
             "created_at": r.created_at.isoformat() if r.created_at else None,
